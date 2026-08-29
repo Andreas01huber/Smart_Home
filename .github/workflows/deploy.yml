@@ -1,0 +1,143 @@
+# Testen und ausliefern.
+#
+# Ablauf bei jedem Push auf main:
+#   1. GitHub prüft auf einem geliehenen Linux-Rechner Typen und Tests.
+#   2. Erst wenn das grün ist, holt der Server zu Hause den neuen Stand und
+#      startet den Docker-Container neu.
+#
+# Schritt 2 braucht einen "self-hosted Runner" auf dem Windows-Server -
+# ein kleines Programm, das dort auf Aufträge wartet. Einrichtung einmalig,
+# Anleitung in deploy/GIT-WORKFLOW.md.
+
+name: Test und Deploy
+
+on:
+  push:
+    branches: [main]
+  # Erlaubt den Deploy auch von Hand über die Actions-Oberfläche, ohne Push.
+  workflow_dispatch:
+
+# Zwei Deploys gleichzeitig würden sich beim Bauen des Images in die Quere
+# kommen. Der neuere gewinnt, der ältere wird abgebrochen.
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typen und Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # --include=dev ist nötig: tsx und typescript stehen in devDependencies
+      # und werden zum Prüfen wie zum Laufen gebraucht.
+      - name: Abhängigkeiten installieren
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: Typen prüfen
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+  deploy:
+    name: Auf den Heim-Server ausliefern
+    # Ohne grüne Tests wird nichts ausgeliefert.
+    needs: test
+    runs-on: [self-hosted, windows]
+
+    env:
+      # Der Ordner auf dem Server, in dem die App tatsächlich läuft. Bewusst
+      # NICHT der Arbeitsordner des Runners: Dort liegen weder secrets.json
+      # noch die Historie, und beides darf ein Deploy nicht anfassen.
+      DEPLOY_DIR: C:\SmartHome
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker prüfen
+        shell: pwsh
+        run: |
+          docker version --format '{{.Server.Version}}'
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '::error::Docker antwortet nicht. Läuft Docker Desktop auf dem Server?'
+            exit 1
+          }
+
+      - name: Code in den Deploy-Ordner übertragen
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:DEPLOY_DIR | Out-Null
+
+          # /E kopiert und ergänzt, löscht aber nichts. Bewusst kein /MIR:
+          # Ein Spiegelabgleich, der einmal an der falschen Stelle greift,
+          # würde die Historie in data\ mitnehmen. Verwaiste Dateien im
+          # Deploy-Ordner sind das kleinere Übel.
+          #
+          # Ausgenommen bleiben die Dinge, die dem Server gehören und nicht
+          # dem Repository: Historie, Zugangsdaten, lokale Compose-Variablen.
+          robocopy . $env:DEPLOY_DIR /E `
+            /XD .git .github node_modules data `
+            /XF secrets.json .env `
+            /NFL /NDL /NJH /NJS /NP
+
+          # robocopy meldet Erfolg mit 0-7, erst ab 8 ist es ein Fehler.
+          if ($LASTEXITCODE -ge 8) {
+            Write-Host "::error::robocopy ist mit $LASTEXITCODE fehlgeschlagen."
+            exit 1
+          }
+          exit 0
+
+      - name: Zugangsdaten vorhanden?
+        shell: pwsh
+        run: |
+          $secrets = Join-Path $env:DEPLOY_DIR 'secrets.json'
+          if (-not (Test-Path $secrets)) {
+            # Kein Abbruch: Alles außer der Wallbox läuft auch ohne. Aber ein
+            # fehlender Pfad würde von Docker als ORDNER angelegt, und dann
+            # startet der Container nicht mehr - deshalb hier abfangen.
+            Write-Host "::warning::secrets.json fehlt in $env:DEPLOY_DIR - die Wallbox bleibt leer."
+            '{ "_hinweis": "Platzhalter. Echte Zugangsdaten hier eintragen." }' |
+              Set-Content -Path $secrets -Encoding utf8
+          }
+
+      - name: Container bauen und starten
+        shell: pwsh
+        working-directory: C:\SmartHome
+        run: |
+          docker compose up -d --build --remove-orphans
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '::error::docker compose ist fehlgeschlagen.'
+            exit 1
+          }
+
+      - name: Läuft er wirklich?
+        shell: pwsh
+        working-directory: C:\SmartHome
+        run: |
+          # Nicht auf "gestartet" vertrauen, sondern nachsehen. Der erste Start
+          # nach einem Neubau dauert länger, deshalb bis zu 90 Sekunden.
+          $ok = $false
+          foreach ($i in 1..45) {
+            try {
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:4173/api/snapshot' `
+                     -UseBasicParsing -TimeoutSec 3
+              if ($r.StatusCode -eq 200) { $ok = $true; break }
+            } catch { Start-Sleep -Seconds 2 }
+          }
+
+          if (-not $ok) {
+            Write-Host '::error::Der Server antwortet nach 90 Sekunden nicht.'
+            docker compose ps
+            docker compose logs --tail 60
+            exit 1
+          }
+
+          Write-Host 'Der Server antwortet auf Port 4173.'
+          docker compose ps
