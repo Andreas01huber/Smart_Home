@@ -213,7 +213,50 @@ if (-not (Test-Path $secrets)) {
   }
 }
 
-# --- 7. Log ---------------------------------------------------------------
+# --- 7. Zugriff von aussen (Cloudflare-Tunnel) ----------------------------
+Titel 'Zugriff von aussen (Cloudflare-Tunnel)'
+
+$tunnelAufgabe = Get-ScheduledTask -TaskName 'SmartHomeTunnel' -ErrorAction SilentlyContinue
+$cfLaeuft = @(Get-Process -Name 'cloudflared' -ErrorAction SilentlyContinue)
+
+if ($cfLaeuft.Count -gt 0) {
+  Write-Host "  cloudflared laeuft (Prozess $($cfLaeuft[0].Id), gestartet $($cfLaeuft[0].StartTime))." -ForegroundColor Green
+} else {
+  Write-Host '  cloudflared laeuft nicht.' -ForegroundColor Red
+  Merke 'fehler' @(
+    'Der Cloudflare-Tunnel laeuft nicht - von aussen ist nichts erreichbar.',
+    'Eine Quick-Tunnel-Adresse (...trycloudflare.com) ist ausserdem nach jedem',
+    'Neustart eine andere; die alte kommt nie wieder.',
+    'Dauerhaft einrichten: "Tunnel einrichten.cmd" als Administrator.'
+  )
+}
+
+$urlDatei = Join-Path $DeployDir 'logs\tunnel-url.txt'
+if (Test-Path $urlDatei) {
+  $adresse = (Get-Content $urlDatei -Raw).Trim()
+  $stand = (Get-Item $urlDatei).LastWriteTime
+  Write-Host '  Aktuelle Adresse:'
+  Write-Host "      $adresse" -ForegroundColor White
+  Write-Host ("  Eingetragen am {0:dd.MM.yyyy HH:mm}" -f $stand)
+} else {
+  Write-Host '  Keine Adresse hinterlegt (logs\tunnel-url.txt fehlt).' -ForegroundColor Yellow
+  if ($cfLaeuft.Count -gt 0 -and -not $tunnelAufgabe) {
+    Merke 'warnung' @(
+      'cloudflared laeuft, wurde aber von Hand gestartet - die Adresse steht nur',
+      'in dem Fenster, in dem es gestartet wurde. Wird das Fenster geschlossen',
+      'oder der PC neu gestartet, ist der Zugriff von aussen weg.',
+      'Dauerhaft einrichten: "Tunnel einrichten.cmd" als Administrator.'
+    )
+  }
+}
+
+if ($tunnelAufgabe) {
+  Write-Host "  Autostart-Aufgabe SmartHomeTunnel: $($tunnelAufgabe.State)"
+} else {
+  Write-Host '  Autostart-Aufgabe SmartHomeTunnel: nicht eingerichtet.' -ForegroundColor Yellow
+}
+
+# --- 8. Log ---------------------------------------------------------------
 Titel 'Letzte Zeilen aus logs\server.log'
 
 $log = Join-Path $DeployDir 'logs\server.log'

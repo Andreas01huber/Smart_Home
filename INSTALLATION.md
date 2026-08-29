@@ -250,11 +250,31 @@ loszuwerden, das man verloren hat.
 | Durchprobieren | Ab dem fünften Fehlversuch je Herkunft gesperrt, die Sperre verdoppelt sich bis auf eine Viertelstunde. |
 | Suchmaschinen | Die Anmeldeseite ist auf `noindex` gesetzt. |
 
+### Tunnel dauerhaft laufen lassen
+
+Wird `cloudflared` von Hand in einem Fenster gestartet, endet der Zugriff von
+außen, sobald dieses Fenster zugeht, der PC neu startet oder die Verbindung
+einmal abreißt. Die Adresse ist dann **endgültig weg** — beim nächsten Start
+vergibt Cloudflare eine neue.
+
+Deshalb einmalig **Tunnel einrichten.cmd** als Administrator ausführen. Das legt
+die Autostart-Aufgabe `SmartHomeTunnel` an: Sie startet mit Windows, läuft ohne
+angemeldeten Benutzer und baut den Tunnel nach einem Abbruch von selbst wieder
+auf.
+
+Die jeweils gültige Adresse steht danach in `logs\tunnel-url.txt` und wird von
+**Server pruefen.cmd** mit angezeigt:
+
+```bash
+type C:\SmartHome\logs\tunnel-url.txt
+```
+
 ### Grenzen — bitte lesen
 
 Eine `trycloudflare.com`-Adresse ist ein **Schnelltunnel**: öffentlich
 erreichbar für jeden, der die Adresse kennt, und die Adresse **ändert sich bei
-jedem Neustart** des Tunnels. Für den Dauerbetrieb ist das nichts.
+jedem Neustart** des Tunnels — auch mit der Autostart-Aufgabe. Die hält den
+Tunnel nur am Leben, sie macht die Adresse nicht fest.
 
 Wer den Tunnel behalten will, richtet bei Cloudflare einen **benannten Tunnel**
 mit fester Adresse ein. Noch besser: **Cloudflare Access** davorschalten — dann
