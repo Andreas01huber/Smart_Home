@@ -3,7 +3,11 @@
 # Ablauf bei jedem Push auf main:
 #   1. GitHub prüft auf einem geliehenen Linux-Rechner Typen und Tests.
 #   2. Erst wenn das grün ist, holt der Server zu Hause den neuen Stand und
-#      startet den Docker-Container neu.
+#      startet den Dienst neu.
+#
+# Der Server läuft direkt unter Windows mit Node, nicht in Docker: Die
+# Maschine ist dafür zu alt. Gestartet wird über die geplante Aufgabe
+# "SmartHome", die deploy/run-server.cmd ausführt.
 #
 # Schritt 2 braucht einen "self-hosted Runner" auf dem Windows-Server -
 # ein kleines Programm, das dort auf Aufträge wartet. Einrichtung einmalig,
@@ -17,8 +21,8 @@ on:
   # Erlaubt den Deploy auch von Hand über die Actions-Oberfläche, ohne Push.
   workflow_dispatch:
 
-# Zwei Deploys gleichzeitig würden sich beim Bauen des Images in die Quere
-# kommen. Der neuere gewinnt, der ältere wird abgebrochen.
+# Zwei Deploys gleichzeitig würden sich beim Kopieren und beim Neustart des
+# Servers in die Quere kommen. Der neuere gewinnt, der ältere wird abgebrochen.
 concurrency:
   group: deploy
   cancel-in-progress: true
@@ -61,17 +65,63 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Docker prüfen
-        shell: pwsh
+      - name: Node und Autostart-Aufgabe prüfen
+        shell: powershell
         run: |
-          docker version --format '{{.Server.Version}}'
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host '::error::Docker antwortet nicht. Läuft Docker Desktop auf dem Server?'
+          $node = (Get-Command node -ErrorAction SilentlyContinue)
+          if (-not $node) {
+            Write-Host '::error::Node.js ist auf dem Server nicht installiert (mindestens Version 22).'
             exit 1
           }
+          $version = (node -v) -replace '^v', ''
+          $gross = [int]($version -split '\.')[0]
+          if ($gross -lt 22) {
+            Write-Host "::error::Node $version ist zu alt - gebraucht wird 22 oder neuer."
+            exit 1
+          }
+          Write-Host "Node $version gefunden."
+
+          # Der Server läuft als geplante Aufgabe. Sie anzulegen braucht
+          # Administratorrechte, die der Runner-Dienst nicht hat - deshalb hier
+          # nur prüfen und mit klarer Ansage abbrechen.
+          if (-not (Get-ScheduledTask -TaskName 'SmartHome' -ErrorAction SilentlyContinue)) {
+            Write-Host '::error::Die Aufgabe "SmartHome" fehlt. Auf dem Server einmalig "Server-PC einrichten.cmd" ausfuehren.'
+            exit 1
+          }
+          Write-Host 'Autostart-Aufgabe "SmartHome" ist eingerichtet.'
+
+      - name: Server anhalten
+        shell: powershell
+        run: |
+          Stop-ScheduledTask -TaskName 'SmartHome' -ErrorAction SilentlyContinue
+
+          # Die Aufgabe startet run-server.cmd, das seinerseits Node startet.
+          # Wird die Aufgabe beendet, überlebt der Node-Prozess das und hält
+          # den Port weiter besetzt. Also gezielt den freimachen, der auf 4173
+          # hört.
+          #
+          # Das ist ein harter Abbruch ohne sauberes Herunterfahren. Verloren
+          # gehen dabei höchstens die Energiewerte seit dem letzten
+          # automatischen Sichern - die Historie schreibt sich alle zwei
+          # Minuten selbst weg.
+          foreach ($v in Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue) {
+            Stop-Process -Id $v.OwningProcess -Force -ErrorAction SilentlyContinue
+          }
+
+          # Erst weitermachen, wenn der Port wirklich frei ist - sonst kann der
+          # neue Server nicht binden und der Deploy scheitert erst ganz hinten.
+          foreach ($i in 1..20) {
+            if (-not (Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue)) {
+              Write-Host 'Port 4173 ist frei.'
+              exit 0
+            }
+            Start-Sleep -Seconds 1
+          }
+          Write-Host '::error::Port 4173 ist nach 20 Sekunden noch belegt.'
+          exit 1
 
       - name: Code in den Deploy-Ordner übertragen
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path $env:DEPLOY_DIR | Out-Null
 
@@ -86,7 +136,7 @@ jobs:
           # Durchgang 2: die Ordner mit Code und Doku - als Spiegel (/MIR). Nur
           # so verschwindet auf dem Server auch das, was im Repository gelöscht
           # oder umbenannt wurde. Ohne Spiegel bliebe die alte Datei liegen und
-          # landete weiter im Image.
+          # würde weiter ausgeliefert - beim Umbenennen lägen beide Fassungen da.
           #
           # Dass hier gelöscht werden darf, ist ungefährlich: data\ und
           # secrets.json liegen im Stamm und damit außerhalb dieser Bäume. Das
@@ -108,34 +158,53 @@ jobs:
           exit 0
 
       - name: Zugangsdaten vorhanden?
-        shell: pwsh
+        shell: powershell
         run: |
           $secrets = Join-Path $env:DEPLOY_DIR 'secrets.json'
           if (-not (Test-Path $secrets)) {
-            # Kein Abbruch: Alles außer der Wallbox läuft auch ohne. Aber ein
-            # fehlender Pfad würde von Docker als ORDNER angelegt, und dann
-            # startet der Container nicht mehr - deshalb hier abfangen.
+            # Kein Abbruch: Alles außer der Wallbox läuft auch ohne sie.
             Write-Host "::warning::secrets.json fehlt in $env:DEPLOY_DIR - die Wallbox bleibt leer."
-            '{ "_hinweis": "Platzhalter. Echte Zugangsdaten hier eintragen." }' |
-              Set-Content -Path $secrets -Encoding utf8
           }
 
-      - name: Container bauen und starten
-        shell: pwsh
+      - name: Abhängigkeiten aktualisieren
+        shell: powershell
         working-directory: C:\SmartHome
         run: |
-          docker compose up -d --build --remove-orphans
+          # npm ci bei jedem Deploy wäre Verschwendung und würde ohne Internet
+          # scheitern, obwohl sich gar nichts geändert hat. Deshalb nur dann,
+          # wenn node_modules fehlt oder package-lock.json sich geändert hat -
+          # gemerkt an einer Prüfsumme neben den Abhängigkeiten.
+          $marke = 'node_modules\.deploy-lock-hash'
+          $jetzt = (Get-FileHash 'package-lock.json' -Algorithm SHA256).Hash
+          $vorher = if (Test-Path $marke) { Get-Content $marke -Raw } else { '' }
+
+          if ((Test-Path 'node_modules\tsx') -and $vorher.Trim() -eq $jetzt) {
+            Write-Host 'Abhaengigkeiten unveraendert - uebersprungen.'
+            exit 0
+          }
+
+          # --include=dev ist nötig: tsx steht in devDependencies, wird aber
+          # zum Laufen gebraucht - der Server läuft aus den TypeScript-Quellen.
+          npm ci --include=dev --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) {
-            Write-Host '::error::docker compose ist fehlgeschlagen.'
+            Write-Host '::error::npm ci ist fehlgeschlagen (kein Internet auf dem Server?).'
             exit 1
           }
+          Set-Content -Path $marke -Value $jetzt -Encoding ascii
+          Write-Host 'Abhaengigkeiten neu installiert.'
+
+      - name: Server starten
+        shell: powershell
+        run: |
+          Start-ScheduledTask -TaskName 'SmartHome'
+          Write-Host 'Aufgabe "SmartHome" gestartet.'
 
       - name: Läuft er wirklich?
-        shell: pwsh
-        working-directory: C:\SmartHome
+        shell: powershell
         run: |
           # Nicht auf "gestartet" vertrauen, sondern nachsehen. Der erste Start
-          # nach einem Neubau dauert länger, deshalb bis zu 90 Sekunden.
+          # dauert länger, weil tsx den Code einmal übersetzt - deshalb bis zu
+          # 90 Sekunden.
           $ok = $false
           foreach ($i in 1..45) {
             try {
@@ -145,23 +214,23 @@ jobs:
             } catch { Start-Sleep -Seconds 2 }
           }
 
+          $log = Join-Path $env:DEPLOY_DIR 'logs\server.log'
+
           if (-not $ok) {
             Write-Host '::error::Der Server antwortet nach 90 Sekunden nicht.'
-            docker compose ps
-            docker compose logs --tail 60
+            if (Test-Path $log) {
+              Write-Host '--- letzte 60 Zeilen aus logs\server.log ---'
+              Get-Content $log -Tail 60
+            } else {
+              Write-Host "Keine Logdatei unter $log - die Aufgabe ist vermutlich gar nicht angelaufen."
+              Get-ScheduledTask -TaskName 'SmartHome' | Get-ScheduledTaskInfo
+            }
             exit 1
           }
 
           Write-Host 'Der Server antwortet auf Port 4173.'
-          docker compose ps
-
-      - name: Alte Images aufräumen
-        shell: pwsh
-        # Erst wenn der neue Container nachweislich antwortet. Vorher wäre es
-        # leichtsinnig: Das vorige Image ist bis dahin der Rückweg.
-        run: |
-          # Jeder Deploy baut ein neues Image; das vorherige verliert seinen
-          # Namen und bleibt als namenloses "dangling image" liegen. Nach ein
-          # paar Wochen sind das etliche Gigabyte auf der Systemplatte.
-          docker image prune -f
-          exit 0
+          # Die Adressen, unter denen das Dashboard jetzt erreichbar ist -
+          # praktisch, wenn sich die IP des Servers einmal geändert hat.
+          Get-NetIPAddress -AddressFamily IPv4 |
+            Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+            ForEach-Object { '   http://' + $_.IPAddress + ':4173' }

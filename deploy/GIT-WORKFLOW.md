@@ -1,14 +1,18 @@
-# Push → Test → Container läuft
+# Push → Test → Server läuft neu
 
 Ziel: Du änderst etwas am Code, machst `git push`, und wenige Minuten später
-läuft auf dem Server zu Hause der neue Stand im Docker-Container. Ohne ZIP, ohne
-Kopieren, ohne Handgriffe am Server.
+läuft auf dem Server zu Hause der neue Stand. Ohne ZIP, ohne Kopieren, ohne
+Handgriffe am Server.
+
+Der Server läuft dabei **direkt unter Windows mit Node**, nicht in Docker — die
+Maschine ist dafür zu alt. Gestartet wird er über die geplante Aufgabe
+`SmartHome`, die [run-server.cmd](run-server.cmd) ausführt.
 
 Der Ablauf steht in [.github/workflows/deploy.yml](../.github/workflows/deploy.yml):
 
 1. **GitHub prüft** auf einem geliehenen Linux-Rechner Typen und alle Tests.
-2. **Nur wenn das grün ist**, holt der Server zu Hause den neuen Stand und
-   startet den Container neu.
+2. **Nur wenn das grün ist**, hält der Server zu Hause den laufenden Dienst an,
+   holt den neuen Stand und startet ihn wieder.
 3. **Der Workflow prüft nach**, ob der Server wirklich antwortet — und schlägt
    fehl, wenn nicht. „Gestartet" ist nicht dasselbe wie „läuft".
 
@@ -26,10 +30,10 @@ Aufträge von GitHub wartet.
 Im Projektordner auf deinem Arbeits-PC:
 
 ```bash
-git init -b main
-git add -A
-git commit -m "SmartHome"
 git remote add origin https://github.com/<dein-account>/Smart_Home.git
+```
+
+```bash
 git push -u origin main
 ```
 
@@ -37,20 +41,19 @@ Vorher lohnt ein Blick auf `git status`: `secrets.json`, `data/` und
 `node_modules/` dürfen dort **nicht** auftauchen — die
 [.gitignore](../.gitignore) hält sie draußen.
 
-### 2. Docker Desktop auf dem Server
+### 2. Node und Autostart-Aufgabe auf dem Server
 
-Muss installiert **und gestartet** sein. Ein Punkt, über den fast jeder stolpert:
-Docker Desktop startet unter Windows normalerweise erst, wenn sich ein Benutzer
-anmeldet. Auf einem Server, der nur hochfährt, läuft dann nichts.
+Auf dem Server einmalig
+[Server-PC einrichten.cmd](../Server-PC%20einrichten.cmd) ausführen. Das
+installiert die Abhängigkeiten, öffnet die Firewall und legt die geplante
+Aufgabe `SmartHome` an, die den Server bei jedem Hochfahren startet.
 
-Zwei Wege:
+Der Workflow legt diese Aufgabe **nicht** selbst an: Dafür bräuchte er
+Administratorrechte, die der Runner-Dienst nicht hat. Fehlt sie, bricht der
+Deploy mit einer entsprechenden Meldung ab.
 
-- In Docker Desktop unter **Settings → General** die Option
-  **„Start Docker Desktop when you log in"** aktivieren und den Server so
-  einrichten, dass er sich nach dem Hochfahren automatisch anmeldet.
-- Oder auf Docker Desktop verzichten und die App über
-  [Server-PC einrichten.cmd](../Server-PC%20einrichten.cmd) direkt mit Node
-  betreiben. Dann entfällt dieser Workflow-Teil.
+Node muss in Version **22 oder neuer** installiert sein — der Workflow prüft das
+und sagt es deutlich, wenn nicht.
 
 ### 3. Runner auf dem Server installieren
 
@@ -61,31 +64,28 @@ Token — den in einer PowerShell auf dem Server ausführen.
 Bei der Frage nach Labels zusätzlich `windows` vergeben, falls es nicht ohnehin
 gesetzt ist; der Workflow sucht nach `self-hosted` **und** `windows`.
 
-Danach den Runner als Dienst einrichten, damit er einen Neustart übersteht —
-und zwar **unter dem Benutzer, unter dem auch Docker Desktop läuft**:
+Danach den Runner als Dienst einrichten, damit er einen Neustart übersteht:
 
 ```bash
-./svc.cmd install DEIN-PC\dein-benutzername
+./svc.cmd install
 ```
 
 ```bash
 ./svc.cmd start
 ```
 
-Der Benutzername ist hier nicht optional, auch wenn `./svc.cmd install` ohne
-Argument funktioniert. Ohne ihn läuft der Dienst als `NT AUTHORITY\NETWORK
-SERVICE`, und dieses Konto kommt an die Docker-Engine nicht heran: Docker Desktop
-gibt seine Named Pipe nur der lokalen Gruppe `docker-users` frei, in der ein
-Dienstkonto standardmäßig nicht ist. Der Deploy scheitert dann mit
-„Docker antwortet nicht", obwohl Docker sichtbar läuft.
-
-Ist der Dienst schon ohne Benutzer eingerichtet, hilft entweder ein
-`./svc.cmd uninstall` und eine Neuinstallation mit Benutzernamen — oder das
-Konto nachträglich in die Gruppe aufnehmen (Eingabeaufforderung als
-Administrator):
+Ein Hinweis zu den Rechten: Der Dienst muss die geplante Aufgabe `SmartHome`
+starten und anhalten dürfen. Als `NT AUTHORITY\NETWORK SERVICE` — die
+Voreinstellung — geht das für eine Aufgabe, die unter `SYSTEM` läuft, nicht
+zuverlässig. Scheitert der Schritt „Server starten" an fehlenden Rechten, den
+Dienst mit einem Administratorkonto einrichten:
 
 ```bash
-net localgroup docker-users "NETWORK SERVICE" /add
+./svc.cmd uninstall
+```
+
+```bash
+./svc.cmd install DEIN-PC\dein-benutzername
 ```
 
 ### 4. Zugangsdaten auf dem Server ablegen
@@ -93,10 +93,8 @@ net localgroup docker-users "NETWORK SERVICE" /add
 `secrets.json` ist absichtlich nicht im Repository. Einmalig von Hand nach
 `C:\SmartHome\secrets.json` kopieren.
 
-Fehlt die Datei, legt der Workflow einen Platzhalter an und meldet eine Warnung:
-Alles außer der Wallbox läuft dann normal weiter. (Der Platzhalter ist kein
-Schönheitsfehler — ohne ihn würde Docker beim Einhängen einen *Ordner* dieses
-Namens anlegen, und der Container startet gar nicht mehr.)
+Fehlt die Datei, meldet der Workflow eine Warnung und läuft weiter: Alles außer
+der Wallbox funktioniert auch ohne sie.
 
 ### 5. Historie übernehmen
 
@@ -112,7 +110,8 @@ fasst ihn kein Deploy mehr an.
 git push
 ```
 
-Mehr nicht. Den Fortschritt zeigt im Repository der Reiter **Actions**.
+Mehr nicht. Den Fortschritt zeigt im Repository der Reiter **Actions**. Am Ende
+listet der Workflow die Adressen auf, unter denen das Dashboard erreichbar ist.
 
 Ein Deploy ohne Code-Änderung — etwa nach einer Änderung an `config.json` auf
 dem Server — geht über **Actions → Test und Deploy → Run workflow**.
@@ -123,21 +122,38 @@ dem Server — geht über **Actions → Test und Deploy → Run workflow**.
 
 | | |
 | --- | --- |
-| **Wird überschrieben** | Quellcode, `Dockerfile`, `docker-compose.yml`, `config.json`, Anleitungen |
-| **Bleibt unangetastet** | `C:\SmartHome\data` (Historie), `C:\SmartHome\secrets.json`, eine lokale `.env` |
-| **Kommt gar nicht an** | `.git`, `.github`, `node_modules` |
+| **Wird überschrieben** | Quellcode, `config.json`, Startskripte, Anleitungen |
+| **Bleibt unangetastet** | `C:\SmartHome\data` (Historie), `secrets.json`, `logs\`, `node_modules\`, eine lokale `.env` |
+| **Kommt gar nicht an** | `.git`, `.github` |
 
 Kopiert wird in zwei Durchgängen. Die Dateien im Projektstamm kommen ohne
-Unterordner und ohne Löschen (`/LEV:1`) — dort liegen `data\` und
-`secrets.json`. Die Ordner `apps`, `packages`, `tools`, `deploy` und `docs`
-dagegen als **Spiegel** (`/MIR`): Was du im Repository löschst oder umbenennst,
-verschwindet damit auch auf dem Server. Ohne Spiegel bliebe die alte Datei dort
-liegen und landete weiter im Image.
+Unterordner und ohne Löschen (`/LEV:1`) — dort liegen `data\`, `secrets.json`,
+`logs\` und `node_modules\`. Die Ordner `apps`, `packages`, `tools`, `deploy`
+und `docs` dagegen als **Spiegel** (`/MIR`): Was du im Repository löschst oder
+umbenennst, verschwindet damit auch auf dem Server. Ohne Spiegel bliebe die alte
+Datei dort liegen und würde weiter ausgeliefert.
 
 Dass beim Spiegeln gelöscht werden darf, ist ungefährlich — nicht weil die
-Ausschlussschalter stimmen, sondern weil `data\` und `secrets.json` im Stamm
-liegen und damit außerhalb der gespiegelten Bäume. Das lässt sich nicht
-versehentlich kaputtkonfigurieren.
+Ausschlussschalter stimmen, sondern weil alles Schützenswerte im Stamm liegt und
+damit außerhalb der gespiegelten Bäume. Das lässt sich nicht versehentlich
+kaputtkonfigurieren.
+
+`npm ci` läuft nur, wenn `package-lock.json` sich geändert hat oder
+`node_modules` fehlt — gemerkt an einer Prüfsumme. Sonst wäre jeder Deploy
+unnötig langsam und würde ohne Internet scheitern, obwohl sich nichts geändert
+hat.
+
+---
+
+## Ein Nebeneffekt, den du kennen solltest
+
+Der Deploy beendet den laufenden Server hart. Windows kennt kein sauberes
+Abbruchsignal für einen Hintergrundprozess, deshalb geht das nicht anders.
+
+Verloren gehen dabei die Energiewerte **seit dem letzten automatischen
+Sichern** — die Historie schreibt sich alle zwei Minuten selbst weg, mehr als
+zwei Minuten sind es also nie. Für die Tagesbilanz ist das nicht spürbar; wer
+ganz sicher gehen will, deployt nicht mitten in der Mittagsspitze.
 
 ---
 
@@ -145,15 +161,18 @@ versehentlich kaputtkonfigurieren.
 
 | Meldung | Ursache |
 | --- | --- |
-| `Docker antwortet nicht` | Docker Desktop läuft auf dem Server nicht — siehe Punkt 2. |
 | Job bleibt auf „Waiting for a runner" | Der Runner-Dienst läuft nicht: auf dem Server `./svc.cmd status`. |
-| `Der Server antwortet nach 90 Sekunden nicht` | Der Workflow hängt `docker compose ps` und die letzten 60 Log-Zeilen an — dort steht der eigentliche Fehler. |
+| `Node.js ist auf dem Server nicht installiert` | Node 22+ fehlt — `Server-PC einrichten.cmd` ausführen. |
+| `Die Aufgabe "SmartHome" fehlt` | Einmalig `Server-PC einrichten.cmd` auf dem Server ausführen. |
+| `Port 4173 ist nach 20 Sekunden noch belegt` | Ein hängender Node-Prozess. Im Task-Manager beenden, dann Deploy wiederholen. |
+| `npm ci ist fehlgeschlagen` | Der Server hat gerade kein Internet. |
+| `Der Server antwortet nach 90 Sekunden nicht` | Der Workflow hängt die letzten 60 Zeilen aus `logs\server.log` an — dort steht der eigentliche Fehler. |
 | Tests rot, Deploy übersprungen | So gewollt. Erst reparieren, dann geht es von selbst weiter. |
 
 Auf dem Server direkt nachsehen:
 
 ```bash
-docker compose -f C:\SmartHome\docker-compose.yml logs -f
+Get-Content C:\SmartHome\logs\server.log -Tail 50 -Wait
 ```
 
 ---
