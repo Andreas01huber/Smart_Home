@@ -213,47 +213,87 @@ if (-not (Test-Path $secrets)) {
   }
 }
 
-# --- 7. Zugriff von aussen (Cloudflare-Tunnel) ----------------------------
-Titel 'Zugriff von aussen (Cloudflare-Tunnel)'
+# --- 7. Zugriff von aussen -------------------------------------------------
+Titel 'Zugriff von aussen'
+
+# Die feste Adresse zuerst: Wenn sie eingerichtet ist, ist der Cloudflare-
+# Schnelltunnel darunter nur noch eine Altlast und muss nicht laufen.
+$festeDatei = Join-Path $DeployDir 'logs\feste-adresse.txt'
+$hatFeste = $false
+if (Test-Path $festeDatei) {
+  $feste = (Get-Content $festeDatei -Raw).Trim()
+  if ($feste) {
+    $hatFeste = $true
+    Write-Host '  Feste Adresse (Tailscale):'
+    Write-Host "      $feste" -ForegroundColor White
+    $tsLaeuft = @(Get-Process -Name 'tailscaled', 'tailscale-ipn' -ErrorAction SilentlyContinue)
+    if ($tsLaeuft.Count -gt 0) {
+      Write-Host '  Tailscale laeuft.' -ForegroundColor Green
+    } else {
+      Write-Host '  Tailscale laeuft nicht.' -ForegroundColor Red
+      Merke 'fehler' @(
+        'Die feste Adresse ist eingerichtet, aber Tailscale laeuft nicht -',
+        'von aussen ist nichts erreichbar. Der Dienst startet normalerweise mit',
+        'Windows; pruefen mit:  Get-Service Tailscale'
+      )
+    }
+  }
+}
+
+if (-not $hatFeste) {
+  Write-Host '  Keine feste Adresse eingerichtet.' -ForegroundColor Yellow
+  Merke 'warnung' @(
+    'Es ist keine feste Adresse eingerichtet. Eine trycloudflare.com-Adresse',
+    'wechselt bei jedem Neustart des Tunnels und ist danach endgueltig weg.',
+    'Feste, kostenlose Adresse: "Feste Adresse einrichten.cmd" als Administrator.'
+  )
+}
 
 $tunnelAufgabe = Get-ScheduledTask -TaskName 'SmartHomeTunnel' -ErrorAction SilentlyContinue
 $cfLaeuft = @(Get-Process -Name 'cloudflared' -ErrorAction SilentlyContinue)
 
-if ($cfLaeuft.Count -gt 0) {
-  Write-Host "  cloudflared laeuft (Prozess $($cfLaeuft[0].Id), gestartet $($cfLaeuft[0].StartTime))." -ForegroundColor Green
+if ($hatFeste -and $cfLaeuft.Count -eq 0 -and -not $tunnelAufgabe) {
+  # Feste Adresse da, kein Cloudflare im Spiel - alles gut, nichts weiter melden.
+  Write-Host '  Cloudflare-Tunnel: nicht in Benutzung (wird nicht mehr gebraucht).'
 } else {
-  Write-Host '  cloudflared laeuft nicht.' -ForegroundColor Red
-  Merke 'fehler' @(
-    'Der Cloudflare-Tunnel laeuft nicht - von aussen ist nichts erreichbar.',
-    'Eine Quick-Tunnel-Adresse (...trycloudflare.com) ist ausserdem nach jedem',
-    'Neustart eine andere; die alte kommt nie wieder.',
-    'Dauerhaft einrichten: "Tunnel einrichten.cmd" als Administrator.'
-  )
-}
+  if ($cfLaeuft.Count -gt 0) {
+    Write-Host "  cloudflared laeuft (Prozess $($cfLaeuft[0].Id), gestartet $($cfLaeuft[0].StartTime))." -ForegroundColor Green
+    if ($hatFeste) {
+      Merke 'warnung' @(
+        'Es laufen beide Wege gleichzeitig: die feste Adresse und der alte',
+        'Cloudflare-Schnelltunnel. Der Tunnel wird nicht mehr gebraucht und kann',
+        'weg:  Unregister-ScheduledTask SmartHomeTunnel -Confirm:$false'
+      )
+    }
+  } elseif (-not $hatFeste) {
+    Write-Host '  cloudflared laeuft nicht.' -ForegroundColor Red
+    Merke 'fehler' @(
+      'Von aussen ist nichts erreichbar: weder eine feste Adresse noch ein',
+      'laufender Cloudflare-Tunnel.',
+      'Empfohlen: "Feste Adresse einrichten.cmd" als Administrator - die Adresse',
+      'bleibt dann dauerhaft dieselbe.'
+    )
+  }
 
-$urlDatei = Join-Path $DeployDir 'logs\tunnel-url.txt'
-if (Test-Path $urlDatei) {
-  $adresse = (Get-Content $urlDatei -Raw).Trim()
-  $stand = (Get-Item $urlDatei).LastWriteTime
-  Write-Host '  Aktuelle Adresse:'
-  Write-Host "      $adresse" -ForegroundColor White
-  Write-Host ("  Eingetragen am {0:dd.MM.yyyy HH:mm}" -f $stand)
-} else {
-  Write-Host '  Keine Adresse hinterlegt (logs\tunnel-url.txt fehlt).' -ForegroundColor Yellow
-  if ($cfLaeuft.Count -gt 0 -and -not $tunnelAufgabe) {
+  $urlDatei = Join-Path $DeployDir 'logs\tunnel-url.txt'
+  if (Test-Path $urlDatei) {
+    $adresse = (Get-Content $urlDatei -Raw).Trim()
+    $stand = (Get-Item $urlDatei).LastWriteTime
+    Write-Host '  Cloudflare-Adresse (wechselt bei jedem Neustart):'
+    Write-Host "      $adresse" -ForegroundColor White
+    Write-Host ("  Eingetragen am {0:dd.MM.yyyy HH:mm}" -f $stand)
+  } elseif ($cfLaeuft.Count -gt 0 -and -not $tunnelAufgabe) {
+    Write-Host '  Keine Adresse hinterlegt (logs\tunnel-url.txt fehlt).' -ForegroundColor Yellow
     Merke 'warnung' @(
       'cloudflared laeuft, wurde aber von Hand gestartet - die Adresse steht nur',
       'in dem Fenster, in dem es gestartet wurde. Wird das Fenster geschlossen',
-      'oder der PC neu gestartet, ist der Zugriff von aussen weg.',
-      'Dauerhaft einrichten: "Tunnel einrichten.cmd" als Administrator.'
+      'oder der PC neu gestartet, ist der Zugriff von aussen weg.'
     )
   }
-}
 
-if ($tunnelAufgabe) {
-  Write-Host "  Autostart-Aufgabe SmartHomeTunnel: $($tunnelAufgabe.State)"
-} else {
-  Write-Host '  Autostart-Aufgabe SmartHomeTunnel: nicht eingerichtet.' -ForegroundColor Yellow
+  if ($tunnelAufgabe) {
+    Write-Host "  Autostart-Aufgabe SmartHomeTunnel: $($tunnelAufgabe.State)"
+  }
 }
 
 # --- 8. Log ---------------------------------------------------------------

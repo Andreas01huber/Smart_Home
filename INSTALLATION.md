@@ -250,6 +250,39 @@ loszuwerden, das man verloren hat.
 | Durchprobieren | Ab dem fünften Fehlversuch je Herkunft gesperrt, die Sperre verdoppelt sich bis auf eine Viertelstunde. |
 | Suchmaschinen | Die Anmeldeseite ist auf `noindex` gesetzt. |
 
+### Feste Adresse ohne eigene Domain — der empfohlene Weg
+
+Cloudflare-Schnelltunnel haben einen Haken, der sich nicht wegkonfigurieren
+lässt: Die Adresse wird bei **jedem** Start neu ausgewürfelt und ist danach
+endgültig weg. Für ein Lesezeichen taugt das nicht.
+
+**Tailscale Funnel** löst das kostenlos und ohne eigene Domain. Der Server
+bekommt einen festen Namen wie `smarthome-pc.tailXXXX.ts.net`, der sich nie
+wieder ändert.
+
+Einmalig auf dem Server: **Feste Adresse einrichten.cmd** als Administrator.
+Ist Tailscale noch nicht da, sagt das Skript, wie es installiert wird
+(`winget install --id tailscale.tailscale`), führt durch die Anmeldung und
+schaltet die Adresse anschließend frei.
+
+| | |
+| --- | --- |
+| Kosten | Keine. Der kostenlose Tarif reicht dafür aus. |
+| Auf dem Handy | **Keine App nötig.** Die Adresse ist ganz normal im Internet erreichbar — Browser aufmachen, Adresse eingeben, anmelden. |
+| Im Router | **Keine Portfreigabe.** Die Verbindung wird vom Server nach außen aufgebaut. |
+| Verschlüsselung | HTTPS, das Zertifikat kommt automatisch. |
+| Nach einem Neustart | Kommt von selbst wieder — Tailscale läuft als Dienst, die Freigabe ist gespeichert. |
+| Wer kommt rein | Jeder, der die Adresse kennt, landet auf der Anmeldeseite. Weiter kommt nur, wer Benutzername und Passwort hat. |
+
+Weil die Adresse damit öffentlich ist, bricht das Skript ab, solange kein
+Passwort gesetzt ist. Das ist Absicht.
+
+Läuft die feste Adresse, wird der Cloudflare-Tunnel nicht mehr gebraucht:
+
+```bash
+Unregister-ScheduledTask SmartHomeTunnel -Confirm:$false
+```
+
 ### Tunnel dauerhaft laufen lassen
 
 Wird `cloudflared` von Hand in einem Fenster gestartet, endet der Zugriff von
