@@ -61,14 +61,31 @@ Token — den in einer PowerShell auf dem Server ausführen.
 Bei der Frage nach Labels zusätzlich `windows` vergeben, falls es nicht ohnehin
 gesetzt ist; der Workflow sucht nach `self-hosted` **und** `windows`.
 
-Danach den Runner als Dienst einrichten, damit er einen Neustart übersteht:
+Danach den Runner als Dienst einrichten, damit er einen Neustart übersteht —
+und zwar **unter dem Benutzer, unter dem auch Docker Desktop läuft**:
 
 ```bash
-./svc.cmd install
+./svc.cmd install DEIN-PC\dein-benutzername
 ```
 
 ```bash
 ./svc.cmd start
+```
+
+Der Benutzername ist hier nicht optional, auch wenn `./svc.cmd install` ohne
+Argument funktioniert. Ohne ihn läuft der Dienst als `NT AUTHORITY\NETWORK
+SERVICE`, und dieses Konto kommt an die Docker-Engine nicht heran: Docker Desktop
+gibt seine Named Pipe nur der lokalen Gruppe `docker-users` frei, in der ein
+Dienstkonto standardmäßig nicht ist. Der Deploy scheitert dann mit
+„Docker antwortet nicht", obwohl Docker sichtbar läuft.
+
+Ist der Dienst schon ohne Benutzer eingerichtet, hilft entweder ein
+`./svc.cmd uninstall` und eine Neuinstallation mit Benutzernamen — oder das
+Konto nachträglich in die Gruppe aufnehmen (Eingabeaufforderung als
+Administrator):
+
+```bash
+net localgroup docker-users "NETWORK SERVICE" /add
 ```
 
 ### 4. Zugangsdaten auf dem Server ablegen
@@ -110,10 +127,17 @@ dem Server — geht über **Actions → Test und Deploy → Run workflow**.
 | **Bleibt unangetastet** | `C:\SmartHome\data` (Historie), `C:\SmartHome\secrets.json`, eine lokale `.env` |
 | **Kommt gar nicht an** | `.git`, `.github`, `node_modules` |
 
-Kopiert wird mit `robocopy /E` — ergänzend, nicht spiegelnd. Ein Spiegelabgleich
-wäre sauberer, würde aber bei einem Fehler die Historie mitnehmen; verwaiste
-Dateien im Deploy-Ordner sind das kleinere Übel. Wenn dort einmal aufgeräumt
-werden soll, geht das von Hand.
+Kopiert wird in zwei Durchgängen. Die Dateien im Projektstamm kommen ohne
+Unterordner und ohne Löschen (`/LEV:1`) — dort liegen `data\` und
+`secrets.json`. Die Ordner `apps`, `packages`, `tools`, `deploy` und `docs`
+dagegen als **Spiegel** (`/MIR`): Was du im Repository löschst oder umbenennst,
+verschwindet damit auch auf dem Server. Ohne Spiegel bliebe die alte Datei dort
+liegen und landete weiter im Image.
+
+Dass beim Spiegeln gelöscht werden darf, ist ungefährlich — nicht weil die
+Ausschlussschalter stimmen, sondern weil `data\` und `secrets.json` im Stamm
+liegen und damit außerhalb der gespiegelten Bäume. Das lässt sich nicht
+versehentlich kaputtkonfigurieren.
 
 ---
 

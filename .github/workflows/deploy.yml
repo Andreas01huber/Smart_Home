@@ -75,23 +75,36 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path $env:DEPLOY_DIR | Out-Null
 
-          # /E kopiert und ergänzt, löscht aber nichts. Bewusst kein /MIR:
-          # Ein Spiegelabgleich, der einmal an der falschen Stelle greift,
-          # würde die Historie in data\ mitnehmen. Verwaiste Dateien im
-          # Deploy-Ordner sind das kleinere Übel.
+          $schlimmster = 0
+
+          # Durchgang 1: die Dateien im Projektstamm - ohne Unterordner (/LEV:1)
+          # und ohne Löschen. Im Stamm liegen data\ und secrets.json, die dem
+          # Server gehören und die ein Deploy niemals anfassen darf.
+          robocopy . $env:DEPLOY_DIR /LEV:1 /XF secrets.json .env /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -gt $schlimmster) { $schlimmster = $LASTEXITCODE }
+
+          # Durchgang 2: die Ordner mit Code und Doku - als Spiegel (/MIR). Nur
+          # so verschwindet auf dem Server auch das, was im Repository gelöscht
+          # oder umbenannt wurde. Ohne Spiegel bliebe die alte Datei liegen und
+          # landete weiter im Image.
           #
-          # Ausgenommen bleiben die Dinge, die dem Server gehören und nicht
-          # dem Repository: Historie, Zugangsdaten, lokale Compose-Variablen.
-          robocopy . $env:DEPLOY_DIR /E `
-            /XD .git .github node_modules data `
-            /XF secrets.json .env `
-            /NFL /NDL /NJH /NJS /NP
+          # Dass hier gelöscht werden darf, ist ungefährlich: data\ und
+          # secrets.json liegen im Stamm und damit außerhalb dieser Bäume. Das
+          # ist keine Frage der richtigen Ausschluss-Schalter mehr, sondern eine
+          # des Aufbaus - und deshalb nicht kaputtzukonfigurieren.
+          foreach ($ordner in @('apps', 'packages', 'tools', 'deploy', 'docs')) {
+            if (-not (Test-Path ".\$ordner")) { continue }
+            $ziel = Join-Path $env:DEPLOY_DIR $ordner
+            robocopy ".\$ordner" $ziel /MIR /XD node_modules dist /NFL /NDL /NJH /NJS /NP
+            if ($LASTEXITCODE -gt $schlimmster) { $schlimmster = $LASTEXITCODE }
+          }
 
           # robocopy meldet Erfolg mit 0-7, erst ab 8 ist es ein Fehler.
-          if ($LASTEXITCODE -ge 8) {
-            Write-Host "::error::robocopy ist mit $LASTEXITCODE fehlgeschlagen."
+          if ($schlimmster -ge 8) {
+            Write-Host "::error::robocopy ist mit $schlimmster fehlgeschlagen."
             exit 1
           }
+          Write-Host "Uebertragen. Hoechster robocopy-Status: $schlimmster (unter 8 = ok)."
           exit 0
 
       - name: Zugangsdaten vorhanden?
@@ -141,3 +154,14 @@ jobs:
 
           Write-Host 'Der Server antwortet auf Port 4173.'
           docker compose ps
+
+      - name: Alte Images aufräumen
+        shell: pwsh
+        # Erst wenn der neue Container nachweislich antwortet. Vorher wäre es
+        # leichtsinnig: Das vorige Image ist bis dahin der Rückweg.
+        run: |
+          # Jeder Deploy baut ein neues Image; das vorherige verliert seinen
+          # Namen und bleibt als namenloses "dangling image" liegen. Nach ein
+          # paar Wochen sind das etliche Gigabyte auf der Systemplatte.
+          docker image prune -f
+          exit 0
