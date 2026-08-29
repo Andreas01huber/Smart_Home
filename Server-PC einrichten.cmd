@@ -22,14 +22,19 @@ echo      1. Node.js pruefen
 echo      2. Abhaengigkeiten installieren  (braucht einmal Internet)
 echo      3. Firewall fuer das Heimnetz oeffnen (Port 4173)
 echo      4. Autostart einrichten - laeuft ab jedem Hochfahren
+echo      5. Passwort fuer die Anmeldung setzen
+echo      6. Feste Internetadresse einrichten (auf Wunsch)
 echo.
-echo   Bei Schritt 3 und 4 fragt Windows nach Administratorrechten.
+echo   Was schon eingerichtet ist, wird uebersprungen. Das Skript
+echo   laesst sich also gefahrlos mehrfach starten.
+echo.
+echo   Bei Schritt 3, 4 und 6 fragt Windows nach Administratorrechten.
 echo.
 pause
 
 rem --------------------------------------------------------------- 1. Node ---
 echo.
-echo   [1/4] Node.js pruefen ...
+echo   [1/6] Node.js pruefen ...
 where node >nul 2>&1
 if errorlevel 1 goto :kein_node
 
@@ -41,7 +46,7 @@ echo         Node !NODEV! gefunden - passt.
 
 rem ------------------------------------------------------- 2. Abhaengigkeiten ---
 echo.
-echo   [2/4] Abhaengigkeiten pruefen ...
+echo   [2/6] Abhaengigkeiten pruefen ...
 if exist "node_modules\tsx\" (
   echo         Schon vorhanden - uebersprungen.
 ) else (
@@ -56,11 +61,66 @@ if exist "node_modules\tsx\" (
 
 rem ------------------------------------------- 3. + 4. Firewall und Autostart ---
 echo.
-echo   [3/4] Firewall und [4/4] Autostart ...
+echo   [3/6] Firewall und [4/6] Autostart ...
 echo         Gleich kommt die Windows-Nachfrage. Bitte mit JA bestaetigen.
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"%~dp0deploy\setup-server.ps1\"','-ProjectDir','\"%~dp0.\"' -Wait"
 if errorlevel 1 goto :admin_abgelehnt
+
+rem ------------------------------------------------------------- 5. Passwort ---
+echo.
+echo   [5/6] Passwort fuer die Anmeldung ...
+
+rem Schon gesetzt? Dann nicht noch einmal fragen - ein neues Passwort wuerde
+rem alle angemeldeten Geraete hinauswerfen.
+set "HATPASSWORT="
+if exist "secrets.json" (
+  findstr /c:"passwordHash" "secrets.json" >nul 2>&1
+  if not errorlevel 1 set "HATPASSWORT=ja"
+)
+
+if defined HATPASSWORT (
+  echo         Schon gesetzt - uebersprungen.
+  echo         Aendern spaeter mit:  npm run passwort
+) else (
+  echo.
+  echo         Im Heimnetz ist die Anmeldung freiwillig. Sobald die App
+  echo         aus dem Internet erreichbar ist, ist sie Pflicht.
+  echo.
+  set "WILLPW="
+  set /p "WILLPW=        Jetzt ein Passwort setzen? [J/n] "
+  if /i "!WILLPW!"=="n" (
+    echo         Uebersprungen. Nachholen mit:  npm run passwort
+  ) else (
+    echo.
+    call npm run passwort
+    if errorlevel 1 (
+      echo.
+      echo         Abgebrochen - es wurde nichts geaendert.
+      echo         Nachholen mit:  npm run passwort
+    )
+  )
+)
+
+rem ------------------------------------------------------- 6. Feste Adresse ---
+echo.
+echo   [6/6] Feste Internetadresse ...
+echo.
+echo         Damit erreichst du das Dashboard auch von unterwegs, unter
+echo         einer Adresse, die sich nie aendert. Kostenlos, ohne eigene
+echo         Domain, ohne Portfreigabe im Router. Wer zugreift, braucht
+echo         nur Adresse und Zugangsdaten - keine App.
+echo.
+set "WILLADR="
+set /p "WILLADR=        Jetzt einrichten? [j/N] "
+if /i "!WILLADR!"=="j" (
+  echo.
+  echo         Gleich kommt wieder die Windows-Nachfrage.
+  echo.
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"%~dp0deploy\feste-adresse-einrichten.ps1\"' -Wait"
+) else (
+  echo         Uebersprungen. Nachholen mit "Feste Adresse einrichten.cmd".
+)
 
 rem ------------------------------------------------------------- Ergebnis -----
 echo.
@@ -76,7 +136,15 @@ echo.
 echo   Tipp: Diese Adresse bleibt nur stabil, wenn der Router dem PC
 echo         immer dieselbe IP gibt. In der FritzBox unter
 echo         Heimnetz - Netzwerk - Geraet - "immer die gleiche IPv4-Adresse".
+
+if exist "logs\feste-adresse.txt" (
+  echo.
+  echo   Von unterwegs, feste Adresse:
+  for /f "usebackq delims=" %%a in ("logs\feste-adresse.txt") do echo                        %%a
+)
+
 echo.
+echo   Wie es weitergeht, wenn etwas klemmt: "Server pruefen.cmd"
 echo   Weiteres steht in INSTALLATION.md im gleichen Ordner.
 echo.
 pause
