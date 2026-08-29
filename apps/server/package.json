@@ -1,0 +1,12 @@
+{
+  "name": "@energy/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend und Dashboard der Energy App",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@energy/connectors": "*",
+    "@energy/core": "*"
+  }
+}

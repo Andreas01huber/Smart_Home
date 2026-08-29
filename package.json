@@ -1,0 +1,26 @@
+{
+  "name": "app-smart-home",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zentrale Energie-Oberfläche für Fronius und Victron",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "tsx apps/server/src/index.ts",
+    "preflight": "tsx tools/preflight.ts",
+    "discover": "tsx packages/discovery/src/cli.ts",
+    "typecheck": "tsc --build",
+    "test": "tsx --test \"packages/*/src/**/*.test.ts\" \"apps/*/src/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

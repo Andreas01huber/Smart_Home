@@ -1,0 +1,1321 @@
+:root {
+  --bg: #eef1f6;
+  --bg-2: #e4e9f1;
+  --surface: #ffffff;
+  --surface-2: #f2f5fa;
+  --text: #10151c;
+  --text-dim: #5b6675;
+  /* Vorher #8a94a3 — auf Weiss nur 3,1:1 und damit unter der Lesbarkeitsgrenze
+     (WCAG AA verlangt 4,5:1 für Fliesstext). Betroffen war viel Kleingedrucktes:
+     Quellenangaben, Zeitstempel, Achsenbeschriftungen, Erklärtexte. Der Wert ist
+     gegen den DUNKELSTEN Untergrund geprüft, auf dem er vorkommt — den
+     Seitenhintergrund, nicht die weisse Karte: 4,6:1 dort, 5,2:1 auf Karten. */
+  --text-faint: #626d81;
+  --border: #dce2ec;
+  --border-strong: #c6cedb;
+
+  --solar: #f0a020;
+  --house: #3b82f6;
+  --grid: #8b5cf6;
+  --battery: #16a34a;
+  --ev: #0ea5e9;
+  --danger: #dc2626;
+  --stale: #d97706;
+
+  /* Statusfarben als TEXT. Die Töne oben sind für Flächen, Balken und Kurven
+     gemacht — als kleine Schrift auf hellem Grund liegen sie bei 3,2:1. Für
+     Wörter wie „Online" oder „Daten veraltet" braucht es dunklere Varianten.
+     Bedeutung und Ton bleiben gleich, nur die Helligkeit ändert sich. */
+  --ok-text: #15803d;
+  --warn-text: #b45309;
+  --danger-text: #c31d1d;
+
+  /* Gefüllter Akzent (aktiver Reiter, Hauptschaltfläche) mit der Schriftfarbe,
+     die darauf sicher lesbar ist. --house allein trug weisse Schrift nur mit
+     3,7:1 — zu wenig für „Heute“ oder „Tarife speichern“. */
+  --accent-strong: #2563eb;
+  --on-accent: #ffffff;
+
+  /* Fokus: eine einzige, überall gleiche Kennzeichnung für Tastaturbedienung. */
+  --focus: #2563eb;
+
+  --radius: 20px;
+  --radius-sm: 14px;
+  --radius-lg: 26px;
+  --shadow: 0 1px 2px rgba(16, 21, 28, 0.05), 0 10px 30px rgba(16, 21, 28, 0.07);
+  --shadow-sm: 0 1px 2px rgba(16, 21, 28, 0.06);
+
+  /* Gestaffelte Höhenwirkung: je höher das Element, desto weicher und weiter
+     der Schatten. Zusammen mit --card-top (feine Lichtkante oben) entsteht der
+     Eindruck echter, physischer Flächen statt flacher Web-Kästen. */
+  --elev-1: 0 1px 2px rgba(16, 21, 28, 0.05), 0 2px 8px rgba(16, 21, 28, 0.05);
+  --elev-2: 0 1px 2px rgba(16, 21, 28, 0.05), 0 8px 24px rgba(16, 21, 28, 0.08);
+  --elev-3: 0 2px 6px rgba(16, 21, 28, 0.07), 0 24px 60px rgba(16, 21, 28, 0.14);
+  --card-top: rgba(255, 255, 255, 0.9);
+  --card-sheen: rgba(255, 255, 255, 0);
+  --scrim: rgba(12, 16, 22, 0.42);
+
+  color-scheme: light;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+:root[data-theme='dark'],
+:root.dark {
+  --bg: #0c1016;
+  --bg-2: #10151d;
+  --surface: #161c26;
+  --surface-2: #1d2531;
+  --text: #eef2f8;
+  --text-dim: #9aa5b5;
+  /* Vorher #6b7686 — auf der Kartenfläche nur 3,7:1. Jetzt 4,9:1. */
+  --text-faint: #7f8a9c;
+  --border: #262f3c;
+  --border-strong: #333e4e;
+
+  --solar: #f5b23f;
+  --house: #5b9bf8;
+  --grid: #a78bfa;
+  --battery: #34d17f;
+  --ev: #38bdf8;
+  --danger: #f87171;
+  --stale: #eab04a;
+
+  /* Im Dunkeln sind die Flächentöne bereits hell genug für Schrift. */
+  --ok-text: var(--battery);
+  --warn-text: var(--stale);
+  --danger-text: var(--danger);
+  /* Umgekehrt: heller Akzent, dunkle Schrift darauf (6,9:1). */
+  --accent-strong: #5b9bf8;
+  --on-accent: #0b1017;
+  --focus: #7aa7ff;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 34px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
+  --elev-2: 0 1px 2px rgba(0, 0, 0, 0.45), 0 10px 26px rgba(0, 0, 0, 0.4);
+  --elev-3: 0 2px 8px rgba(0, 0, 0, 0.5), 0 28px 64px rgba(0, 0, 0, 0.55);
+  /* Im Dunkeln entsteht Tiefe nicht durch Schatten, sondern durch eine feine
+     helle Oberkante — wie bei hochwertigen nativen Oberflächen. */
+  --card-top: rgba(255, 255, 255, 0.07);
+  --card-sheen: rgba(255, 255, 255, 0.022);
+  --scrim: rgba(3, 5, 9, 0.62);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(1200px 600px at 80% -10%, color-mix(in srgb, var(--solar) 10%, transparent), transparent 60%),
+    linear-gradient(180deg, var(--bg-2), var(--bg));
+  background-attachment: fixed;
+  color: var(--text);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ── Bedienbarkeit (gilt für die ganze App) ──────────────────────────
+   Zwei Dinge, die vorher fehlten:
+
+   1. Tastatur. Nur zwei Elemente hatten eine sichtbare Fokusmarkierung; überall
+      sonst war beim Durchtabben nicht erkennbar, wo man steht — bei einem
+      Eingabefeld war der Ring sogar ausdrücklich entfernt worden. Jetzt gibt es
+      genau eine Kennzeichnung für alles, was bedienbar ist.
+
+   2. Trefferflächen. Auf dem Telefon lagen sieben Bedienelemente zwischen 26
+      und 38 px; empfohlen sind mindestens 44 px. Die Elemente behalten ihre
+      schlanke Optik — sie bekommen nur eine unsichtbare Trefferfläche der
+      nötigen Grösse (::after), damit nichts optisch klobig wird.
+   ────────────────────────────────────────────────────────────────── */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+.card.clickable:focus-visible,
+.session-row:focus-visible { outline-color: var(--focus); }
+
+@media (max-width: 760px), (pointer: coarse) {
+  .status-chip,
+  .icon-btn,
+  .connect-btn,
+  .reconnect-btn,
+  .date-btn,
+  .date-input,
+  .chip,
+  .vt-btn,
+  .setting-input { min-height: 44px; }
+  .icon-btn, .date-btn { min-width: 44px; }
+  /* Damit die Beschriftung in der höheren Fläche mittig sitzt. */
+  .status-chip, .connect-btn, .reconnect-btn, .chip, .vt-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+}
+
+/* ── Topbar ─────────────────────────────────────────────── */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem clamp(1rem, 4vw, 2.4rem);
+  padding-top: max(0.9rem, env(safe-area-inset-top));
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: saturate(160%) blur(14px);
+  border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 0.7rem; }
+/* Ein einziges App-Icon in beiden Farbschemata — es ist farbig genug, um auf
+   hellem wie dunklem Grund zu bestehen. */
+:root { --brand-logo: url('/icon-192.png?v=20260827'); }
+.brand-mark {
+  width: 2rem; height: 2rem;
+  background: var(--brand-logo) center/contain no-repeat;
+}
+h1 { font-size: 1.15rem; font-weight: 680; letter-spacing: -0.02em; margin: 0; }
+.topbar-actions { display: flex; align-items: center; gap: 0.5rem; }
+
+.status-chip {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-dim); font-size: 0.82rem; font-weight: 550;
+  padding: 0.42rem 0.8rem; border-radius: 999px; cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.status-chip:hover { border-color: var(--border-strong); }
+.dot { width: 0.62rem; height: 0.62rem; border-radius: 50%; background: var(--text-faint); flex: none; }
+.dot.ok { background: var(--battery); box-shadow: 0 0 0 4px color-mix(in srgb, var(--battery) 22%, transparent); }
+.dot.warn { background: var(--stale); box-shadow: 0 0 0 4px color-mix(in srgb, var(--stale) 22%, transparent); }
+.dot.bad { background: var(--danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 22%, transparent); }
+
+.icon-btn {
+  width: 2.3rem; height: 2.3rem; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-dim); cursor: pointer; font-size: 1.1rem;
+  display: grid; place-items: center; transition: border-color 0.2s, color 0.2s;
+}
+.icon-btn:hover { border-color: var(--border-strong); color: var(--text); }
+
+/* ── Source panel ───────────────────────────────────────── */
+.source-panel {
+  margin: 0.6rem auto 0; max-width: 1180px;
+  width: calc(100% - 2rem);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+  padding: 0.5rem 0.9rem; overflow: hidden;
+}
+.source-title { font-size: 0.78rem; font-weight: 640; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); padding: 0.5rem 0.3rem 0.3rem; }
+.source-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.8rem;
+  padding: 0.6rem 0.3rem; font-size: 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+.source-row:last-child { border-bottom: none; }
+.source-row .s-main { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.source-row .s-name { display: flex; align-items: center; gap: 0.55rem; font-weight: 550; }
+.source-row .s-contact { font-size: 0.74rem; color: var(--text-faint); padding-left: 1.15rem; }
+.source-row .s-right { display: flex; align-items: center; gap: 0.7rem; flex: none; }
+.source-row .s-state { font-weight: 600; font-size: 0.8rem; text-align: right; }
+.s-state.ok { color: var(--ok-text); }
+.s-state.warn { color: var(--warn-text); }
+.s-state.bad { color: var(--danger-text); }
+.s-state.muted { color: var(--text-faint); }
+.reconnect-btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  border: 1px solid var(--border-strong); background: var(--surface-2);
+  color: var(--text); font-size: 0.78rem; font-weight: 560;
+  padding: 0.35rem 0.7rem; border-radius: 999px; cursor: pointer; white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.reconnect-btn:hover:not(:disabled) { background: var(--surface); border-color: var(--house); }
+.reconnect-btn:disabled { opacity: 0.7; cursor: default; }
+.mini-spinner {
+  width: 0.8rem; height: 0.8rem; border-radius: 50%;
+  border: 2px solid var(--border-strong); border-top-color: var(--house);
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 560px) {
+  .source-row { flex-wrap: wrap; }
+  .source-row .s-contact { padding-left: 1.15rem; }
+}
+
+/* ── Layout ─────────────────────────────────────────────── */
+main {
+  max-width: 1180px; margin: 0 auto;
+  padding: clamp(1rem, 3vw, 1.8rem) clamp(1rem, 4vw, 2.4rem) 3rem;
+  display: flex; flex-direction: column; gap: 1.3rem;
+}
+.panel { display: flex; flex-direction: column; gap: 0.9rem; }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; }
+.panel-head h2 { margin: 0; font-size: 1.05rem; font-weight: 640; letter-spacing: -0.01em; }
+.muted-label { font-size: 0.82rem; color: var(--text-faint); }
+
+/* ── Flow card ──────────────────────────────────────────── */
+.flow-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 1.1rem clamp(0.6rem, 2vw, 1.4rem) 0.6rem;
+}
+.flow-head { display: flex; align-items: baseline; justify-content: space-between; padding: 0 0.4rem; }
+.flow-head h2 { margin: 0; }
+.flow-updated { font-size: 0.78rem; color: var(--text-faint); }
+.flow-wrap { width: 100%; }
+#flow-svg { width: 100%; height: auto; display: block; }
+
+/* Jede Verbindung trägt ihre Flussfarbe als --flow (per Farbklasse). Ruhende
+   Leitungen bleiben neutral; sobald Energie fliesst, leuchtet die Leitung dezent
+   in ihrer Farbe und ein weicher, heller Puls wandert in Flussrichtung. */
+.flow-pv-color { --flow: var(--solar); }
+.flow-house-color { --flow: var(--house); }
+.flow-grid-color { --flow: var(--grid); }
+.flow-battery-color { --flow: var(--battery); }
+.flow-ev-color { --flow: var(--ev); }
+
+/* Basis-Leitung: im Ruhezustand neutral, bei Fluss dezent in der Flussfarbe. */
+.edges path { stroke: var(--border-strong); stroke-width: 2.2; transition: stroke 0.45s ease, opacity 0.45s ease; }
+.edges path.active { stroke: var(--flow); opacity: 0.5; }
+
+/* Wandernder Lichtpuls darüber, mit weichem Glühen in derselben Farbe. */
+.flow-overlay path {
+  stroke-width: 3.2; stroke-dasharray: 13 15; stroke-linecap: round;
+  opacity: 0; transition: opacity 0.4s ease;
+}
+.flow-overlay path.active {
+  stroke: var(--flow); color: var(--flow); opacity: 1;
+  animation: flow-move var(--speed, 1.4s) linear infinite;
+  filter: drop-shadow(0 0 3px currentColor);
+}
+.flow-overlay path.active.reverse { animation-direction: reverse; }
+/* Periode = 13 + 15 = 28; zwei volle Perioden ergeben eine nahtlose Schleife. */
+@keyframes flow-move { to { stroke-dashoffset: -56; } }
+@media (prefers-reduced-motion: reduce) {
+  /* Kein Wandern, aber Farbe/Glühen bleiben — der Fluss ist weiter erkennbar. */
+  .flow-overlay path.active { animation: none; }
+}
+
+.node-circle { stroke-width: 2; filter: drop-shadow(0 3px 8px rgba(16,21,28,0.10)); }
+.node-name { font-size: 13.5px; font-weight: 650; fill: var(--text); text-anchor: middle; letter-spacing: -0.01em; }
+.node-value { font-weight: 730; fill: var(--text); text-anchor: middle; font-variant-numeric: tabular-nums; }
+.node-sub { font-size: 11.5px; fill: var(--text-dim); text-anchor: middle; }
+.connection-points circle { transition: fill 0.3s ease, opacity 0.3s ease; }
+@media (prefers-reduced-motion: reduce) { .connection-points circle { transition: none; } }
+
+/* ── KPI strip ──────────────────────────────────────────── */
+.kpi-strip {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.7rem;
+}
+/* Metrik-Kachel: farbiger Markierungsstrich links, ruhiges Label, grosse Zahl
+   mit tabellarischen Ziffern (springt beim Aktualisieren nicht). */
+.kpi {
+  background:
+    linear-gradient(180deg, var(--card-sheen), transparent 50%),
+    var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--elev-1);
+  padding: 0.7rem 0.85rem 0.75rem 1rem;
+  display: flex; flex-direction: column; gap: 0.1rem;
+  position: relative; overflow: hidden;
+}
+.kpi::before {
+  content: ""; position: absolute; left: 0; top: 0.7rem; bottom: 0.7rem; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--kpi-accent, var(--text-faint));
+}
+.kpi .kpi-label {
+  font-size: 0.71rem; color: var(--text-dim); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.kpi .kpi-value {
+  font-size: 1.38rem; font-weight: 700; letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums; line-height: 1.15; color: var(--text);
+}
+.kpi .kpi-unit { font-size: 0.52em; color: var(--text-dim); font-weight: 620; margin-left: 0.18rem; }
+.kpi .kpi-sub { font-size: 0.7rem; color: var(--text-faint); }
+.kpi.accent-solar { --kpi-accent: var(--solar); }
+.kpi.accent-house { --kpi-accent: var(--house); }
+.kpi.accent-grid { --kpi-accent: var(--grid); }
+.kpi.accent-battery { --kpi-accent: var(--battery); }
+
+/* ── Cards ──────────────────────────────────────────────── */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; }
+/* Die Fahrzeugkarte trägt deutlich mehr Zeilen als die übrigen und blieb
+   deshalb als einzelne Karte in einer eigenen Reihe zurück — daneben klaffte
+   eine Lücke. Über zwei Spalten füllt sie die Reihe und liest sich zugleich
+   ruhiger, weil die Angaben nebeneinander statt untereinander stehen.
+   Der Schutzabstand nach unten (620 px) stellt sicher, dass es überhaupt zwei
+   Spalten gibt — sonst entstünde eine implizite dritte und die Seite liefe
+   seitlich über. */
+@media (min-width: 620px) {
+  .card-grid > .card.ev { grid-column: span 2; }
+  /* Über zwei Spalten stehen die sechs Angaben nebeneinander statt in einer
+     langen Liste — die Karte wird dadurch halb so hoch. */
+  .card.ev .breakdown {
+    display: grid; grid-template-columns: 1fr 1fr;
+    column-gap: 1.8rem; row-gap: 0.32rem;
+  }
+}
+/* Fusszeile der Fahrzeugkarte: Hinweis links, Schaltfläche rechts. */
+.card-actions {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.8rem; margin-top: 0.7rem;
+}
+.card-actions .card-more { margin: 0; }
+.card {
+  background:
+    linear-gradient(180deg, var(--card-sheen), transparent 42%),
+    var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--elev-2);
+  padding: 1.1rem 1.2rem; position: relative; overflow: hidden;
+  display: flex; flex-direction: column; gap: 0.3rem;
+}
+/* Feine Lichtkante oben — lässt die Karte wie ein physisches Objekt wirken. */
+.card::after {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 1px;
+  background: var(--card-top); pointer-events: none;
+}
+/* Der Akzent ist kein Balken mehr, sondern ein weicher Farbschimmer in der
+   oberen Ecke: erkennbar, aber ruhig — Farbe als Licht, nicht als Fläche. */
+.card::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 96px;
+  background: radial-gradient(120% 100% at 0% 0%,
+    color-mix(in srgb, var(--accent-color, var(--text-faint)) 16%, transparent), transparent 70%);
+  pointer-events: none;
+}
+.card.solar { --accent-color: var(--solar); }
+.card.house { --accent-color: var(--house); }
+.card.grid { --accent-color: var(--grid); }
+.card.battery { --accent-color: var(--battery); }
+.card.ev { --accent-color: var(--ev); }
+.card.total { --accent-color: var(--battery); }
+.card.solar { --accent: var(--solar); }
+.card.house { --accent: var(--house); }
+.card.grid { --accent: var(--grid); }
+.card.battery { --accent: var(--battery); }
+.card.ev { --accent: var(--ev); }
+.card.total { --accent: linear-gradient(90deg, var(--battery), var(--solar)); }
+
+.card-head { display: flex; align-items: center; gap: 0.7rem; }
+.card-head .icon { font-size: 1.05rem; color: var(--accent-color, var(--text-dim)); }
+.card-head h3 {
+  margin: 0; font-size: 0.8rem; font-weight: 620; color: var(--text-dim);
+  letter-spacing: 0.01em;
+}
+.card-sublabel { font-size: 0.72rem; color: var(--text-faint); font-weight: 500; }
+/* Echte Icon-Grafiken sitzen in einem dezent eingefärbten Feld — dadurch wirken
+   die unterschiedlich proportionierten Bilder als eine Familie. */
+.card-icon {
+  width: 44px; height: 44px; object-fit: contain; flex: none;
+  padding: 6px; border-radius: 13px;
+  background: color-mix(in srgb, var(--accent-color, var(--text-faint)) 10%, transparent);
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.12));
+}
+.card-icon-emoji {
+  font-size: 1.35rem; width: 44px; height: 44px; flex: none;
+  display: grid; place-items: center; border-radius: 13px;
+  background: color-mix(in srgb, var(--accent-color, var(--text-faint)) 10%, transparent);
+  color: var(--accent-color, var(--text-dim));
+}
+.inv-mini { width: 16px; height: 16px; object-fit: contain; vertical-align: -3px; margin-right: 0.4rem; }
+.stored-line { margin: 0.45rem 0 0; font-size: 0.82rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.card.pending { border-style: dashed; box-shadow: none; }
+@media (max-width: 560px) { .card-icon { width: 38px; height: 38px; } }
+.card .value { margin: 0.1rem 0 0; font-size: clamp(1.62rem, 3.6vw, 2.15rem); font-weight: 680; letter-spacing: -0.03em; line-height: 1.05; font-variant-numeric: tabular-nums; }
+.card .value.muted { font-size: 1.15rem; font-weight: 550; color: var(--text-dim); }
+.card .unit { font-size: 0.42em; font-weight: 600; color: var(--text-dim); margin-left: 0.28rem; }
+.card .sub { margin: 0; font-size: 0.86rem; color: var(--text-dim); }
+/* Die Quellenzeile ist der Fuss der Karte und gehört deshalb an den unteren
+   Rand — nicht dorthin, wo der Inhalt zufällig endet. Vorher schwebte sie bei
+   kurzen Karten („Hausverbrauch") mitten in der Fläche, und eine Reihe
+   nebeneinander stehender Karten wirkte ausgefranst. */
+.card .meta { margin: 0.3rem 0 0; font-size: 0.73rem; color: var(--text-faint); min-height: 0.9rem; }
+.card > .meta:last-child { margin-top: auto; padding-top: 0.55rem; }
+
+/* Karten ohne Quellenzeile: der letzte Block rutscht an denselben Fuss, damit
+   die Reihe eine gemeinsame Unterkante bekommt. */
+.card > .breakdown:last-child { margin-top: auto; }
+.card .meta.stale { color: var(--warn-text); font-weight: 550; }
+.card .meta.offline { color: var(--danger-text); font-weight: 550; }
+
+.breakdown { margin-top: 0.55rem; display: flex; flex-direction: column; gap: 0.32rem; }
+.breakdown-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.82rem; color: var(--text-dim); }
+.breakdown-row b { color: var(--text); font-weight: 620; font-variant-numeric: tabular-nums; }
+.dot-mini { width: 0.5rem; height: 0.5rem; border-radius: 50%; display: inline-block; margin-right: 0.4rem; }
+
+/* Battery visual — Messinstrument statt Fortschrittsbalken:
+   feine Skalenstriche im Hintergrund, Füllung mit weichem Eigenleuchten. */
+.bat-visual { display: flex; align-items: center; gap: 0.7rem; margin-top: 0.6rem; }
+.bat-body {
+  position: relative; width: 100%; height: 0.85rem; border-radius: 999px;
+  background:
+    repeating-linear-gradient(90deg,
+      transparent 0 calc(10% - 1px),
+      color-mix(in srgb, var(--text-faint) 22%, transparent) calc(10% - 1px) 10%),
+    var(--surface-2);
+  overflow: hidden; border: 1px solid var(--border);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
+}
+.bat-fill {
+  height: 100%; border-radius: 999px; position: relative;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--battery) 82%, #000 0%),
+    color-mix(in srgb, var(--battery) 70%, var(--solar)));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--battery) 45%, transparent);
+  transition: width 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* Glanzkante auf der Füllung */
+.bat-fill::after {
+  content: ""; position: absolute; inset: 0 0 55% 0; border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.28), transparent);
+}
+.bat-pct { font-size: 0.86rem; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ── Today ──────────────────────────────────────────────── */
+.today-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.7rem; }
+.stat {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-sm);
+  padding: 0.85rem 0.95rem; display: flex; flex-direction: column; gap: 0.25rem;
+}
+.stat-head { display: flex; align-items: center; gap: 0.45rem; margin-bottom: 0.05rem; }
+.stat-icon { width: 24px; height: 24px; object-fit: contain; flex: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.12)); }
+.stat-emoji { font-size: 1.05rem; width: 24px; text-align: center; flex: none; line-height: 1; }
+.stat .s-label { font-size: 0.75rem; color: var(--text-dim); font-weight: 560; }
+.stat .s-value { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat .s-value .u { font-size: 0.58em; color: var(--text-dim); font-weight: 600; margin-left: 0.15rem; }
+.stat .s-delta { font-size: 0.74rem; font-weight: 560; }
+.stat .s-delta.up { color: var(--ok-text); }
+.stat .s-delta.down { color: var(--danger-text); }
+
+/* ── Datumsnavigation ── */
+.history-head { flex-wrap: wrap; gap: 0.6rem; }
+.date-nav { display: inline-flex; align-items: center; gap: 0.4rem; }
+.date-btn {
+  width: 2rem; height: 2rem; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 1.1rem; line-height: 1;
+  cursor: pointer; display: grid; place-items: center; transition: border-color 0.15s, background 0.15s;
+}
+.date-btn:hover:not(:disabled) { border-color: var(--house); }
+.date-btn:disabled { opacity: 0.4; cursor: default; }
+.date-input {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  border-radius: 10px; padding: 0.35rem 0.6rem; font-size: 0.85rem; font-family: inherit;
+  color-scheme: light dark;
+}
+.quick-chips { display: flex; gap: 0.5rem; margin-top: -0.2rem; }
+.chip {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-dim);
+  border-radius: 999px; padding: 0.35rem 0.9rem; font-size: 0.82rem; font-weight: 550;
+  cursor: pointer; transition: all 0.15s;
+}
+.chip:hover { border-color: var(--border-strong); }
+.chip.active { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--on-accent); }
+
+/* ── Chart ── */
+.chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.1rem 1.2rem 0.9rem; }
+.chart-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 0.4rem; }
+.view-toggle { display: inline-flex; background: var(--surface-2); border-radius: 10px; padding: 0.2rem; gap: 0.15rem; }
+.vt-btn {
+  border: none; background: transparent; color: var(--text-dim); cursor: pointer;
+  font-size: 0.8rem; font-weight: 560; padding: 0.32rem 0.75rem; border-radius: 8px; transition: all 0.15s;
+}
+.vt-btn.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
+.chart-legend { display: flex; gap: 0.55rem; flex-wrap: wrap; }
+.legend-item {
+  display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.76rem; color: var(--text);
+  cursor: pointer; user-select: none; border: 1px solid var(--border); border-radius: 999px;
+  padding: 0.2rem 0.6rem; background: var(--surface); transition: opacity 0.15s;
+}
+.legend-item.off { opacity: 0.42; }
+.legend-swatch { width: 0.7rem; height: 0.7rem; border-radius: 3px; flex: none; }
+@media (max-width: 560px) {
+  .chart-legend { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 0.2rem; }
+  .legend-item { flex: none; }
+}
+.chart-wrap { position: relative; margin-top: 0.4rem; height: 440px; touch-action: pan-y; }
+@media (max-width: 1100px) { .chart-wrap { height: 380px; } }
+@media (max-width: 768px) { .chart-wrap { height: 340px; } }
+@media (max-width: 480px) { .chart-wrap { height: 300px; } }
+#today-chart { width: 100%; height: 100%; display: block; }
+.chart-empty {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  text-align: center; padding: 1rem; color: var(--text-faint); font-size: 0.9rem;
+}
+.chart-empty[hidden] { display: none; }
+.chart-grid-line { stroke: var(--border); stroke-width: 1; }
+.chart-zero-line { stroke: var(--border-strong); stroke-width: 1.2; }
+.chart-axis-label { fill: var(--text-faint); font-size: 12px; }
+.chart-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart-crosshair { stroke: var(--text-faint); stroke-width: 1; stroke-dasharray: 3 4; }
+.chart-dot { stroke: var(--surface); stroke-width: 1.5; }
+.chart-tooltip {
+  position: absolute; pointer-events: none; z-index: 5; min-width: 130px; max-width: 220px;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 0.6rem 0.75rem; font-size: 0.8rem;
+  transform: translate(-50%, -105%);
+}
+.chart-tooltip .tt-time { font-weight: 650; margin-bottom: 0.35rem; color: var(--text); }
+.chart-tooltip .tt-row { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; padding: 0.1rem 0; }
+.chart-tooltip .tt-name { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-dim); }
+.chart-tooltip .tt-val { font-weight: 620; font-variant-numeric: tabular-nums; }
+.day-summary-empty { color: var(--text-faint); font-size: 0.9rem; padding: 0.4rem 0; }
+
+.app-footer { text-align: center; padding: 1.4rem 1rem; padding-bottom: max(1.4rem, env(safe-area-inset-bottom)); color: var(--text-faint); font-size: 0.78rem; }
+
+/* ── Ladezustand ─────────────────────────────────────────────────────
+   Bis die erste Messung eintraf, war die Seite unterhalb der Anlage leer und
+   die Karten sprangen dann auf einmal herein. Jetzt steht von Anfang an die
+   fertige Struktur da — in derselben Grösse, nur ohne Inhalt. Es springt
+   nichts mehr, und man sieht sofort, dass etwas kommt. */
+@keyframes sk-sheen { to { background-position: -200% 0; } }
+.sk {
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--text-faint) 13%, transparent) 25%,
+    color-mix(in srgb, var(--text-faint) 22%, transparent) 37%,
+    color-mix(in srgb, var(--text-faint) 13%, transparent) 63%);
+  background-size: 200% 100%;
+  animation: sk-sheen 1.6s linear infinite;
+  border-radius: 6px;
+}
+@media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
+.sk-icon { width: 44px; height: 44px; border-radius: 13px; flex: none; }
+.sk-label { height: 0.7rem; width: 46%; }
+.sk-value { height: 1.7rem; width: 58%; margin-top: 0.5rem; border-radius: 9px; }
+.sk-line { height: 0.66rem; width: 74%; margin-top: 0.55rem; }
+.sk-line.short { width: 52%; }
+.kpi.is-loading .sk-value { height: 1.5rem; }
+@media (max-width: 560px) { .sk-icon { width: 40px; height: 40px; border-radius: 12px; } }
+
+/* ── Notices ────────────────────────────────────────────── */
+.notice {
+  border: 1px solid color-mix(in srgb, var(--stale) 40%, var(--border));
+  background: color-mix(in srgb, var(--stale) 10%, var(--surface));
+  border-radius: var(--radius-sm); padding: 0.75rem 0.95rem;
+  font-size: 0.86rem; line-height: 1.45; margin-top: 0.5rem;
+}
+.notice.bad { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
+
+/* ── Responsive ─────────────────────────────────────────── */
+/* Die Kennzahlen standen zwischenzeitlich als Spalte NEBEN der Anlage, um die
+   damals halbleere Zeile zu füllen. Das ist entfallen: Die Anlage füllt die
+   Zeile inzwischen selbst (Beschriftungen links und rechts statt oben und
+   unten), und als Spalte daneben stand das Haus nicht mehr in der Mitte der
+   Seite. Es ist das zentrale Element und gehört mittig — die Kennzahlen
+   liegen wieder als ruhige Zeile darunter. */
+
+@media (max-width: 900px) {
+  .kpi-strip { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 560px) {
+  .kpi-strip { grid-template-columns: repeat(2, 1fr); gap: 0.6rem; }
+  .card .value { font-size: 1.82rem; }
+  h1 { font-size: 1.02rem; letter-spacing: -0.01em; }
+  /* Der Statustext bleibt sichtbar — ein Punkt allein sagt nichts aus.
+     Er wird nur kompakter gesetzt (und ab 430 px durch seine Kurzfassung
+     ersetzt, statt mitten im Wort abgeschnitten zu werden). */
+  #status-text { white-space: nowrap; font-size: 0.76rem; }
+  main { padding-left: 0.9rem; padding-right: 0.9rem; gap: 1.1rem; }
+  .card { padding: 0.95rem 1rem; border-radius: var(--radius); }
+  .card-grid { gap: 0.7rem; }
+  .flow-card { padding: 0.9rem 0.5rem 0.4rem; }
+  .chart-card { padding: 0.9rem 0.85rem 0.75rem; }
+  .panel-head h2 { font-size: 0.82rem; }
+}
+
+/* ── Detailansicht (Leapmotor) ───────────────────────────── */
+/* Nutzt durchgehend die bestehenden Design-Variablen: gleiche Farben,
+   Radien, Schatten und Abstände wie die übrigen Karten. */
+.card.clickable { cursor: pointer; transition: transform 0.15s ease, box-shadow 0.15s ease; }
+.card.clickable:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg, var(--shadow)); }
+.card.clickable:focus-visible { outline: 2px solid var(--ev); outline-offset: 2px; }
+.card-more { font-size: 0.78rem; color: var(--text-faint); margin-top: 0.5rem; }
+
+.detail-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  background: color-mix(in srgb, #05070b 62%, transparent);
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 0; overflow-y: auto;
+}
+.detail-overlay[hidden] { display: none; }
+.detail-sheet {
+  background: var(--bg); width: 100%; max-width: 900px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  border: 1px solid var(--border); border-bottom: none;
+  max-height: 94vh; display: flex; flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@media (min-width: 720px) {
+  .detail-overlay { align-items: center; padding: 1.5rem; }
+  .detail-sheet { border-radius: var(--radius); border-bottom: 1px solid var(--border); max-height: 88vh; }
+}
+.detail-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 1rem 1.2rem; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--bg); z-index: 1;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.detail-head h2 { margin: 0; font-size: 1.05rem; font-weight: 640; }
+.detail-body { padding: 1rem 1.2rem 1.6rem; overflow-y: auto; }
+.detail-section { margin-bottom: 1.4rem; }
+.detail-section > h3 {
+  margin: 0 0 0.7rem; font-size: 0.82rem; font-weight: 640;
+  text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim);
+}
+
+/* Live-Status als kompaktes Werteraster */
+.detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.7rem; }
+.detail-tile {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.7rem 0.85rem;
+}
+.detail-tile .dt-label { display: block; font-size: 0.74rem; color: var(--text-dim); margin-bottom: 0.25rem; }
+.detail-tile .dt-value { font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* Ampelpunkt neben dem Zustand — die Farbe verstärkt das Wort, sie ersetzt es
+   nicht. Ohne Zustand bleibt die Kachel wie bisher. */
+.detail-tile .dt-value .dot { width: 0.56rem; height: 0.56rem; margin-right: 0.42rem; display: inline-block; }
+.detail-tile .dt-value.muted { font-size: 0.95rem; font-weight: 600; color: var(--text-dim); }
+
+/* Energiequellen-Balken */
+.src-bar { display: flex; height: 12px; border-radius: 999px; overflow: hidden; background: var(--surface-2); margin-bottom: 0.6rem; }
+.src-bar span { display: block; height: 100%; }
+.src-legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+.src-item { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; }
+.src-item b { font-variant-numeric: tabular-nums; }
+.src-dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+/* Liste der Ladevorgänge */
+.session-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.session-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.8rem;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.65rem 0.85rem; cursor: pointer; text-align: left;
+  width: 100%; font: inherit; color: inherit;
+}
+.session-row:hover { border-color: var(--border-strong); }
+.session-row:focus-visible { outline: 2px solid var(--ev); outline-offset: 2px; }
+.session-when { display: flex; flex-direction: column; gap: 0.15rem; }
+.session-date { font-weight: 640; font-size: 0.9rem; }
+.session-time { font-size: 0.78rem; color: var(--text-dim); }
+.session-energy { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.session-detail { padding: 0.2rem 0.85rem 0.8rem; }
+.session-empty { color: var(--text-dim); font-size: 0.88rem; padding: 0.6rem 0; }
+
+/* Einfaches Balkendiagramm (gleiche SVG-Technik wie der Tagesverlauf) */
+.ev-chart { width: 100%; height: 150px; display: block; }
+.ev-bar { fill: var(--ev); }
+.ev-chart-label { font-size: 11px; fill: var(--text-faint); }
+
+.connect-btn {
+  border: 1px solid var(--border-strong); background: var(--surface);
+  color: var(--text); border-radius: 999px; padding: 0.3rem 0.75rem;
+  font-size: 0.78rem; font-weight: 600; cursor: pointer;
+}
+.connect-btn:hover { border-color: var(--ev); }
+.connect-btn[disabled] { opacity: 0.6; cursor: default; }
+.connect-btn.ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--battery) 40%, transparent); }
+
+/* ══════════════════════════════════════════════════════════════════════
+   MOBILE PREMIUM LAYER
+   Ziel: natives App-Gefühl. Ruhige Flächen, präzise Typografie, Farbe als
+   Licht statt als Fläche, Daumen-taugliche Bedienung, dezente Bewegung.
+   Ändert ausschliesslich Darstellung — keine Logik, keine Werte.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── Sektionsüberschriften: ruhiger, mit klarer Rangfolge ──
+   Alle Abschnitte tragen dieselbe Überschrift. Vorher stand „Live-Energiefluss"
+   gemischt gesetzt und gross über der Anlage, während „JETZT", „HEUTE" und
+   „KOSTEN & ERSPARNIS" in ruhigen Versalien standen — die erste Zeile der Seite
+   fiel damit aus dem eigenen System heraus. */
+.panel-head h2,
+.flow-head h2 {
+  font-size: 0.86rem; font-weight: 660; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.07em;
+}
+
+/* ── App-Bar ── */
+.topbar { border-bottom: 1px solid var(--border); }
+.status-chip { transition: transform 0.12s ease, border-color 0.2s, background 0.2s; }
+.status-chip:active { transform: scale(0.96); }
+.icon-btn:active { transform: scale(0.94); }
+.icon-btn { transition: transform 0.12s ease, border-color 0.2s, color 0.2s; }
+
+/* ── Zahlen aktualisieren sich weich, ohne zu blinken ──
+   Wird beim tatsächlichen Wertwechsel gesetzt (nicht bei jedem Poll). */
+@keyframes value-settle {
+  0%   { opacity: 0.45; transform: translateY(-2px); }
+  100% { opacity: 1;    transform: none; }
+}
+.value-changed { animation: value-settle 0.34s cubic-bezier(0.22, 1, 0.36, 1); }
+@media (prefers-reduced-motion: reduce) { .value-changed { animation: none; } }
+
+/* ── Karten: Druckfeedback wie in nativen Apps ── */
+.card.clickable:active { transform: scale(0.985); }
+.card.clickable { transition: transform 0.14s cubic-bezier(0.22,1,0.36,1), box-shadow 0.2s ease; }
+
+/* ── LEAPMOTOR als optisches Highlight ──
+   Etwas mehr Präsenz als die übrigen Karten, ohne aus dem System zu fallen. */
+.card.ev {
+  background:
+    radial-gradient(130% 90% at 100% 0%, color-mix(in srgb, var(--ev) 13%, transparent), transparent 62%),
+    linear-gradient(180deg, var(--card-sheen), transparent 45%),
+    var(--surface);
+  border-color: color-mix(in srgb, var(--ev) 24%, var(--border));
+}
+/* Lädt gerade: die Karte lebt dezent auf (Klasse wird beim Laden gesetzt). */
+.card.ev.is-charging { border-color: color-mix(in srgb, var(--ev) 52%, var(--border)); }
+.card.ev.is-charging .value { color: var(--ev); }
+.card.ev.is-charging .card-icon {
+  background: color-mix(in srgb, var(--ev) 20%, transparent);
+  animation: ev-breathe 2.8s ease-in-out infinite;
+}
+@keyframes ev-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ev) 32%, transparent); }
+  50%      { box-shadow: 0 0 0 7px color-mix(in srgb, var(--ev) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .card.ev.is-charging .card-icon { animation: none; } }
+
+/* Statuszeile in der Fahrzeugkarte */
+.ev-status-line {
+  display: flex; align-items: center; gap: 0.45rem;
+  font-size: 0.8rem; color: var(--text-dim); margin: 0.15rem 0 0;
+}
+.ev-status-line .dot { width: 0.5rem; height: 0.5rem; }
+
+/* ── Bottom-Navigation (nur Mobile) ──
+   Springt zu den vorhandenen Abschnitten. Keine neue Seitenlogik, keine
+   Routen — nur Daumen-Erreichbarkeit auf langen Seiten. */
+.tabbar { display: none; }
+@media (max-width: 760px) {
+  .tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 0.15rem; padding: 0.4rem 0.5rem;
+    padding-bottom: max(0.4rem, env(safe-area-inset-bottom));
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: saturate(180%) blur(18px);
+    -webkit-backdrop-filter: saturate(180%) blur(18px);
+    border-top: 1px solid var(--border);
+  }
+  .tabbar button {
+    appearance: none; border: none; background: transparent; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 0.15rem;
+    padding: 0.35rem 0.2rem 0.3rem; border-radius: 12px;
+    color: var(--text-faint); font: inherit; font-size: 0.71rem; font-weight: 600;
+    letter-spacing: 0.01em; min-height: 48px; /* Touch-Ziel */
+    transition: color 0.18s ease, background 0.18s ease, transform 0.12s ease;
+  }
+  .tabbar button:active { transform: scale(0.94); }
+  .tabbar button .tb-icon {
+    width: 20px; height: 20px; display: block;
+    stroke: currentColor; fill: none; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .tabbar button.active { color: var(--accent-strong); background: color-mix(in srgb, var(--accent-strong) 12%, transparent); }
+  /* Platz, damit die Leiste nichts verdeckt */
+  body { padding-bottom: calc(58px + env(safe-area-inset-bottom)); }
+  .app-footer { padding-bottom: 1rem; }
+}
+
+/* ── Mobile Feinschliff ── */
+@media (max-width: 560px) {
+  /* Kopfbereich der Flusskarte kompakter — mehr Platz fürs Diagramm */
+  /* (Die Versalien gelten inzwischen überall — siehe oben.) */
+  .flow-updated { font-size: 0.7rem; }
+
+  /* Werte dominanter, Beiwerk zurückhaltender */
+  .card .value { letter-spacing: -0.035em; }
+  .card .meta { font-size: 0.7rem; }
+  .card-icon { width: 40px; height: 40px; padding: 5px; border-radius: 12px; }
+  .card-icon-emoji { width: 40px; height: 40px; font-size: 1.2rem; border-radius: 12px; }
+
+  /* Tageskacheln kompakter, damit weniger gescrollt werden muss */
+  .today-grid { grid-template-columns: repeat(2, 1fr); gap: 0.6rem; }
+  .stat { padding: 0.7rem 0.8rem; }
+  .stat .s-value { font-size: 1.1rem; }
+
+  /* Bedienelemente auf Daumengrösse */
+  .chip { padding: 0.45rem 1rem; font-size: 0.84rem; }
+  .vt-btn { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
+  .date-btn { width: 2.4rem; height: 2.4rem; }
+  .connect-btn { padding: 0.42rem 0.9rem; font-size: 0.8rem; }
+  .reconnect-btn { padding: 0.45rem 0.85rem; }
+}
+
+/* Sehr schmale Geräte (320 px): nichts darf abgeschnitten werden */
+@media (max-width: 360px) {
+  .kpi .kpi-value { font-size: 1.22rem; }
+  .card .value { font-size: 1.64rem; }
+  .today-grid { grid-template-columns: repeat(2, 1fr); }
+  .stat .s-value { font-size: 1rem; }
+  main { padding-left: 0.75rem; padding-right: 0.75rem; }
+}
+
+/* ── Detailansicht: weiches Erscheinen wie ein natives Sheet ── */
+@keyframes sheet-in {
+  from { transform: translateY(3%); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+@keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
+.detail-overlay { background: var(--scrim); animation: scrim-in 0.22s ease; }
+.detail-sheet {
+  animation: sheet-in 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: var(--elev-3);
+}
+@media (prefers-reduced-motion: reduce) {
+  .detail-overlay, .detail-sheet { animation: none; }
+}
+.detail-tile {
+  background: linear-gradient(180deg, var(--card-sheen), transparent 55%), var(--surface);
+  box-shadow: var(--elev-1);
+}
+.session-row { transition: transform 0.12s ease, border-color 0.18s ease; }
+.session-row:active { transform: scale(0.985); }
+
+/* ── Charts etwas ruhiger und präziser ── */
+.chart-grid-line { stroke: color-mix(in srgb, var(--border) 70%, transparent); }
+.chart-axis-label { font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart-line { stroke-width: 2.2; }
+.chart-tooltip { box-shadow: var(--elev-3); border-radius: 14px; }
+
+/* ── Dichte & Rhythmus auf dem Handy ──
+   Weniger Leerlauf zwischen Kopf und Wert, dafür klarere Gruppen. */
+@media (max-width: 560px) {
+  .card { gap: 0.15rem; }
+  .card .value { margin-top: 0.35rem; }
+  .card .sub, .ev-status-line { margin-top: 0.1rem; }
+  .breakdown { margin-top: 0.65rem; padding-top: 0.55rem; border-top: 1px solid var(--border); gap: 0.4rem; }
+  .breakdown-row { font-size: 0.8rem; }
+  .card .meta { margin-top: 0.55rem; }
+  .stored-line { margin-top: 0.5rem; }
+
+  /* Tageskacheln bekommen denselben Akzentstrich wie die Kennzahlen oben —
+     dadurch wirkt die Seite als ein System statt als zwei Baukästen. */
+  .stat { position: relative; overflow: hidden; box-shadow: var(--elev-1); }
+  .stat .s-label { font-size: 0.72rem; }
+
+  /* Kostenkarten: gleiche Dichte wie die übrigen Karten */
+  #cost-grid .card .value { font-size: 1.6rem; }
+}
+
+/* ── Systemstatus-Panel: wie ein natives Sheet, nicht wie ein Kasten ── */
+.source-panel {
+  box-shadow: var(--elev-2);
+  background: linear-gradient(180deg, var(--card-sheen), transparent 40%), var(--surface);
+}
+.source-row .s-name { font-weight: 600; }
+@media (max-width: 560px) {
+  .source-panel { width: calc(100% - 1.8rem); border-radius: var(--radius); }
+  .source-row { padding: 0.7rem 0.3rem; }
+}
+
+/* ── Detailansicht: Kopf klarer, Inhalte luftiger ── */
+.detail-head h2 { font-size: 0.95rem; font-weight: 680; letter-spacing: -0.01em; }
+.detail-section > h3 { font-size: 0.72rem; letter-spacing: 0.08em; }
+@media (max-width: 560px) {
+  .detail-grid { grid-template-columns: repeat(2, 1fr); gap: 0.6rem; }
+  .detail-tile { padding: 0.65rem 0.75rem; border-radius: 14px; }
+  .detail-tile .dt-value { font-size: 1.08rem; }
+  .detail-body { padding: 0.9rem 0.95rem 1.4rem; }
+  .detail-sheet { max-height: 92vh; }
+}
+
+/* ── Energiequellen-Balken etwas edler ── */
+.src-bar { height: 14px; box-shadow: inset 0 1px 2px rgba(0,0,0,0.08); }
+.src-bar span { transition: width 0.6s cubic-bezier(0.22,1,0.36,1); }
+
+/* ── Ladeliste: Zeilen mit klarer Trefferfläche ── */
+@media (max-width: 560px) {
+  .session-row { padding: 0.8rem 0.9rem; border-radius: 14px; }
+  .session-date { font-size: 0.88rem; }
+}
+
+/* ── Sehr schmale Geräte: Kopfzeile darf nie überlaufen ──
+   Marke schrumpft zuerst, Statusanzeige bleibt lesbar. */
+/* Auf schmalen Telefonen weicht die Statusanzeige, nicht der Name der App.
+   Vorher stand dort „Smart…" neben „Alle Systeme o…" — beides unfertig.
+   Jetzt bleibt „SmartHome" immer vollständig, und der Status wechselt in
+   seine Kurzfassung („Online", „2 offline"). */
+@media (max-width: 430px) {
+  #status-text { font-size: 0; }
+  #status-text::after {
+    content: attr(data-short);
+    font-size: 0.78rem; font-weight: 550;
+  }
+}
+@media (max-width: 380px) {
+  .topbar { padding-left: 0.75rem; padding-right: 0.75rem; gap: 0.5rem; }
+  .brand { min-width: 0; flex: 0 0 auto; }
+  .brand h1 { white-space: nowrap; }
+  .topbar-actions { flex: 1 1 auto; justify-content: flex-end; min-width: 0; }
+  .status-chip { padding: 0.38rem 0.62rem; }
+  #status-text::after { font-size: 0.74rem; }
+  .tabbar button { font-size: 0.68rem; }
+}
+
+/* ── Schriftgrösse im Energiefluss (Barrierefreiheit) ──
+   Die Zahlen selbst werden in JS berechnet (mit automatischer Begrenzung).
+   Namen und Zusatzzeilen skalieren hier gedämpft mit. */
+.node-name { font-size: calc(13.5px * var(--flow-name-scale, 1)); }
+.node-sub  { font-size: calc(11.5px * var(--flow-sub-scale, 1)); }
+
+@media (max-width: 560px) {
+  /* Kopfzeile darf bei Bedarf umbrechen, damit nichts gedrängt wirkt. */
+  .flow-head { flex-wrap: wrap; gap: 0.4rem; row-gap: 0.3rem; }
+}
+
+/* ── Einstellungen ──
+   Nutzt dieselbe Sheet-Optik wie die Fahrzeug-Detailansicht, damit sich beides
+   wie ein Produkt anfühlt. Segmentschalter = bestehende .view-toggle-Optik. */
+.setting-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.9rem; flex-wrap: wrap;
+  padding: 0.8rem 0; border-bottom: 1px solid var(--border);
+}
+.setting-row:last-child { border-bottom: none; }
+.setting-text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.setting-title { font-size: 0.92rem; font-weight: 620; color: var(--text); }
+.setting-hint { font-size: 0.76rem; color: var(--text-faint); line-height: 1.4; }
+.setting-toggle { flex: none; }
+
+/* Die Tarifzahlen waren vorher nicht als Eingabefeld zu erkennen — kein
+   Rahmen, kein Grund, keine Linie. Man sah zwei Zahlen und musste raten, dass
+   man sie ändern kann. Jetzt trägt jedes Feld eine Schreiblinie und einen
+   eigenen Grund; beim Tippen färbt sie sich. */
+.setting-input {
+  border: none; border-bottom: 2px solid var(--border-strong);
+  background: var(--surface-2); color: var(--text);
+  font: inherit; font-size: 1.1rem; font-weight: 700;
+  font-variant-numeric: tabular-nums; width: 100%;
+  padding: 0.3rem 0.5rem; margin-top: 0.15rem;
+  border-radius: 8px 8px 0 0;
+  appearance: textfield; -moz-appearance: textfield;
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+.setting-input:hover { border-bottom-color: var(--text-faint); }
+.setting-input:focus { outline: none; border-bottom-color: var(--house); }
+.detail-tile:focus-within { border-color: var(--house); box-shadow: 0 0 0 3px color-mix(in srgb, var(--house) 16%, transparent); }
+.setting-unit { font-size: 0.74rem; color: var(--text-faint); }
+
+/* ── Rangfolge der Schaltflächen ───────────────────────────────────────
+   Vorher sah jede Schaltfläche gleich aus: umrandete Pille, gleiche Farbe,
+   gleiches Gewicht. „Tarife speichern" wirkte damit so beiläufig wie
+   „Verbinden". Die Hauptaktion eines Bereichs ist jetzt gefüllt, alles
+   Weitere bleibt umrandet und ruhig. */
+.btn-primary {
+  border: 1px solid transparent; background: var(--accent-strong); color: var(--on-accent);
+  border-radius: 999px; padding: 0.5rem 1.15rem;
+  font: inherit; font-size: 0.86rem; font-weight: 640; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+  box-shadow: var(--elev-1);
+  transition: filter 0.15s ease, transform 0.12s ease, box-shadow 0.15s ease;
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.06); box-shadow: var(--elev-2); }
+.btn-primary:active:not(:disabled) { transform: scale(0.97); }
+.btn-primary:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
+@media (max-width: 760px), (pointer: coarse) {
+  .btn-primary { min-height: 44px; padding-inline: 1.3rem; }
+}
+.setting-actions {
+  display: flex; align-items: center; gap: 0.8rem; margin-top: 0.8rem; flex-wrap: wrap;
+}
+
+@media (max-width: 560px) {
+  /* Auf dem Handy stehen Beschriftung und Schalter untereinander —
+     so bleiben die Schaltflächen breit genug für den Daumen. */
+  .setting-row { flex-direction: column; align-items: stretch; gap: 0.55rem; }
+  .setting-toggle { width: 100%; }
+  .setting-toggle .vt-btn { flex: 1 1 0; text-align: center; padding: 0.55rem 0.4rem; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   HAUSANSICHT — freigestelltes 3D-Rendering der eigenen Anlage
+   Das Haus steht frei auf dem App-Hintergrund: keine Bildfläche, keine
+   Card, kein Kreis, keine sichtbaren Ränder des Bildassets. Darüber liegen
+   nur Energiewege und Messwerte. Reine Darstellung, es wird nichts gerechnet.
+
+   Die Beschriftungen sind bewusst typografisch statt kastenförmig: Eine feine
+   farbige Linie trägt die Angabe, die Zuleitung vom Gerät läuft ohne Bruch in
+   sie hinein. Bei den Speichern wird aus derselben Linie der Ladebalken.
+   ══════════════════════════════════════════════════════════════════════ */
+.scene-wrap {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  /* Etwas Luft zur Überschrift — die oberste Angabe beginnt direkt an der
+     Oberkante der Zeichenfläche. */
+  margin-top: 0.45rem;
+
+  --sc-idle: rgba(118, 131, 150, 0.5);
+  --sc-casing: rgba(9, 13, 20, 0.34);
+  --sc-lead: rgba(96, 110, 130, 0.5);
+  --sc-text: #0d1219;
+  --sc-dim: #5b6675;
+  --sc-halo: rgba(255, 255, 255, 0.82);
+  --sc-track: rgba(16, 21, 28, 0.14);
+
+  --sc-sun-glow: #ffb43c;
+}
+:root[data-theme='dark'] .scene-wrap,
+:root.dark .scene-wrap {
+  --sc-idle: rgba(255, 255, 255, 0.26);
+  --sc-casing: rgba(0, 0, 0, 0.5);
+  --sc-lead: rgba(255, 255, 255, 0.3);
+  --sc-text: #f2f6fc;
+  --sc-dim: #93a0b2;
+  --sc-halo: rgba(6, 10, 16, 0.8);
+  --sc-track: rgba(255, 255, 255, 0.16);
+
+  --sc-sun-glow: #ffab2e;
+}
+.scene-wrap[hidden] { display: none; }
+
+/* In der Hausansicht trägt die Karte selbst keine Fläche mehr: kein Weiss,
+   kein Rahmen, kein Schatten. Das freigestellte Haus steht damit direkt auf
+   dem App-Hintergrund statt in einer Box. Die Diagramm-Ansicht behält ihre
+   Karte — dort ordnet sie die Knoten und wird gebraucht. */
+.flow-card.is-house {
+  background: none; border-color: transparent; box-shadow: none;
+  padding-left: 0.25rem; padding-right: 0.25rem; padding-bottom: 0;
+}
+.flow-card.is-house .flow-head { padding: 0 0.65rem; }
+
+#scene-svg {
+  display: block; width: 100%; height: auto;
+  /* Bewusst OHNE background, border-radius und box-shadow — genau die würden
+     die rechteckige Bildfläche erzeugen, die hier nicht sein darf. */
+  background: none;
+  /* Die Höhe begrenzt die Szene nur dort, wo das Fenster flach ist. Auf einem
+     normalen Bildschirm soll sie ihre Spalte wirklich ausfüllen — vorher blieb
+     bei 1440 px fast die Hälfte der Zeile leer, und die Beschriftungen landeten
+     bei 9 px. */
+  max-height: min(78vh, 780px);
+  --sc-line: 5.5;
+
+  /* Himmelskörper: Lage, Grösse und Leuchtkraft je Bildschirmklasse.
+     Alle Werte in Bildeinheiten der viewBox — dadurch sitzt die Sonne
+     relativ zur Szene, nicht relativ zum Fenster. Scheibendurchmesser
+     Desktop = 512 x 0,617 x 0,475 = 150 von 1485 = 10 % der Szenenbreite. */
+  --sky-x: 1425px;
+  --sky-y: -162px;
+  --sky-scale: 0.475;
+  --sun-glow: drop-shadow(0 0 44px rgba(255, 176, 70, 0.5))
+              drop-shadow(0 0 128px rgba(255, 146, 28, 0.28));
+  --moon-glow: drop-shadow(0 0 38px rgba(206, 226, 255, 0.42))
+               drop-shadow(0 0 116px rgba(150, 186, 240, 0.2));
+}
+
+/* Der Schatten hängt am Bild und folgt damit dem Alphakanal: Er umspielt die
+   Silhouette des Hauses statt eines Rechtecks. Das erdet das Gebäude —
+   besonders im hellen Design — ohne einen Container anzudeuten. */
+.sc-photo { filter: drop-shadow(0 16px 22px rgba(10, 16, 26, 0.26)); }
+:root[data-theme='dark'] .sc-photo,
+:root.dark .sc-photo { filter: drop-shadow(0 18px 30px rgba(0, 0, 0, 0.5)); }
+
+/* ── Sonne und Mond ──────────────────────────────────────────────────── */
+/* Atmosphärische Ebene, kein Bestandteil des Strommasts: Beide stehen frei
+   im Himmel oben rechts, deutlich abgesetzt vom Mast. Gezeichnet werden sie
+   im Ursprung; Lage und Grösse kommen aus --sky-*, damit Telefon, Tablet und
+   Desktop eigene Werte bekommen können. Sie liegen hinter dem Bild — nur ihr
+   Schein reicht über die Szene, der Mast verdeckt ihn dort. */
+.sc-sky {
+  transform-box: view-box;
+  transform-origin: 0 0;
+  transform: translate(var(--sky-x), var(--sky-y)) scale(var(--sky-scale));
+}
+.sc-sun, .sc-moon, .sc-sunwash { opacity: 0; transition: opacity 1.4s ease; pointer-events: none; }
+.sc-sun { filter: var(--sun-glow); }
+.sc-moon { filter: var(--moon-glow); }
+#scene-svg.is-sun .sc-sun,
+#scene-svg.is-sun .sc-sunwash { opacity: 1; }
+#scene-svg.is-moon .sc-moon { opacity: 1; }
+
+/* ── Energiewege ─────────────────────────────────────────────────────── */
+/* Dunkle Fassung unter der Farbe. Das Rendering wechselt mit dem Design
+   nicht mit — heller Beton und dunkles Dach liegen immer nebeneinander.
+   Die Fassung gibt der Leitung deshalb überall denselben Halt. */
+.sc-casing path {
+  stroke: var(--sc-casing);
+  stroke-width: calc(var(--sc-line) * 2.1);
+}
+
+/* Ruhende Leitung: immer sichtbar, damit die Verbindung erkennbar bleibt —
+   aber deutlich zurückgenommen, solange nichts fliesst. */
+.sc-edges path {
+  stroke: var(--sc-idle); stroke-width: var(--sc-line);
+  opacity: 0.95; transition: stroke 0.5s ease, opacity 0.5s ease;
+}
+.sc-edges path.active { stroke: var(--flow); opacity: 0.55; }
+
+/* Wandernde Lichtpunkte: runde Kappen auf punktförmiger Strichfolge. Das
+   liest sich als fliessende Energie, nicht als gestrichelte Linie. */
+.sc-flows path {
+  stroke-width: calc(var(--sc-line) * 1.85);
+  stroke-dasharray: 1 44;
+  opacity: 0; transition: opacity 0.5s ease;
+}
+.sc-flows path.active {
+  stroke: var(--flow); color: var(--flow); opacity: 1;
+  animation: sc-move var(--speed, 2.9s) linear infinite;
+  filter: drop-shadow(0 0 6px currentColor);
+}
+.sc-flows path.active.reverse { animation-direction: reverse; }
+/* Periode = 1 + 44 = 45; drei Perioden ergeben eine nahtlose Schleife. */
+@keyframes sc-move { to { stroke-dashoffset: -135; } }
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keine Bewegung, aber Farbe und Glühen bleiben — der Fluss ist weiter
+     erkennbar, nur eben ruhend. */
+  .sc-flows path.active { animation: none; stroke-dasharray: 1 22; }
+  .sc-sun, .sc-moon, .sc-sunwash { transition: none; }
+}
+
+/* Ankerpunkt am Gerät und Verteilpunkt am Wechselrichter.
+   Der Ring trägt die Farbe der zugehörigen Angabe — das verbindet Bild und
+   Wert auch dort, wo keine Zeigelinie läuft. */
+.sc-dot {
+  fill: #fff;
+  stroke: var(--flow, rgba(9, 14, 22, 0.55));
+  stroke-width: 4.5;
+  filter: drop-shadow(0 1px 2px rgba(9, 14, 22, 0.45));
+}
+.sc-hub-ring { fill: none; stroke: rgba(255, 255, 255, 0.8); stroke-width: 3.5; }
+.sc-hub-core { fill: #fff; filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.85)); }
+
+/* ── Beschriftungen ──────────────────────────────────────────────────── */
+/* Zuleitung und farbige Linie bilden einen durchgehenden Strich. */
+.sc-cal-lead { stroke: var(--sc-lead); stroke-width: 2.4; }
+.sc-cal-rule { fill: var(--flow); opacity: 0.9; }
+/* Bei den Speichern wird aus der Linie der Ladebalken: Die Linie ist die
+   Spur, der farbige Teil der Ladestand. */
+.sc-cal[data-cal^='bat'] .sc-cal-rule { fill: var(--sc-track); opacity: 1; }
+.sc-cal-fill {
+  fill: var(--flow);
+  transition: width 0.9s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.4s ease;
+}
+
+/* Halo statt Kasten: hält die Schrift auch über hellem Beton lesbar,
+   ohne eine Fläche einzuführen. */
+.sc-cal-label,
+.sc-cal-value {
+  paint-order: stroke fill;
+  stroke: var(--sc-halo);
+  stroke-linejoin: round;
+}
+/* `--sc-px` = wie viele Bildeinheiten ein Bildschirmpixel sind (wird in
+   app.js gesetzt). Damit lässt sich eine Untergrenze in echten Pixeln ziehen:
+   In einem flachen Fenster schrumpft die Szene über die Höhe, und die Namen
+   wären sonst 7 px hoch. Auf normalen Bildschirmen greift die Grenze nicht —
+   dort gelten die entworfenen 23 bzw. 53 Einheiten.
+
+   Die Grundgrösse ist eine Stufe feiner als zuvor (Name 11 → 10 px, Wert
+   22 → 20 px, Zusatz 12 → 11 px). Grosse Zahlen wirken schnell grob; in
+   dieser Grösse bleibt die Angabe klar lesbar, tritt aber hinter die Anlage
+   zurück, statt vor ihr zu stehen. Wer mehr braucht, stellt in den
+   Einstellungen „Groß" oder „Sehr groß" ein. */
+.sc-cal-label {
+  fill: var(--sc-dim);
+  font-size: calc(max(23px, 10px * var(--sc-px, 1)) * var(--sc-chip-scale, 1));
+  font-weight: 680; letter-spacing: 0.075em; text-transform: uppercase;
+  stroke-width: 4.5px;
+}
+.sc-cal-value {
+  fill: var(--sc-text);
+  font-size: calc(max(53px, 20px * var(--sc-px, 1)) * var(--sc-chip-scale, 1));
+  font-weight: 740; font-variant-numeric: tabular-nums; letter-spacing: -0.012em;
+  stroke-width: 6px;
+}
+/* Dritte Zeile: was das Gerät gerade tut („lädt 1,2 kW"). Bewusst leiser als
+   der Wert — sie ergänzt ihn, sie konkurriert nicht mit ihm. */
+.sc-cal-note {
+  fill: var(--sc-dim);
+  font-size: calc(max(24px, 11px * var(--sc-px, 1)) * var(--sc-chip-scale, 1));
+  font-weight: 620; font-variant-numeric: tabular-nums;
+  paint-order: stroke fill; stroke: var(--sc-halo); stroke-linejoin: round;
+  stroke-width: 4.5px;
+}
+#scene-svg.sc-narrow .sc-cal-note {
+  font-size: calc(clamp(11.5px * var(--sc-px, 1), 48px, 13.5px * var(--sc-px, 1)) * var(--sc-zoom));
+  stroke-width: 9px;
+}
+
+/* Tablet und kleine Laptops: eigene Abstimmung zwischen Telefon und Desktop.
+   Scheibe = 135 von 1485 = 9,1 %. */
+@media (min-width: 561px) and (max-width: 1024px) {
+  #scene-svg.sc-wide {
+    --sky-x: 1390px;
+    --sky-y: -152px;
+    --sky-scale: 0.428;
+    --sun-glow: drop-shadow(0 0 38px rgba(255, 176, 70, 0.47))
+                drop-shadow(0 0 108px rgba(255, 146, 28, 0.25));
+    --moon-glow: drop-shadow(0 0 33px rgba(206, 226, 255, 0.39))
+                 drop-shadow(0 0 98px rgba(150, 186, 240, 0.18));
+  }
+}
+
+/* ── Schmale Anordnung ────────────────────────────────────────────────
+   Am Telefon ist die Szene 1615 Einheiten breit auf rund 350 Pixeln — Faktor
+   0,22. Mit den Werten der breiten Anordnung wären die Namen dort 6 px hoch
+   und damit unlesbar. Die schmale Anordnung stellt die Angaben deshalb zu
+   zweit in Bänder (siehe scene.js) und darf sie dafür doppelt so gross
+   setzen: Name ≈ 11 px, Wert ≈ 24 px auf dem Gerät.
+
+   Die einstellbare Vergrösserung wirkt hier gedämpft (Faktor 0,45): Die
+   Schrift ist bereits gross, und bei voller Vergrösserung liefen „GROSSER
+   SPEICHER" und „KLEINER SPEICHER" sonst über den rechten Rand hinaus. */
+#scene-svg.sc-narrow {
+  max-height: none;
+  --sc-line: 9;
+  --sc-zoom: calc(1 + (var(--sc-chip-scale, 1) - 1) * 0.45);
+  /* Dieselbe Ecke wie am Schreibtisch. Der Himmelskörper stand vorher bei
+     x 860 — das ist die Bildmitte, und seine Scheibe lag mit y −200…−80 genau
+     auf der Zeile der beiden Werte (−181…−62). Damit sass er nicht am Himmel,
+     sondern in der Reihe der Angaben: ein drittes, unbeschriftetes Objekt
+     zwischen „PV" und „Netz". Genau das liess ihn zufällig hingesetzt wirken.
+
+     Jetzt gehört ihm die rechte obere Ecke, oberhalb und rechts der
+     Netz-Angabe (die dafür bei 1200 endet) und über dem Strommast — die
+     Anordnung der breiten Ansicht, nur enger. Die Scheibe steht mit
+     y −235…−109 vollständig ÜBER der Wertzeile; das Netzkabel verlässt sein
+     Schild bei −56 und läuft 53 Einheiten darunter vorbei, ohne sie zu
+     streifen.
+
+     Scheibe = 126 von 1485 = 8,5 % (Desktop 10,1 %, vorher 7,3 %): etwas
+     kräftiger, damit sie in der Ecke als Himmelskörper trägt und nicht als
+     Fleck. Aussenkante 1462 bei einer Zeichenfläche bis 1545. */
+  --sky-x: 1360px;
+  --sky-y: -172px;
+  --sky-scale: 0.4;
+  --sun-glow: drop-shadow(0 0 30px rgba(255, 176, 70, 0.44))
+              drop-shadow(0 0 84px rgba(255, 146, 28, 0.22));
+  --moon-glow: drop-shadow(0 0 26px rgba(206, 226, 255, 0.36))
+               drop-shadow(0 0 76px rgba(150, 186, 240, 0.16));
+}
+#scene-svg.sc-narrow .sc-cal-lead { stroke-width: 6.5; }
+/* Grenzen in echten Bildschirmpixeln: `--sc-px` sagt, wie viele Bildeinheiten
+   ein Pixel sind (siehe syncSceneUnit in app.js). Auf einem 320-px-Gerät
+   wächst die Schrift dadurch mit, statt auf 9 px zu schrumpfen; auf einem
+   Tablet knapp unterhalb der breiten Anordnung bleibt sie stehen, statt auf
+   47 px anzuschwellen. Dazwischen gelten die entworfenen Werte.
+   Name 10,5–13,5 px, Wert 20–27 px auf dem Gerät.
+
+   Die Untergrenze des Namens lag bei 9,5 px und griff auf dem Telefon
+   tatsächlich (gemessen 9,4 px) — unter dem oben genannten Entwurfsziel von
+   rund 11 px. In Versalien und halbfett ist das die Grenze des Lesbaren.
+   10,5 px kostet den Namen 11 % mehr Breite; „GROSSER SPEICHER" bleibt damit
+   bei 529 von 1105 verfügbaren Einheiten die längste Angabe der Zeile. */
+#scene-svg.sc-narrow .sc-cal-label {
+  font-size: calc(clamp(10.5px * var(--sc-px, 1), 44px, 12.5px * var(--sc-px, 1)) * var(--sc-zoom));
+  stroke-width: 9px;
+}
+#scene-svg.sc-narrow .sc-cal-value {
+  font-size: calc(clamp(18px * var(--sc-px, 1), 88px, 24px * var(--sc-px, 1)) * var(--sc-zoom));
+  stroke-width: 13px;
+}
+#scene-svg.sc-narrow .sc-dot { r: 13; }
+#scene-svg.sc-narrow .sc-hub-ring { r: 26; stroke-width: 5; }
+#scene-svg.sc-narrow .sc-hub-core { r: 10; }

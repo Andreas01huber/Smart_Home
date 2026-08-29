@@ -1,0 +1,41 @@
+# Was NICHT ins Image gehoert.
+
+# Enthaelt absolute Pfade und plattformabhaengige Binaerdateien des Host-PCs.
+# Im Container wird ohnehin frisch installiert.
+**/node_modules
+
+# Zugangsdaten gehoeren nicht in ein Image - sie kommen als Volume dazu.
+secrets.json
+.env
+
+# Laufzeitdaten: Die Historie liegt in einem Volume, nicht im Image. Sonst
+# traegt jedes Image den Datenstand vom Bauzeitpunkt mit sich herum.
+data
+
+# Baureste - der Server laeuft aus den Quellen. Mit ** geschrieben, weil sie
+# nicht im Projektstamm liegen, sondern in jedem Workspace einzeln
+# (apps/server/dist, packages/core/dist, ...).
+**/dist
+**/*.tsbuildinfo
+
+# Nur fuer die Entwicklung am PC, im Container ohne Funktion.
+*.cmd
+deploy
+docs
+.claude
+.git
+.gitignore
+**/*.log
+
+# Grafik-Originale im Projektstamm. Bewusst einzeln aufgezaehlt statt "*.png":
+# Ein Muster waere hier zwar auch nur auf die oberste Ebene gemuenzt, aber falls
+# sich das je anders verhaelt, faehrt das Image ohne die Bilder in
+# apps/server/public/assets - und das Dashboard bliebe leer, ohne Fehlermeldung.
+App_Icon27_08_2026.png
+Haus_Dashboard.png
+Mond_Icon.png
+Moond_Icon
+Sonnen_Icon.png
+großerSpeicher_Icon.png
+kleinerSpeicher_Icon.png
+smarthome-icon.ico

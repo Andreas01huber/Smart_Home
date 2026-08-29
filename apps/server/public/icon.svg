@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Energie">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f2937"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#e8961b"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+
+  <!-- Sonne -->
+  <circle cx="32" cy="21" r="8" fill="url(#sun)"/>
+  <g stroke="url(#sun)" stroke-width="2.4" stroke-linecap="round">
+    <line x1="32" y1="6"  x2="32" y2="10"/>
+    <line x1="32" y1="32" x2="32" y2="36"/>
+    <line x1="17" y1="21" x2="21" y2="21"/>
+    <line x1="43" y1="21" x2="47" y2="21"/>
+    <line x1="21.4" y1="10.4" x2="24.2" y2="13.2"/>
+    <line x1="39.8" y1="28.8" x2="42.6" y2="31.6"/>
+    <line x1="42.6" y1="10.4" x2="39.8" y2="13.2"/>
+    <line x1="24.2" y1="28.8" x2="21.4" y2="31.6"/>
+  </g>
+
+  <!-- Blitz als Energiefluss -->
+  <path d="M34 38 L25 50 L31 50 L29 58 L39 45 L33 45 Z" fill="#3fc584"/>
+</svg>

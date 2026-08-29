@@ -1,0 +1,11 @@
+{
+  "name": "@energy/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Herstellerunabhängiges Energie-Datenmodell, Normalisierung und Source-of-Truth-Auflösung",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

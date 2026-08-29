@@ -1,0 +1,28 @@
+# systemd-Dienst fuer die Energie App (Raspberry Pi / Linux / NAS mit systemd).
+#
+# Installation (auf dem Dauergeraet):
+#   1) Node.js LTS + npm installieren, Projekt nach /opt/energie kopieren
+#   2) im Projekt einmal:  npm install
+#   3) diese Datei kopieren:  sudo cp deploy/energie.service /etc/systemd/system/
+#      (Pfade/Benutzer unten ggf. anpassen)
+#   4) sudo systemctl daemon-reload
+#      sudo systemctl enable --now energie
+#   Status:   systemctl status energie
+#   Logs:     journalctl -u energie -f
+
+[Unit]
+Description=Energie App (Fronius + Victron)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/energie
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=10
+# Netzwerk-Bindung 0.0.0.0 kommt aus config.json (im Heimnetz/VPN erreichbar).
+
+[Install]
+WantedBy=multi-user.target

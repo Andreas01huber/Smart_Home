@@ -1,0 +1,57 @@
+{
+  "port": 4173,
+  "host": "0.0.0.0",
+  "_host_hinweis": "0.0.0.0 = im Heimnetz erreichbar (Handy). 127.0.0.1 = nur dieser PC.",
+  "pollIntervalMs": 2000,
+
+  "sources": {
+    "fronius": {
+      "enabled": true,
+      "host": "192.168.178.121",
+      "displayName": "Fronius Symo 5.0-3-M"
+    },
+    "froniusGen24": {
+      "enabled": true,
+      "host": "192.168.178.39",
+      "displayName": "Fronius GEN24 (Hybrid)",
+      "batteryDisplayName": "Kleiner Speicher",
+      "usableCapacityWh": 11059,
+      "_hinweis": "GEN24 liefert seine Batteriekapazitaet selbst (BYD Battery-Box Premium HV, 11059 Wh). Wert bei Bedarf an die nutzbare Kapazitaet anpassen."
+    },
+    "victron": {
+      "enabled": true,
+      "host": "192.168.178.73",
+      "displayName": "Victron GX",
+      "batteryDisplayName": "Großer Speicher",
+      "usableCapacityWh": 50000,
+      "_hinweis": "usableCapacityWh bitte an die tatsaechliche nutzbare Kapazitaet anpassen. Das Batteriesystem meldet sie nicht ueber Modbus (Register 309 liefert 0)."
+    },
+
+    "evCharger": {
+      "enabled": true,
+      "deviceId": "bf90221e7d69b1ec315154",
+      "displayName": "LEAPMOTOR Charger",
+      "region": "eu",
+      "idleIntervalMs": 30000,
+      "activeIntervalMs": 10000,
+      "_hinweis": "Aimiler EV Charger (Tuya, Kategorie qccdz) - AUSSCHLIESSLICH LESEND. Zugangsdaten stehen in secrets.json, nicht hier. Der lokale Tuya-Port 6668 ist zwar offen, beantwortet aber weder Protokoll 3.3 noch 3.4 noch 3.5 (geprueft 26.08.2026), daher Cloud-Abfrage."
+    }
+  },
+
+  "announcedBatteries": [],
+
+  "tariff": {
+    "_hinweis": "Stromtarife fuer die Kostenberechnung (Anforderung 29). Ueber Einstellungen -> Tarife aenderbar.",
+    "importPricePerKWh": 0.28,
+    "exportPricePerKWh": 0.08
+  },
+
+  "sourceMapping": {
+    "_hinweis": "Empirisch am 18.08.2026 verifizierte Topologie: Fronius-Zaehler und Victron messen DENSELBEN Netzpunkt (beide ca. -1510 W), der Symo wird von Fronius UND Victron gesehen. Deshalb: Netz nur aus EINER Quelle, PV als Summe der zwei verschiedenen Wechselrichter, Verbrauch berechnet.",
+
+    "solarProductionW": ["fronius-local", "fronius-gen24"],
+    "gridImportW": "fronius-gen24",
+    "gridExportW": "fronius-gen24",
+    "houseConsumptionW": "derived"
+  }
+}

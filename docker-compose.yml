@@ -1,0 +1,65 @@
+# SmartHome im Dauerbetrieb.
+#
+#   docker compose up -d          starten (und beim Booten mitstarten)
+#   docker compose logs -f        mitlesen, was der Server meldet
+#   docker compose restart        neu starten, etwa nach einer Aenderung an config.json
+#   docker compose down           anhalten
+#   docker compose up -d --build  nach Code-Aenderungen neu bauen
+#
+# Danach erreichbar unter http://<IP-des-Rechners>:4173
+
+services:
+  smarthome:
+    build: .
+    image: smarthome:latest
+    container_name: smarthome
+
+    # Ohne das startet der Container nach einem Neustart des Rechners nicht von
+    # selbst wieder - der eigentliche Zweck eines Dauer-Servers.
+    restart: unless-stopped
+
+    # tsx startet den Server als Kindprozess. init raeumt die Zombies weg, die
+    # sonst ueber Wochen Laufzeit auflaufen.
+    init: true
+
+    ports:
+      - "4173:4173"
+
+    environment:
+      # Muss zur Anlage passen: Der Tageswechsel der Historie haengt daran.
+      TZ: Europe/Berlin
+
+    volumes:
+      # IP-Adressen, Port und Tarife. Schreibgeschuetzt eingehaengt - geaendert
+      # wird die Datei auf dem Host, danach "docker compose restart".
+      - ./config.json:/app/config.json:ro
+
+      # Zugangsdaten der Wallbox-Cloud. Liegt bewusst ausserhalb des Images.
+      # Fehlt die Datei, laeuft alles Uebrige weiter, nur die Wallbox bleibt leer
+      # - dann diese Zeile auskommentieren.
+      - ./secrets.json:/app/secrets.json:ro
+
+      # Historie, Tageswerte und Ladeprotokoll. Das Einzige, was der Container
+      # schreibt, und das Einzige, was ein Update ueberleben muss.
+      - ./data:/app/data
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4173/api/snapshot').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      # Der erste Start dauert laenger: tsx uebersetzt den Code einmal.
+      start_period: 40s
+      retries: 3
+
+# Hinweis zum Netzwerk: Der Standard (bridge) genuegt. Der Container erreicht
+# Fronius, Victron und die Tuya-Cloud nach aussen ohne Weiteres; herein kommt
+# nur, was oben unter ports steht.
+#
+# Hinweis fuer Linux-Hosts: Der Container laeuft als Benutzer "node" (UID 1000).
+# Gehoert ./data auf dem Host jemand anderem, darf er nicht hineinschreiben:
+#     sudo chown -R 1000:1000 data
+# Unter Docker Desktop (Windows, macOS) ist das nicht noetig.

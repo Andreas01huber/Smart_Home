@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1319" />
+    <title>SmartHome</title>
+    <link rel="icon" type="image/png" href="/favicon-64.png?v=20260827" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=20260827" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <h1>SmartHome</h1>
+      </div>
+      <div class="topbar-actions">
+        <button id="status-chip" class="status-chip" type="button" aria-expanded="false">
+          <span class="dot" id="status-dot"></span>
+          <!-- Zwei Fassungen desselben Status: die ausführliche für breite
+               Anzeigen, die kurze (data-short) für schmale Telefone. Vorher
+               wurde stattdessen der App-Name abgeschnitten („Smart…"). -->
+          <span id="status-text" data-short="Verbinde">Verbinde …</span>
+        </button>
+        <button id="settings-btn" class="icon-btn" type="button" title="Einstellungen" aria-label="Einstellungen öffnen">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.2" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v0a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1z" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="source-panel" class="source-panel" hidden></div>
+
+    <main>
+      <!-- LIVE ENERGY FLOW -->
+      <section class="flow-card" id="sec-flow" aria-label="Live-Energiefluss">
+        <div class="flow-head">
+          <h2>Live-Energiefluss</h2>
+          <!-- Die Zahlengrösse ist einstellbar, aber bewusst NICHT hier: In der
+               Live-Ansicht soll nichts stehen, was nicht zur Anlage gehört.
+               Sie wird in den Einstellungen gewählt. -->
+          <span class="flow-updated" id="flow-updated"></span>
+        </div>
+        <!-- ANSICHT 2: Haus (umschaltbar in den Einstellungen) -->
+        <!-- Das Haus ist freigestellt und steht ohne Bildfläche, Card oder
+             Container auf dem App-Hintergrund. Bewusst ohne zusätzliche
+             Werteleisten: Die Zahlen stehen an den Geräten, die beschrifteten
+             Kennzahlen folgen direkt darunter. Doppelt wäre nur Ballast.
+             Die viewBox setzt scene.js beim Aufbau — der Wert hier hält nur
+             das Seitenverhältnis, bis das Modul geladen ist. -->
+        <div class="scene-wrap" id="scene-view" hidden>
+          <svg id="scene-svg" viewBox="-40 -350 1615 1578" preserveAspectRatio="xMidYMid meet"
+               role="img" aria-label="Haus mit Photovoltaik, Speichern, Netzanschluss und Fahrzeug"></svg>
+        </div>
+
+        <!-- ANSICHT 1: klassisches Diagramm -->
+        <div class="flow-wrap" id="diagram-view">
+          <svg id="flow-svg" viewBox="0 0 800 520" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Energiefluss-Diagramm">
+            <!-- Verbindungen docken am Kreisrand an, verlaufen NIE durch Icon/Text -->
+            <g class="edges" fill="none" stroke-linecap="round">
+              <path id="edge-pv"   d="M400,130 L400,197" />
+              <path id="edge-bat1" d="M187.8,189.7 L344.6,237.9" />
+              <path id="edge-bat2" d="M612.2,189.7 L455.4,237.9" />
+              <path id="edge-grid" d="M183.3,380 L349.8,284" />
+              <path id="edge-ev"   d="M616.7,380 L450.2,284" />
+            </g>
+            <g class="edges flow-overlay" fill="none" stroke-linecap="round">
+              <path id="flow-pv"   d="M400,130 L400,197" />
+              <path id="flow-bat1" d="M187.8,189.7 L344.6,237.9" />
+              <path id="flow-bat2" d="M612.2,189.7 L455.4,237.9" />
+              <path id="flow-grid" d="M183.3,380 L349.8,284" />
+              <path id="flow-ev"   d="M450.2,284 L616.7,380" />
+            </g>
+            <!-- Dezente Anschlusspunkte am Kreisrand (Device-Seite) -->
+            <g class="connection-points">
+              <circle cx="400"   cy="130"   r="3.4" data-cp="pv" />
+              <circle cx="187.8" cy="189.7" r="3.4" data-cp="bat1" />
+              <circle cx="612.2" cy="189.7" r="3.4" data-cp="bat2" />
+              <circle cx="183.3" cy="380"   r="3.4" data-cp="grid" />
+              <circle cx="616.7" cy="380"   r="3.4" data-cp="ev" />
+            </g>
+
+            <!-- Knoten (Kreis mit Icon+Wert innen, Name außen) -->
+            <g id="node-pv" class="node" transform="translate(400,80)"></g>
+            <g id="node-house" class="node" transform="translate(400,255)"></g>
+            <g id="node-bat1" class="node" transform="translate(140,175)"></g>
+            <g id="node-bat2" class="node" transform="translate(660,175)"></g>
+            <g id="node-grid" class="node" transform="translate(140,405)"></g>
+            <g id="node-ev" class="node" transform="translate(660,405)"></g>
+          </svg>
+        </div>
+      </section>
+
+      <!-- KPI STRIP -->
+      <section class="kpi-strip" id="kpi-strip" aria-label="Kennzahlen"></section>
+
+      <!-- JETZT -->
+      <section class="panel" id="sec-now">
+        <div class="panel-head"><h2>Jetzt</h2></div>
+        <div class="card-grid" id="now-grid"></div>
+      </section>
+
+      <!-- TAGESVERLAUF / HISTORIE -->
+      <section class="panel" id="sec-history">
+        <div class="panel-head history-head">
+          <h2 id="history-title">Heute</h2>
+          <div class="date-nav">
+            <button id="date-prev" class="date-btn" type="button" aria-label="Vorheriger Tag">‹</button>
+            <input type="date" id="date-input" class="date-input" aria-label="Datum auswählen" />
+            <button id="date-next" class="date-btn" type="button" aria-label="Nächster Tag">›</button>
+          </div>
+        </div>
+        <div class="quick-chips">
+          <button class="chip" type="button" data-day="today">Heute</button>
+          <button class="chip" type="button" data-day="yesterday">Gestern</button>
+        </div>
+
+        <div class="today-grid" id="today-grid"></div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <div class="view-toggle" id="view-toggle" role="tablist" aria-label="Ansicht">
+              <button class="vt-btn active" type="button" data-view="power" role="tab">Leistung</button>
+              <button class="vt-btn" type="button" data-view="soc" role="tab">Batteriestand</button>
+            </div>
+            <div class="chart-legend" id="chart-legend"></div>
+          </div>
+          <div class="chart-wrap" id="chart-wrap">
+            <svg id="today-chart" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Tagesverlauf"></svg>
+            <div class="chart-empty" id="chart-empty" hidden>Für diesen Tag liegen keine vollständigen Daten vor.</div>
+            <div class="chart-tooltip" id="chart-tooltip" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- KOSTEN -->
+      <section class="panel" id="sec-cost">
+        <div class="panel-head"><h2>Kosten &amp; Ersparnis</h2></div>
+        <div class="card-grid" id="cost-grid"></div>
+      </section>
+    </main>
+
+    <!-- MOBILE NAVIGATION: springt zu den vorhandenen Abschnitten (keine neuen Seiten) -->
+    <nav class="tabbar" id="tabbar" aria-label="Abschnitte">
+      <button type="button" data-target="sec-flow" class="active">
+        <svg class="tb-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
+        Fluss
+      </button>
+      <button type="button" data-target="sec-now">
+        <svg class="tb-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
+        Jetzt
+      </button>
+      <button type="button" data-target="sec-history">
+        <svg class="tb-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5m0 14h16M8 16V9m4 7V6m4 10v-4"/></svg>
+        Verlauf
+      </button>
+      <button type="button" data-target="sec-cost">
+        <svg class="tb-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M15 9.5a3 3 0 0 0-3-1.5c-1.7 0-3 .9-3 2s1.3 2 3 2 3 .9 3 2-1.3 2-3 2a3 3 0 0 1-3-1.5"/></svg>
+        Kosten
+      </button>
+    </nav>
+
+    <!-- EINSTELLUNGEN (Zahnrad oben rechts) -->
+    <div id="settings" class="detail-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="detail-sheet">
+        <div class="detail-head">
+          <h2 id="settings-title">Einstellungen</h2>
+          <button id="settings-close" class="icon-btn" type="button" aria-label="Schließen">✕</button>
+        </div>
+        <div class="detail-body" id="settings-body"></div>
+      </div>
+    </div>
+
+    <!-- LEAPMOTOR-DETAILANSICHT (öffnet sich beim Klick auf die Fahrzeug-Karte) -->
+    <div id="ev-detail" class="detail-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ev-detail-title">
+      <div class="detail-sheet">
+        <div class="detail-head">
+          <h2 id="ev-detail-title">Leapmotor C10</h2>
+          <button id="ev-detail-close" class="icon-btn" type="button" aria-label="Schließen">✕</button>
+        </div>
+        <div class="detail-body" id="ev-detail-body"></div>
+      </div>
+    </div>
+
+    <footer class="app-footer">
+      <span id="footer-note">SmartHome · lokal aus Fronius &amp; Victron</span>
+    </footer>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "@energy/discovery",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Automatische Erkennung von Fronius- und Victron-Systemen (Anforderung 4X)",
+  "main": "./src/cli.ts",
+  "dependencies": {
+    "mqtt": "^5.10.3"
+  }
+}

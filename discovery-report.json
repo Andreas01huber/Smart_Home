@@ -1,0 +1,117 @@
+{
+  "generatedAt": "2026-08-18T12:42:54.679Z",
+  "fronius": [
+    {
+      "host": "192.168.178.39",
+      "reachable": false,
+      "reason": "solar-api-disabled",
+      "hint": "Das Gerät antwortet, die Solar API ist aber deaktiviert. Im Wechselrichter-WebUI unter \"Kommunikation -> Solar API\" aktivieren. Auf GEN24 ab Bundle-Version 1.14.1 ist sie werkseitig aus."
+    },
+    {
+      "host": "192.168.178.121",
+      "reachable": true,
+      "apiVersion": 1,
+      "baseUrl": "/solar_api/v1/",
+      "compatibilityRange": "1.8-1",
+      "inverters": [
+        {
+          "id": "1",
+          "label": "Symo 5.0-3-M (1)",
+          "details": {
+            "CustomName": "&#83;&#121;&#109;&#111;&#32;&#53;&#46;&#48;&#45;&#51;&#45;&#77;&#32;&#40;&#49;&#41;",
+            "DT": 122,
+            "ErrorCode": 0,
+            "PVPower": 5670,
+            "Show": 1,
+            "StatusCode": 7,
+            "UniqueID": "1890380"
+          }
+        }
+      ],
+      "meters": [],
+      "storages": [],
+      "powerFlow": {
+        "mode": "produce-only",
+        "pGrid": null,
+        "pLoad": null,
+        "pAkku": null,
+        "pPv": 827,
+        "eDay": 5822,
+        "eTotal": 26381502,
+        "meterLocation": "unknown",
+        "powerFlowVersion": null,
+        "backupModePresent": false
+      },
+      "generationHints": [
+        "Site.E_Day liefert einen Wert (5822 Wh) — auf GEN24/Tauro/Verto wäre das null. Deutet auf SnapInverter oder Symo Hybrid hin.",
+        "Meter_Location = \"unknown\" — entscheidet über die Richtungsinterpretation der Zählerwerte.",
+        "GetLoggerInfo antwortet — spricht für einen Datamanager (SnapInverter-Linie)."
+      ],
+      "warnings": [
+        "Kein Smart Meter gefunden. Ohne Smart Meter liefert die Solar API laut Doku P_Grid, P_Load, rel_SelfConsumption und rel_Autonomy als null — Hausverbrauch und Netzwerte sind dann nicht verfügbar.",
+        "Kein Batteriespeicher über GetStorageRealtimeData gefunden."
+      ]
+    }
+  ],
+  "victronLan": [],
+  "victronModbus": [
+    {
+      "host": "192.168.178.73",
+      "systemSerial": "c0619abd1723",
+      "battery": {
+        "voltageV": 56,
+        "currentA": 1,
+        "powerW": 56,
+        "socPercent": 100,
+        "state": "charging"
+      },
+      "gridPerPhaseW": [
+        -83,
+        2,
+        55
+      ],
+      "acConsumptionPerPhaseW": [
+        127,
+        277,
+        330
+      ],
+      "pvAcOnGridPerPhaseW": [
+        273,
+        274,
+        275
+      ],
+      "pvAcOnOutputPerPhaseW": [
+        0,
+        0,
+        0
+      ],
+      "pvDcCoupledW": 0,
+      "batteryServices": [
+        {
+          "unitId": 225,
+          "voltageV": 56,
+          "socPercent": 100,
+          "capacityAh": 0
+        }
+      ],
+      "pvInverterServices": [
+        {
+          "unitId": 20,
+          "serial": "32633714",
+          "position": "AC input 1",
+          "totalPowerW": 823,
+          "perPhaseW": [
+            273,
+            274,
+            275
+          ]
+        }
+      ],
+      "notes": [
+        "Mindestens ein Batteriedienst meldet /Capacity = 0. Das Gerät gibt seine Kapazität nicht über Modbus preis — die nutzbare Kapazität muss laut Anforderung 4J manuell konfiguriert werden.",
+        "Das GX-System kennt 1 AC-gekoppelte(n) PV-Wechselrichter. Deren Leistung steckt bereits in /Ac/PvOnGrid bzw. /Ac/PvOnOutput — sie darf nicht zusätzlich aus der Fronius-Quelle addiert werden."
+      ]
+    }
+  ],
+  "victronVrm": null
+}

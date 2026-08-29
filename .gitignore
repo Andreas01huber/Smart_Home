@@ -1,0 +1,49 @@
+# Abhängigkeiten ─────────────────────────────────────────────────────────────
+# Enthalten plattformabhängige Binärdateien und Verknüpfungen mit absoluten
+# Pfaden auf den jeweiligen PC. Wird aus package-lock.json neu erzeugt.
+node_modules/
+
+# Build-Ausgaben ──────────────────────────────────────────────────────────────
+# Der Server läuft über tsx direkt aus den Quellen; dist/ entsteht nur bei
+# `npm run typecheck` und ist reines Zwischenergebnis. Liegt in jedem Workspace
+# einzeln (apps/server/dist, packages/core/dist, ...) — ein Muster ohne Pfad
+# greift in Git auf jeder Ebene.
+dist/
+*.tsbuildinfo
+
+# Laufzeitdaten ───────────────────────────────────────────────────────────────
+# Historie, Tageswerte, Ladeprotokoll und Tarifstand. Ändert sich im Sekunden-
+# takt und gehört zum jeweiligen Server, nicht zum Quellcode — sonst gäbe es bei
+# jedem Abgleich Konflikte.
+#
+# Achtung beim Umzug auf einen anderen Rechner: Nach `git clone` ist die
+# Historie leer. Wer sie mitnehmen will, kopiert data/ einmal von Hand.
+data/
+
+# Zugangsdaten ────────────────────────────────────────────────────────────────
+# Dürfen niemals in die Versionsverwaltung: Was einmal in einem Commit steht,
+# bleibt in der Historie, auch nach dem Löschen. Die Vorlagen .env.example und
+# config.json bleiben bewusst versioniert — sie enthalten keine Geheimnisse.
+secrets.json
+.env
+.env.local
+*.pem
+*.key
+
+# Logs ────────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+logs/
+
+# Pakete ──────────────────────────────────────────────────────────────────────
+# Verteilfertige Archive wie AppSmartHome-Server-*.zip gehören nicht ins Repo;
+# sie enthalten unter anderem secrets.json.
+*.zip
+*.tgz
+
+# Betriebssystem und Editor ───────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
