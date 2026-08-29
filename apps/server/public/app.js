@@ -14,6 +14,34 @@ import {
 } from './format.js';
 import { buildScene, fitScene, createSkyGate, sceneViewBox, pickSceneLayout } from './scene.js';
 
+// ── Abgelaufene Sitzung ───────────────────────────────────────────────
+/**
+ * Läuft die Sitzung ab, antwortet der Server auf jede Schnittstelle mit 401.
+ * Ohne Behandlung sähe das aus wie eine kaputte App: Kacheln ohne Werte, keine
+ * Fehlermeldung.
+ *
+ * Statt jeden der rund zwölf fetch-Aufrufe einzeln zu prüfen — und den
+ * dreizehnten künftig zu vergessen — wird fetch einmal umschlossen. Eine
+ * Stelle, die alle abdeckt, auch die, die es noch nicht gibt.
+ */
+function zurAnmeldung() {
+  const ziel = encodeURIComponent(location.pathname + location.search);
+  location.replace(`/login?redirect=${ziel}`);
+}
+
+const echtesFetch = window.fetch.bind(window);
+let leiteWeiter = false;
+window.fetch = async (...args) => {
+  const antwort = await echtesFetch(...args);
+  // replace() wirkt nicht sofort; ohne die Sperre würde jeder noch laufende
+  // Aufruf die Weiterleitung erneut auslösen.
+  if (antwort.status === 401 && !leiteWeiter) {
+    leiteWeiter = true;
+    zurAnmeldung();
+  }
+  return antwort;
+};
+
 // ── Icons (echte Grafiken) ────────────────────────────────────────────
 const ICON = {
   home: '/assets/energy/home.png',
@@ -1562,6 +1590,12 @@ function connectSSE() {
     const t = el('status-text');
     t.textContent = 'Keine Verbindung';
     t.dataset.short = 'Getrennt';
+    // Ein EventSource verrät den Statuscode nicht — eine abgelaufene Sitzung
+    // sieht darin genauso aus wie ein Netzausfall. Eine gewöhnliche Anfrage
+    // hinterher klärt das: Ist es die Sitzung, schickt zurAnmeldung() weiter,
+    // sonst bleibt es bei „Keine Verbindung" und der EventSource versucht es
+    // von selbst wieder.
+    fetch('/api/snapshot').catch(() => {});
   });
 }
 /** Lädt die vollständige Tagesansicht (Kurve + Zusammenfassung) für ein Datum. */
@@ -1955,6 +1989,19 @@ function renderSettings() {
       </div>
     </div>
 
+    ${lastLive?.auth?.enabled ? `
+    <div class="detail-section">
+      <h3>Konto</h3>
+      <div class="setting-actions">
+        <button class="btn-primary" id="logout-btn" type="button">Abmelden</button>
+        <span class="setting-hint">Angemeldet als ${esc(lastLive.auth.username ?? '')}.</span>
+      </div>
+      <p class="setting-hint" style="margin:0.6rem 0 0">
+        Die Anmeldung bleibt sonst ein Jahr gespeichert und verlängert sich bei
+        jedem Besuch. Abmelden lohnt nur auf einem fremden Gerät.
+      </p>
+    </div>` : ''}
+
     <div class="detail-section">
       <h3>Über</h3>
       <p class="setting-hint" style="margin:0">
@@ -1962,6 +2009,9 @@ function renderSettings() {
         Die Einstellungen gelten nur auf diesem Gerät.
       </p>
     </div>`;
+
+  const abmelden = body.querySelector('#logout-btn');
+  if (abmelden) abmelden.addEventListener('click', () => { location.href = '/logout'; });
 
   // Segmentschalter
   body.querySelectorAll('[data-setting]').forEach((btn) => {

@@ -208,6 +208,64 @@ lohnt sich vor allem auf einem NAS, einem Raspberry Pi oder einem Linux-Server.
 
 ---
 
+## Anmeldung einrichten
+
+**Pflicht, sobald die App über einen Tunnel erreichbar ist.** Im Heimnetz schützt
+der Router; eine öffentliche Adresse hat diesen Schutz nicht, und die App kennt
+schreibende Aufrufe — Tarife ändern, Geräte neu verbinden.
+
+Auf dem Server im Projektordner:
+
+```bash
+npm run passwort
+```
+
+Das fragt Benutzername und Passwort ab und schreibt beides nach `secrets.json` —
+das Passwort **nur als scrypt-Hash**, nie im Klartext. Danach den Server einmal
+neu starten; die Anmeldung wird beim Start gelesen.
+
+Ohne eingerichtete Anmeldung läuft alles weiter wie bisher, der Server weist
+beim Start aber deutlich darauf hin.
+
+### Was das für den Alltag bedeutet
+
+Die Anmeldung bleibt **ein Jahr** gespeichert und verlängert sich bei jedem
+Besuch — wer die App regelmäßig benutzt, meldet sich praktisch nie wieder an.
+Der Browser bietet außerdem an, die Zugangsdaten im Passwortspeicher zu sichern;
+das Formular ist dafür passend ausgezeichnet.
+
+Abmelden geht über **Einstellungen → Konto → Abmelden**. Nötig ist das nur auf
+einem fremden Gerät.
+
+Ein geändertes Passwort meldet **alle** Geräte ab — das ist der Weg, ein Gerät
+loszuwerden, das man verloren hat.
+
+### Was der Schutz leistet
+
+| | |
+| --- | --- |
+| Passwort | Als scrypt-Hash gespeichert. Wer `secrets.json` liest, kann sich damit nicht anmelden. |
+| Sitzung | Signierter Keks, `HttpOnly` — für Skripte im Browser unsichtbar. Übersteht einen Neustart des Servers, ohne dass jemand sich neu anmelden muss. |
+| Verschlüsselung | Das `Secure`-Kennzeichen wird nur bei HTTPS gesetzt. Im Heimnetz läuft die App über `http://…:4173`, dort würde ein Secure-Keks nie ankommen. |
+| Durchprobieren | Ab dem fünften Fehlversuch je Herkunft gesperrt, die Sperre verdoppelt sich bis auf eine Viertelstunde. |
+| Suchmaschinen | Die Anmeldeseite ist auf `noindex` gesetzt. |
+
+### Grenzen — bitte lesen
+
+Eine `trycloudflare.com`-Adresse ist ein **Schnelltunnel**: öffentlich
+erreichbar für jeden, der die Adresse kennt, und die Adresse **ändert sich bei
+jedem Neustart** des Tunnels. Für den Dauerbetrieb ist das nichts.
+
+Wer den Tunnel behalten will, richtet bei Cloudflare einen **benannten Tunnel**
+mit fester Adresse ein. Noch besser: **Cloudflare Access** davorschalten — dann
+kommt niemand ohne Anmeldung überhaupt bis zum Server durch, und die Anmeldung
+hier ist die zweite Schicht statt der einzigen.
+
+Unabhängig davon terminiert Cloudflare die Verschlüsselung, sieht den Verkehr
+also im Klartext. Wenn das stört, ist der VPN-Weg unten der richtige.
+
+---
+
 ## Von unterwegs zugreifen
 
 Nicht über eine Portfreigabe — die Anlage gehört nicht offen ins Internet. Der

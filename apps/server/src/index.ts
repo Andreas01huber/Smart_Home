@@ -31,6 +31,8 @@ import {
   type EnergyConnector,
 } from '@energy/connectors';
 
+import { LoginThrottle } from './auth.ts';
+import { authGate } from './auth-gate.ts';
 import { loadConfig, type AppConfig } from './config.ts';
 import { EnergyEngine, type EngineState } from './engine.ts';
 import { EnergyAccumulator, localDate } from './history.ts';
@@ -167,6 +169,10 @@ function serializeState(state: EngineState, config: AppConfig): unknown {
   return {
     polledAt: state.polledAt.toISOString(),
     pollDurationMs: state.pollDurationMs,
+    // Nur, ob eine Anmeldung verlangt wird und wer angemeldet ist. Damit
+    // entscheidet die Oberfläche, ob sie einen Abmelden-Knopf zeigt. Weder
+    // Passwort-Hash noch Sitzungsgeheimnis verlassen den Server.
+    auth: config.auth ? { enabled: true, username: config.auth.username } : { enabled: false },
     solar: metric(snapshot.solarProductionW),
     house: metric(snapshot.houseConsumptionW),
     gridImport: metric(snapshot.gridImportW),
@@ -358,6 +364,11 @@ function handleEvents(
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache',
     connection: 'keep-alive',
+    // Für Zwischenstationen wie einen Cloudflare-Tunnel oder nginx: Ein Puffer
+    // sammelt sonst mehrere Ereignisse, bevor er sie weiterreicht, und die
+    // Live-Ansicht ruckelt in Schüben statt im Sekundentakt zu laufen. Der Kopf
+    // ist unschädlich, wo ihn niemand liest.
+    'x-accel-buffering': 'no',
   });
 
   let unsubscribe: (() => void) | null = null;
@@ -445,8 +456,17 @@ async function main(): Promise<void> {
     response.end(JSON.stringify(payload));
   };
 
+  // Eine Bremse für alle Anmeldeversuche, absichtlich ausserhalb des Handlers:
+  // Sie muss sich Fehlversuche über Anfragen hinweg merken.
+  const throttle = new LoginThrottle();
+
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+
+    // Vor allem anderen. Ohne Anmeldedaten in secrets.json bleibt der Server
+    // offen wie bisher — für den reinen Heimnetzbetrieb gewollt, siehe Hinweis
+    // beim Start.
+    if (config.auth && !authGate(request, response, url, config.auth, throttle)) return;
 
     if (url.pathname === '/api/events') {
       handleEvents(request, response, engine, config);
@@ -614,6 +634,16 @@ async function main(): Promise<void> {
     }
     console.log('');
     console.log(`  Quellen:     ${connectors.map((c) => c.displayName).join(', ')}`);
+    console.log('');
+    if (config.auth) {
+      console.log(`  Anmeldung:   aktiv (Benutzer "${config.auth.username}")`);
+    } else {
+      // Deutlich, aber ohne Abbruch: Im Heimnetz hinter dem Router ist das in
+      // Ordnung. Über einen Tunnel ins Internet ist es das nicht.
+      console.log('  ACHTUNG: Keine Anmeldung eingerichtet - die App ist für jeden');
+      console.log('           erreichbar, der die Adresse kennt. Einrichten mit:');
+      console.log('              npm run passwort');
+    }
     console.log('');
     console.log('  Beenden: dieses Fenster schließen.');
     console.log('');

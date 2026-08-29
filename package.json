@@ -13,6 +13,7 @@
   },
   "scripts": {
     "start": "tsx apps/server/src/index.ts",
+    "passwort": "tsx tools/passwort.ts",
     "preflight": "tsx tools/preflight.ts",
     "discover": "tsx packages/discovery/src/cli.ts",
     "typecheck": "tsc --build",

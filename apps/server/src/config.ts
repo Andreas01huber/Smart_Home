@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 
 import type { SourceMapping, Tariff } from '@energy/core';
 
+import type { AuthSettings } from './auth.ts';
+
 export interface SourceConfig {
   readonly enabled: boolean;
   readonly host: string;
@@ -64,6 +66,15 @@ export interface AppConfig {
   readonly sourceMapping: SourceMapping;
   readonly announcedBatteries: readonly AnnouncedBattery[];
   readonly tariff: Tariff;
+  /**
+   * Anmeldedaten aus secrets.json. Fehlen sie, läuft der Server ohne
+   * Anmeldung — richtig für den reinen Heimnetzbetrieb, gefährlich, sobald die
+   * Adresse über einen Tunnel öffentlich erreichbar ist. Der Server weist beim
+   * Start deutlich darauf hin.
+   *
+   * Angelegt wird das mit `npm run passwort`.
+   */
+  readonly auth?: AuthSettings;
 }
 
 const DEFAULTS = {
@@ -95,9 +106,10 @@ export function loadConfig(path = resolve(process.cwd(), 'config.json')): AppCon
   const mapping = (record['sourceMapping'] ?? {}) as Record<string, unknown>;
 
   // Zugangsdaten liegen bewusst in einer eigenen Datei neben config.json.
+  const secrets = loadSecrets(resolve(path, '..', 'secrets.json'));
+
   // Fehlt sie, bleibt die Wallbox schlicht "nicht konfiguriert" — kein Fehler.
   if (sources.evCharger?.enabled === true) {
-    const secrets = loadSecrets(resolve(path, '..', 'secrets.json'));
     const tuya = (secrets['tuya'] ?? {}) as Record<string, unknown>;
     sources.evCharger = {
       ...sources.evCharger,
@@ -130,7 +142,26 @@ export function loadConfig(path = resolve(process.cwd(), 'config.json')): AppCon
       : {}),
   };
 
+  // Anmeldung. Nur vollständige Angaben zählen: Ein halber Eintrag - etwa ein
+  // Benutzername ohne Passwort-Hash - darf nicht dazu führen, dass die App sich
+  // für geschützt hält, obwohl niemand sich anmelden kann.
+  const rohAuth = (secrets['auth'] ?? {}) as Record<string, unknown>;
+  const auth: AuthSettings | null =
+    typeof rohAuth['username'] === 'string' &&
+    typeof rohAuth['passwordHash'] === 'string' &&
+    typeof rohAuth['sessionSecret'] === 'string' &&
+    rohAuth['username'].length > 0 &&
+    rohAuth['passwordHash'].length > 0 &&
+    rohAuth['sessionSecret'].length > 0
+      ? {
+          username: rohAuth['username'],
+          passwordHash: rohAuth['passwordHash'],
+          sessionSecret: rohAuth['sessionSecret'],
+        }
+      : null;
+
   return {
+    ...(auth === null ? {} : { auth }),
     port: typeof record['port'] === 'number' ? record['port'] : DEFAULTS.port,
     host: typeof record['host'] === 'string' ? record['host'] : DEFAULTS.host,
     pollIntervalMs:
