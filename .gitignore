@@ -30,6 +30,11 @@ secrets.json
 *.pem
 *.key
 
+# Stand auf dem Server ────────────────────────────────────────────────────────
+# Schreibt der Deploy-Workflow auf dem Server, damit dort ablesbar ist, welcher
+# Commit gerade läuft. Gehört dem Server, nicht dem Repository.
+VERSION.txt
+
 # Logs ────────────────────────────────────────────────────────────────────────
 *.log
 npm-debug.log*

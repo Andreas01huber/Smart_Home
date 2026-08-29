@@ -157,11 +157,53 @@ ganz sicher gehen will, deployt nicht mitten in der Mittagsspitze.
 
 ---
 
+## Wenn auf dem Server nichts ankommt
+
+Der häufigste Fall, und der unauffälligste: Der Push ist durch, GitHub meldet
+nichts Auffälliges, aber im Ordner `C:\SmartHome` liegt weiter der alte Stand.
+
+Auf dem Server nachsehen — **Server pruefen.cmd** doppelklicken. Das Skript
+liest nur und sagt am Ende, woran es liegt.
+
+Die drei Ursachen, in der Reihenfolge ihrer Häufigkeit:
+
+**1. Der Runner darf den Server nicht anhalten.** Der Server läuft als geplante
+Aufgabe unter `SYSTEM`, damit er schon vor dem Anmelden startet. Der
+Runner-Dienst läuft in der Voreinstellung unter `NETWORK SERVICE` und darf einen
+SYSTEM-Prozess weder beenden noch dessen Aufgabe steuern. Der Deploy scheitert
+dann im Schritt **Server anhalten** — also *bevor* er kopiert. Deshalb ändert
+sich auf dem Server nichts, obwohl der Push angekommen ist.
+
+Behebung: **Runner reparieren.cmd** als Administrator ausführen. Es stellt den
+Dienst auf das lokale Systemkonto um und startet ihn neu.
+
+**2. Der Runner-Dienst läuft gar nicht.** Dann bleibt der Job auf GitHub bei
+„Waiting for a runner" stehen und tut nie etwas — ohne Fehlermeldung, denn
+gescheitert ist er nicht, er wartet nur. Sichtbar in `Server pruefen.cmd` oder
+auf GitHub unter **Settings → Actions → Runners**: Steht dort *Offline*, ist es
+das.
+
+**3. Der Testlauf war rot.** Dann wird bewusst nicht ausgeliefert
+(`needs: test`). Auf GitHub unter **Actions** steht, welcher Test gescheitert
+ist.
+
+Welcher Stand tatsächlich auf dem Server liegt, steht in `C:\SmartHome\VERSION.txt`
+— die schreibt der Workflow bei jedem erfolgreichen Deploy:
+
+```bash
+type C:\SmartHome\VERSION.txt
+```
+
+Fehlt die Datei, ist seit ihrer Einführung kein Deploy mehr durchgelaufen.
+
+---
+
 ## Wenn der Deploy rot wird
 
 | Meldung | Ursache |
 | --- | --- |
 | Job bleibt auf „Waiting for a runner" | Der Runner-Dienst läuft nicht: auf dem Server `./svc.cmd status`. |
+| `Der Runner darf den laufenden Server nicht beenden` | Rechteproblem, siehe oben — `Runner reparieren.cmd` als Administrator. |
 | `Node.js ist auf dem Server nicht installiert` | Node 22+ fehlt — `Server-PC einrichten.cmd` ausführen. |
 | `Die Aufgabe "SmartHome" fehlt` | Einmalig `Server-PC einrichten.cmd` auf dem Server ausführen. |
 | `Port 4173 ist nach 20 Sekunden noch belegt` | Ein hängender Node-Prozess. Im Task-Manager beenden, dann Deploy wiederholen. |

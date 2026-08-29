@@ -93,7 +93,20 @@ jobs:
       - name: Server anhalten
         shell: powershell
         run: |
-          Stop-ScheduledTask -TaskName 'SmartHome' -ErrorAction SilentlyContinue
+          # Fehler beim Anhalten werden hier bewusst eingesammelt statt
+          # verschluckt: Scheitert das Anhalten an fehlenden Rechten, bricht der
+          # Deploy hier ab - noch bevor eine einzige Datei kopiert ist. Auf dem
+          # Server sieht das dann so aus, als sei der Push nie angekommen.
+          # Deshalb muss die Meldung sagen, woran es wirklich lag.
+          $rechteproblem = $false
+
+          try {
+            Stop-ScheduledTask -TaskName 'SmartHome' -ErrorAction Stop
+            Write-Host 'Aufgabe "SmartHome" angehalten.'
+          } catch {
+            Write-Host "Aufgabe liess sich nicht anhalten: $($_.Exception.Message)"
+            if ($_.Exception.Message -match 'denied|verweigert|Zugriff') { $rechteproblem = $true }
+          }
 
           # Die Aufgabe startet run-server.cmd, das seinerseits Node startet.
           # Wird die Aufgabe beendet, überlebt der Node-Prozess das und hält
@@ -105,7 +118,12 @@ jobs:
           # automatischen Sichern - die Historie schreibt sich alle zwei
           # Minuten selbst weg.
           foreach ($v in Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue) {
-            Stop-Process -Id $v.OwningProcess -Force -ErrorAction SilentlyContinue
+            try {
+              Stop-Process -Id $v.OwningProcess -Force -ErrorAction Stop
+            } catch {
+              Write-Host "Prozess $($v.OwningProcess) liess sich nicht beenden: $($_.Exception.Message)"
+              $rechteproblem = $true
+            }
           }
 
           # Erst weitermachen, wenn der Port wirklich frei ist - sonst kann der
@@ -117,7 +135,12 @@ jobs:
             }
             Start-Sleep -Seconds 1
           }
-          Write-Host '::error::Port 4173 ist nach 20 Sekunden noch belegt.'
+
+          if ($rechteproblem) {
+            Write-Host '::error::Der Runner darf den laufenden Server nicht beenden. Der Server laeuft als SYSTEM, der Runner-Dienst unter einem eingeschraenkten Konto. Behebung: auf dem Server "Runner reparieren.cmd" als Administrator ausfuehren.'
+          } else {
+            Write-Host '::error::Port 4173 ist nach 20 Sekunden noch belegt.'
+          }
           exit 1
 
       - name: Code in den Deploy-Ordner übertragen
@@ -156,6 +179,20 @@ jobs:
           }
           Write-Host "Uebertragen. Hoechster robocopy-Status: $schlimmster (unter 8 = ok)."
           exit 0
+
+      - name: Stand vermerken
+        shell: powershell
+        run: |
+          # Ohne diese Datei laesst sich auf dem Server nicht feststellen, welcher
+          # Stand dort eigentlich liegt - die .git-Historie wird nicht mitkopiert.
+          # "Server pruefen.cmd" liest sie aus.
+          $zeilen = @(
+            "Stand      : $env:GITHUB_SHA",
+            "Ausgeliefert: $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss')",
+            "Workflow   : $env:GITHUB_RUN_NUMBER ($env:GITHUB_REF_NAME)"
+          )
+          Set-Content -Path (Join-Path $env:DEPLOY_DIR 'VERSION.txt') -Value $zeilen -Encoding ascii
+          $zeilen | ForEach-Object { Write-Host $_ }
 
       - name: Zugangsdaten vorhanden?
         shell: powershell
