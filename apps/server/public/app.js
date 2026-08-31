@@ -1932,6 +1932,15 @@ function setupTabbar() {
  */
 let tariffCache = null;
 
+/**
+ * Wer gerade angemeldet ist — aus /api/ich.
+ *
+ * Steht bewusst nicht im Live-Zustand: Der ist für alle Betrachter derselbe und
+ * wird über einen Ereignisstrom verteilt, die Antwort auf „wer bin ich" gilt
+ * dagegen nur für diese eine Verbindung.
+ */
+let ichCache = null;
+
 /** Ein Auswahlblock: Überschrift, Erklärung, Segmentschalter. */
 function settingRow(title, hint, name, options, activeValue) {
   const buttons = options
@@ -1989,13 +1998,19 @@ function renderSettings() {
       </div>
     </div>
 
-    ${lastLive?.auth?.enabled ? `
+    ${ichCache?.enabled ? `
     <div class="detail-section">
       <h3>Konto</h3>
       <div class="setting-actions">
         <button class="btn-primary" id="logout-btn" type="button">Abmelden</button>
-        <span class="setting-hint">Angemeldet als ${esc(lastLive.auth.username ?? '')}.</span>
+        <span class="setting-hint">Angemeldet als ${esc(ichCache.username ?? '')}${
+          ichCache.istAdmin ? ' — Administrator' : ''}.</span>
       </div>
+      ${ichCache.istAdmin ? `
+      <div class="setting-actions">
+        <a class="btn-primary" href="/admin" style="text-decoration:none">Benutzer verwalten</a>
+        <span class="setting-hint">Wer ist angemeldet, wer darf hinein.</span>
+      </div>` : ''}
       <p class="setting-hint" style="margin:0.6rem 0 0">
         Die Anmeldung bleibt sonst ein Jahr gespeichert und verlängert sich bei
         jedem Besuch. Abmelden lohnt nur auf einem fremden Gerät.
@@ -2074,6 +2089,12 @@ function openSettings() {
   fetch('/api/tariff')
     .then((r) => r.json())
     .then((t) => { tariffCache = t; renderSettings(); })
+    .catch(() => undefined);
+  // Und wer gerade angemeldet ist — davon hängt ab, ob der Abmelden-Knopf und
+  // der Zugang zur Verwaltung erscheinen.
+  fetch('/api/ich')
+    .then((r) => r.json())
+    .then((i) => { ichCache = i; renderSettings(); })
     .catch(() => undefined);
 }
 function closeSettings() {

@@ -37,12 +37,21 @@ Write-Host ''
 # Anlage dann fuer jeden offen, der die Adresse kennt oder erraet.
 $secrets = Join-Path $Stamm 'secrets.json'
 $passwortGesetzt = $false
+$konten = @()
 if (Test-Path $secrets) {
   try {
     $s = Get-Content $secrets -Raw | ConvertFrom-Json
-    if (($s.PSObject.Properties.Name -contains 'auth') -and $s.auth.passwordHash) {
-      $passwortGesetzt = $true
+    if ($s.PSObject.Properties.Name -contains 'auth') {
+      $a = $s.auth
+      # Heutige Form: mehrere Konten unter auth.benutzer. Fruehere Form: ein
+      # einzelnes Konto direkt unter auth. Beide zaehlen als "Passwort gesetzt".
+      if ($a.PSObject.Properties.Name -contains 'benutzer') {
+        foreach ($b in $a.benutzer) { if ($b.passwordHash) { $konten += $b.username } }
+      } elseif ($a.passwordHash) {
+        $konten += $a.username
+      }
     }
+    if ($konten.Count -gt 0) { $passwortGesetzt = $true }
   } catch { }
 }
 
@@ -59,7 +68,7 @@ if (-not $passwortGesetzt) {
   Write-Host ''
   exit 1
 }
-Write-Host "  Anmeldung ist eingerichtet (Benutzer '$($s.auth.username)')." -ForegroundColor Green
+Write-Host "  Anmeldung ist eingerichtet ($($konten -join ', '))." -ForegroundColor Green
 
 # --- 2. Tailscale finden --------------------------------------------------
 function FindeTailscale {

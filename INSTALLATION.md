@@ -222,10 +222,38 @@ npm run passwort
 
 Das fragt Benutzername und Passwort ab und schreibt beides nach `secrets.json` —
 das Passwort **nur als scrypt-Hash**, nie im Klartext. Danach den Server einmal
-neu starten; die Anmeldung wird beim Start gelesen.
+neu starten; die Konten werden beim Start gelesen.
+
+Das **erste Konto wird automatisch Administrator**. Alle weiteren Konten legst
+du danach bequemer im Browser an, siehe unten. `npm run passwort` bleibt der
+Rückweg, falls niemand mehr in die Verwaltung kommt: Ein dort eingegebener Name
+bekommt ein neues Passwort und Administratorrechte.
 
 Ohne eingerichtete Anmeldung läuft alles weiter wie bisher, der Server weist
 beim Start aber deutlich darauf hin.
+
+### Konten für weitere Personen
+
+**Einstellungen → Konto → Benutzer verwalten**, oder direkt `…/admin`. Die Seite
+sehen nur Administratoren und zeigt zweierlei:
+
+**Angemeldete Geräte** — je Zeile ein Browser, in dem jemand angemeldet ist: mit
+welchem Konto, welches Gerät („iPhone · Safari"), von welcher Adresse, seit wann
+und wann zuletzt aktiv. Jede Zeile lässt sich einzeln abmelden; das wirkt
+sofort. Der Knopf **Alle Geräte abmelden** nimmt auch dich selbst mit — danach
+muss sich jeder neu anmelden.
+
+**Konten** — anlegen, Passwort neu setzen, Rolle wechseln, löschen. Zwei Rollen:
+
+| Rolle | darf |
+| --- | --- |
+| Administrator | alles, dazu diese Verwaltungsseite |
+| Benutzer | das Dashboard, sonst nichts |
+
+Benutzername und Passwort vergibst du und gibst sie der Person weiter. Das
+Passwort steht danach nirgends im Klartext — vergessen heißt hier neu setzen,
+nicht nachschlagen. Der letzte Administrator lässt sich weder löschen noch
+zurückstufen; sonst käme niemand mehr in die Verwaltung.
 
 ### Was das für den Alltag bedeutet
 
@@ -237,15 +265,17 @@ das Formular ist dafür passend ausgezeichnet.
 Abmelden geht über **Einstellungen → Konto → Abmelden**. Nötig ist das nur auf
 einem fremden Gerät.
 
-Ein geändertes Passwort meldet **alle** Geräte ab — das ist der Weg, ein Gerät
-loszuwerden, das man verloren hat.
+Ein Handy verloren? Zwei Wege: das einzelne Gerät in der Verwaltung abmelden,
+oder das Passwort des Kontos neu setzen — das meldet alle Geräte dieses Kontos
+ab.
 
 ### Was der Schutz leistet
 
 | | |
 | --- | --- |
-| Passwort | Als scrypt-Hash gespeichert. Wer `secrets.json` liest, kann sich damit nicht anmelden. |
-| Sitzung | Signierter Keks, `HttpOnly` — für Skripte im Browser unsichtbar. Übersteht einen Neustart des Servers, ohne dass jemand sich neu anmelden muss. |
+| Passwort | Als scrypt-Hash gespeichert. Wer `secrets.json` liest, kann sich damit nicht anmelden. Mindestens 10 Zeichen. |
+| Sitzung | Signierter Keks, `HttpOnly` — für Skripte im Browser unsichtbar. Er enthält nur eine Zufallszahl; wer dahintersteckt, weiß allein der Server. Übersteht einen Neustart des Servers, ohne dass jemand sich neu anmelden muss. |
+| Einzelne Geräte | Jede Anmeldung ist in der Verwaltung sichtbar und einzeln widerrufbar, ohne die anderen mitzunehmen. |
 | Verschlüsselung | Das `Secure`-Kennzeichen wird nur bei HTTPS gesetzt. Im Heimnetz läuft die App über `http://…:4173`, dort würde ein Secure-Keks nie ankommen. |
 | Durchprobieren | Ab dem fünften Fehlversuch je Herkunft gesperrt, die Sperre verdoppelt sich bis auf eine Viertelstunde. |
 | Suchmaschinen | Die Anmeldeseite ist auf `noindex` gesetzt. |

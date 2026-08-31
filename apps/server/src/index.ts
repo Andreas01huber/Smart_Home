@@ -33,6 +33,9 @@ import {
 
 import { LoginThrottle } from './auth.ts';
 import { authGate } from './auth-gate.ts';
+import { adminRouten } from './admin-routes.ts';
+import { Kontenspeicher, type Benutzer } from './benutzer.ts';
+import { Sitzungsspeicher } from './sitzungen.ts';
 import { loadConfig, type AppConfig } from './config.ts';
 import { EnergyEngine, type EngineState } from './engine.ts';
 import { EnergyAccumulator, localDate } from './history.ts';
@@ -169,10 +172,6 @@ function serializeState(state: EngineState, config: AppConfig): unknown {
   return {
     polledAt: state.polledAt.toISOString(),
     pollDurationMs: state.pollDurationMs,
-    // Nur, ob eine Anmeldung verlangt wird und wer angemeldet ist. Damit
-    // entscheidet die Oberfläche, ob sie einen Abmelden-Knopf zeigt. Weder
-    // Passwort-Hash noch Sitzungsgeheimnis verlassen den Server.
-    auth: config.auth ? { enabled: true, username: config.auth.username } : { enabled: false },
     solar: metric(snapshot.solarProductionW),
     house: metric(snapshot.houseConsumptionW),
     gridImport: metric(snapshot.gridImportW),
@@ -354,11 +353,17 @@ async function serveStatic(
   response.end(body);
 }
 
+/**
+ * @param nochAngemeldet Wird vor jedem Ereignis gefragt. Der Ereignisstrom bleibt
+ *   stundenlang offen; ohne diese Frage liefe er nach einem "Gerät abmelden"
+ *   einfach weiter, und "wirkt sofort" wäre eine Behauptung statt einer Tatsache.
+ */
 function handleEvents(
   request: IncomingMessage,
   response: ServerResponse,
   engine: EnergyEngine,
   config: AppConfig,
+  nochAngemeldet: () => boolean = () => true,
 ): void {
   response.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -379,6 +384,11 @@ function handleEvents(
   const send = (state: EngineState): void => {
     if (response.writableEnded || response.destroyed) {
       unsubscribe?.();
+      return;
+    }
+    if (!nochAngemeldet()) {
+      unsubscribe?.();
+      response.end();
       return;
     }
     try {
@@ -460,16 +470,78 @@ async function main(): Promise<void> {
   // Sie muss sich Fehlversuche über Anfragen hinweg merken.
   const throttle = new LoginThrottle();
 
+  // Konten und angemeldete Geräte. `null` heisst: In secrets.json steht kein
+  // Konto, der Server läuft offen wie früher.
+  const konten = Kontenspeicher.laden(config.secretsPfad);
+  const sitzungen =
+    konten === null
+      ? null
+      : new Sitzungsspeicher(
+          resolve(process.cwd(), 'data', 'sitzungen.json'),
+          konten.sessionSecret,
+        );
+
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
 
     // Vor allem anderen. Ohne Anmeldedaten in secrets.json bleibt der Server
     // offen wie bisher — für den reinen Heimnetzbetrieb gewollt, siehe Hinweis
     // beim Start.
-    if (config.auth && !authGate(request, response, url, config.auth, throttle)) return;
+    let ich: Benutzer | null = null;
+    let sitzungId: string | null = null;
+    if (konten !== null && sitzungen !== null) {
+      const schranke = authGate(request, response, url, { konten, sitzungen, throttle });
+      if (!schranke.weiter) return;
+      ich = schranke.benutzer ?? null;
+      sitzungId = schranke.sitzungId ?? null;
+
+      if (ich !== null && adminRouten(request, response, url, ich, { konten, sitzungen })) {
+        return;
+      }
+    } else if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
+      // Ohne Konten gibt es nichts zu verwalten. Statt 404 lieber sagen, wie
+      // man dorthin kommt.
+      response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(
+        '<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;padding:2rem;line-height:1.6">' +
+          '<h1 style="font-size:1.2rem">Noch keine Anmeldung eingerichtet</h1>' +
+          '<p>Auf dem Server-PC im Ordner der App ausf&uuml;hren: <code>npm run passwort</code>. ' +
+          'Das erste Konto wird automatisch Administrator.</p>' +
+          '<p><a href="/">Zur&uuml;ck zum Dashboard</a></p></body>',
+      );
+      return;
+    }
+
+    // Wer bin ich? Die Oberfläche entscheidet damit, ob sie den Abmelden-Knopf
+    // und den Zugang zur Verwaltung zeigt.
+    if (url.pathname === '/api/ich') {
+      sendJson(
+        response,
+        200,
+        ich === null
+          ? { enabled: konten !== null }
+          : {
+              enabled: true,
+              username: ich.username,
+              rolle: ich.rolle,
+              istAdmin: ich.rolle === 'admin',
+            },
+      );
+      return;
+    }
 
     if (url.pathname === '/api/events') {
-      handleEvents(request, response, engine, config);
+      const kennung = sitzungId;
+      const konto = ich;
+      handleEvents(
+        request,
+        response,
+        engine,
+        config,
+        sitzungen === null || kennung === null || konten === null
+          ? undefined
+          : () => sitzungen.gilt(kennung) && konten.nachId(konto?.id ?? '') !== null,
+      );
       return;
     }
 
@@ -635,8 +707,13 @@ async function main(): Promise<void> {
     console.log('');
     console.log(`  Quellen:     ${connectors.map((c) => c.displayName).join(', ')}`);
     console.log('');
-    if (config.auth) {
-      console.log(`  Anmeldung:   aktiv (Benutzer "${config.auth.username}")`);
+    if (konten !== null) {
+      const namen = konten
+        .alle()
+        .map((b) => (b.rolle === 'admin' ? `${b.username} (Admin)` : b.username))
+        .join(', ');
+      console.log(`  Anmeldung:   aktiv - ${konten.anzahl()} Konto/Konten: ${namen}`);
+      console.log(`  Verwaltung:  http://localhost:${config.port}/admin`);
     } else {
       // Deutlich, aber ohne Abbruch: Im Heimnetz hinter dem Router ist das in
       // Ordnung. Über einen Tunnel ins Internet ist es das nicht.
@@ -656,6 +733,7 @@ async function main(): Promise<void> {
     engine.stop();
     accumulator.persist();
     evLog.persist();
+    sitzungen?.persist();
     server.close(() => process.exit(0));
     // Ohne das Folgende endete der Vorgang nie, sobald irgendwo ein Dashboard
     // offen war: server.close() wartet auf jede bestehende Verbindung, und ein

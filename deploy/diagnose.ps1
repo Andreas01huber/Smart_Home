@@ -197,13 +197,32 @@ if (-not (Test-Path $secrets)) {
     $tuya = 'fehlt'
     if ($s.PSObject.Properties.Name -contains 'tuya') { $tuya = 'gesetzt' }
     Write-Host "  Wallbox (tuya): $tuya"
-    if ($hatAuth -and $s.auth.passwordHash) {
-      Write-Host "  Passwort      : gesetzt fuer Benutzer '$($s.auth.username)'" -ForegroundColor Green
+    # Konten lesen. Zwei Formen sind moeglich: die heutige mit auth.benutzer
+    # (mehrere Konten mit Rollen) und die fruehere mit einem einzelnen Konto
+    # direkt unter auth. Der Server wandelt die alte beim Start um - dieses
+    # Skript liest aber nur, also muss es beide kennen.
+    $konten = @()
+    if ($hatAuth) {
+      $a = $s.auth
+      if ($a.PSObject.Properties.Name -contains 'benutzer') {
+        foreach ($b in $a.benutzer) {
+          if ($b.passwordHash) {
+            if ($b.rolle -eq 'admin') { $konten += "$($b.username) (Administrator)" }
+            else { $konten += "$($b.username)" }
+          }
+        }
+      } elseif ($a.passwordHash) {
+        $konten += "$($a.username) (Administrator, altes Format)"
+      }
+    }
+
+    if ($konten.Count -gt 0) {
+      Write-Host "  Konten        : $($konten -join ', ')" -ForegroundColor Green
     } else {
       Write-Host '  Passwort      : NICHT gesetzt' -ForegroundColor Red
       Merke 'warnung' @(
-        'Es ist kein Passwort gesetzt. Solange der Cloudflare-Tunnel laeuft, ist',
-        'das Dashboard oeffentlich erreichbar.',
+        'Es ist kein Passwort gesetzt. Solange der Tunnel laeuft, ist das',
+        'Dashboard oeffentlich erreichbar.',
         'Setzen in C:\SmartHome mit:  npm run passwort'
       )
     }

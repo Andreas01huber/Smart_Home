@@ -22,7 +22,7 @@ echo      1. Node.js pruefen
 echo      2. Abhaengigkeiten installieren  (braucht einmal Internet)
 echo      3. Firewall fuer das Heimnetz oeffnen (Port 4173)
 echo      4. Autostart einrichten - laeuft ab jedem Hochfahren
-echo      5. Passwort fuer die Anmeldung setzen
+echo      5. Administrator-Konto anlegen (Benutzername + Passwort)
 echo      6. Feste Internetadresse einrichten (auf Wunsch)
 echo.
 echo   Was schon eingerichtet ist, wird uebersprungen. Das Skript
@@ -67,11 +67,11 @@ echo.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"%~dp0deploy\setup-server.ps1\"','-ProjectDir','\"%~dp0.\"' -Wait"
 if errorlevel 1 goto :admin_abgelehnt
 
-rem ------------------------------------------------------------- 5. Passwort ---
+rem ---------------------------------------------------------------- 5. Konto ---
 echo.
-echo   [5/6] Passwort fuer die Anmeldung ...
+echo   [5/6] Administrator-Konto ...
 
-rem Schon gesetzt? Dann nicht noch einmal fragen - ein neues Passwort wuerde
+rem Schon vorhanden? Dann nicht noch einmal fragen - ein neues Passwort wuerde
 rem alle angemeldeten Geraete hinauswerfen.
 set "HATPASSWORT="
 if exist "secrets.json" (
@@ -80,15 +80,19 @@ if exist "secrets.json" (
 )
 
 if defined HATPASSWORT (
-  echo         Schon gesetzt - uebersprungen.
-  echo         Aendern spaeter mit:  npm run passwort
+  echo         Schon vorhanden - uebersprungen.
+  echo         Weitere Konten legst du im Browser an, unter /admin.
 ) else (
   echo.
   echo         Im Heimnetz ist die Anmeldung freiwillig. Sobald die App
   echo         aus dem Internet erreichbar ist, ist sie Pflicht.
   echo.
+  echo         Das erste Konto wird automatisch Administrator. Konten fuer
+  echo         weitere Personen legst du danach im Browser an - unter /admin
+  echo         siehst du auch, wer gerade angemeldet ist.
+  echo.
   set "WILLPW="
-  set /p "WILLPW=        Jetzt ein Passwort setzen? [J/n] "
+  set /p "WILLPW=        Jetzt anlegen? [J/n] "
   if /i "!WILLPW!"=="n" (
     echo         Uebersprungen. Nachholen mit:  npm run passwort
   ) else (
@@ -142,6 +146,11 @@ if exist "logs\feste-adresse.txt" (
   echo   Von unterwegs, feste Adresse:
   for /f "usebackq delims=" %%a in ("logs\feste-adresse.txt") do echo                        %%a
 )
+
+echo.
+echo   Benutzer verwalten:  http://localhost:4173/admin
+echo         Dort siehst du, wer angemeldet ist, und legst Konten fuer
+echo         weitere Personen an. Nur als Administrator sichtbar.
 
 echo.
 echo   Wie es weitergeht, wenn etwas klemmt: "Server pruefen.cmd"

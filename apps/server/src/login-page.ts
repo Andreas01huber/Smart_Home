@@ -11,17 +11,7 @@
  * nicht wie ein Bruch wirkt.
  */
 
-const ESCAPES: Readonly<Record<string, string>> = {
-  '&': '&amp;',
-  '<': '&lt;',
-  '>': '&gt;',
-  '"': '&quot;',
-  "'": '&#39;',
-};
-
-function esc(value: string): string {
-  return value.replace(/[&<>"']/g, (zeichen) => ESCAPES[zeichen] ?? zeichen);
-}
+import { esc } from './html.ts';
 
 export interface LoginPageOptions {
   /** Wohin nach erfolgreicher Anmeldung. Kommt aus der ursprünglichen Anfrage. */

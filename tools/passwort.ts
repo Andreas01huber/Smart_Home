@@ -1,7 +1,11 @@
 /**
- * Legt Benutzername und Passwort für die Anmeldung an.
+ * Legt ein Administrator-Konto an oder setzt dessen Passwort neu.
  *
  *     npm run passwort
+ *
+ * Das ist der Weg für das allererste Konto — und der Rückweg, wenn niemand mehr
+ * in die Verwaltung kommt. Alle weiteren Konten legt man bequemer unter /admin
+ * im Browser an.
  *
  * Geschrieben wird nach secrets.json — dieselbe Datei wie die Wallbox-Zugangs-
  * daten, und aus demselben Grund: Sie ist über .gitignore ausgeschlossen und
@@ -12,16 +16,15 @@
  * Datei liest, kann sich damit nicht anmelden.
  */
 
-import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
 import { createInterface, type Interface } from 'node:readline';
 import { resolve } from 'node:path';
 
-import { hashPassword } from '../apps/server/src/auth.ts';
-import { writeJsonAtomic } from '../apps/server/src/persist.ts';
+import { Kontenspeicher, MINDESTLAENGE_PASSWORT } from '../apps/server/src/benutzer.ts';
+import { Sitzungsspeicher } from '../apps/server/src/sitzungen.ts';
 
 const PFAD = resolve(process.cwd(), 'secrets.json');
-const MINDESTLAENGE = 10;
+const SITZUNGEN = resolve(process.cwd(), 'data', 'sitzungen.json');
+const MINDESTLAENGE = MINDESTLAENGE_PASSWORT;
 
 /**
  * Am Terminal getippt oder aus einer Pipe gefüttert?
@@ -104,20 +107,6 @@ async function frage(text: string, versteckt = false): Promise<string> {
   return antwort;
 }
 
-function vorhandeneGeheimnisse(): Record<string, unknown> {
-  if (!existsSync(PFAD)) return {};
-  try {
-    const roh: unknown = JSON.parse(readFileSync(PFAD, 'utf8'));
-    return typeof roh === 'object' && roh !== null ? (roh as Record<string, unknown>) : {};
-  } catch {
-    console.error('');
-    console.error(`  ${PFAD} ist nicht lesbar (kein gültiges JSON).`);
-    console.error('  Bitte von Hand prüfen - hier wird nichts überschrieben.');
-    console.error('');
-    process.exit(1);
-  }
-}
-
 function abbruch(...zeilen: readonly string[]): never {
   console.error('');
   for (const zeile of zeilen) console.error(`  ${zeile}`);
@@ -128,15 +117,27 @@ function abbruch(...zeilen: readonly string[]): never {
 
 async function main(): Promise<void> {
   console.log('');
-  console.log('  Anmeldung für SmartHome einrichten');
-  console.log('  ----------------------------------');
+  console.log('  Administrator-Konto für SmartHome');
+  console.log('  ---------------------------------');
   console.log('');
 
-  const geheim = vorhandeneGeheimnisse();
-  const bisher = (geheim['auth'] ?? {}) as Record<string, unknown>;
-  const alterName = typeof bisher['username'] === 'string' ? bisher['username'] : '';
+  const speicher = Kontenspeicher.ladenOderNeu(PFAD);
+  const vorhanden = speicher.alle();
 
-  const vorgabe = alterName || 'andreas';
+  if (vorhanden.length > 0) {
+    console.log('  Vorhandene Konten:');
+    for (const b of vorhanden) {
+      console.log(`     ${b.username}${b.rolle === 'admin' ? '  (Administrator)' : ''}`);
+    }
+    console.log('');
+    console.log('  Ein bekannter Name setzt dessen Passwort neu, ein neuer Name legt');
+    console.log('  ein zusätzliches Administrator-Konto an.');
+    console.log('');
+  }
+
+  // Vorgabe ist der erste Administrator - wer das Werkzeug aufruft, will fast
+  // immer genau dessen Passwort setzen.
+  const vorgabe = vorhanden.find((b) => b.rolle === 'admin')?.username ?? 'Andreas';
   const eingabe = await frage(`  Benutzername [${vorgabe}]: `);
   const username = eingabe || vorgabe;
 
@@ -154,32 +155,55 @@ async function main(): Promise<void> {
     abbruch('Die beiden Eingaben stimmen nicht überein. Nichts geändert.');
   }
 
-  // Vorhandenes Sitzungsgeheimnis behalten. Neu wäre nicht falsch, aber ohne Not
-  // meldet man niemanden ab - und das Passwort geht ohnehin in die Signatur ein,
-  // alte Sitzungen sind also so oder so hinfällig.
-  const sessionSecret =
-    typeof bisher['sessionSecret'] === 'string' && bisher['sessionSecret'].length >= 32
-      ? bisher['sessionSecret']
-      : randomBytes(32).toString('hex');
+  const bekannt = speicher.nachName(username);
+  let neu = false;
 
-  // Alles Übrige aus der Datei bleibt stehen - insbesondere die Tuya-Zugangs-
-  // daten der Wallbox. Ein Passwortwechsel darf die Wallbox nicht abklemmen.
-  writeJsonAtomic(
-    PFAD,
-    {
-      ...geheim,
-      auth: { username, passwordHash: hashPassword(passwort), sessionSecret },
-    },
-    2,
-  );
+  if (bekannt) {
+    const gesetzt = speicher.passwortSetzen(bekannt.id, passwort);
+    if (!gesetzt.ok) abbruch(`Abgelehnt (${gesetzt.fehler}). Nichts geändert.`);
+
+    // Zum Administrator machen, falls noch nicht. Dieses Werkzeug läuft an der
+    // Konsole des Servers - wer dort steht, hat ohnehin vollen Zugriff. Und es
+    // ist der Rückweg, wenn niemand mehr in die Verwaltung kommt.
+    if (bekannt.rolle !== 'admin') {
+      speicher.rolleSetzen(bekannt.id, 'admin');
+      console.log('');
+      console.log(`  "${bekannt.username}" ist jetzt Administrator.`);
+    }
+  } else {
+    const angelegt = speicher.anlegen({
+      username,
+      passwort,
+      rolle: 'admin',
+      angelegtVon: null,
+    });
+    if (!angelegt.ok) {
+      abbruch(
+        angelegt.fehler === 'name-ungueltig'
+          ? 'Benutzername nicht erlaubt: 2 bis 32 Zeichen, nur Buchstaben, Ziffern, Leerzeichen, Punkt, Strich, Unterstrich.'
+          : `Abgelehnt (${angelegt.fehler}). Nichts geändert.`,
+      );
+    }
+    neu = true;
+  }
+
+  // Alle Geräte dieses Kontos abmelden. Ein neues Passwort soll etwas ändern -
+  // bliebe ein altes Handy angemeldet, hätte der Wechsel genau die Wirkung
+  // nicht, wegen der man ihn vornimmt.
+  const konto = speicher.nachName(username);
+  if (konto) {
+    const sitzungen = new Sitzungsspeicher(SITZUNGEN, speicher.sessionSecret);
+    sitzungen.beendeVonBenutzer(konto.id);
+    sitzungen.persist();
+  }
 
   console.log('');
   console.log(`  Gespeichert in ${PFAD}`);
-  console.log(`  Benutzer: ${username}`);
+  console.log(`  ${neu ? 'Angelegt' : 'Passwort neu gesetzt'}: ${username} (Administrator)`);
   console.log('');
-  console.log('  Jetzt den Server neu starten - die Anmeldung wird beim Start gelesen.');
-  console.log('  Bereits angemeldete Geräte müssen sich neu anmelden: Ein geändertes');
-  console.log('  Passwort macht alle bestehenden Sitzungen ungültig.');
+  console.log('  Jetzt den Server neu starten - die Konten werden beim Start gelesen.');
+  console.log('  Weitere Konten für andere Personen legst du danach im Browser an:');
+  console.log('     http://localhost:4173/admin');
   console.log('');
   rl?.close();
 }

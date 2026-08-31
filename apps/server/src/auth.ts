@@ -6,26 +6,17 @@
  * öffentlich erreichbar — und die App hat schreibende Endpunkte (Tarife,
  * Reconnect). Ohne Anmeldung könnte sie jeder bedienen, der die Adresse kennt.
  *
- * Bewusst klein gehalten: ein Konto, keine Benutzerverwaltung, keine Datenbank.
- * Das ist ein privates Dashboard, keine Mehrbenutzer-Anwendung.
+ * Hier stehen nur die Bausteine, die für sich allein Sinn ergeben: Passwörter,
+ * Kekse, die Bremse gegen Durchprobieren und die Frage, woher eine Anfrage kam.
+ * Wer welches Konto hat, steht in `benutzer.ts`; welches Gerät gerade angemeldet
+ * ist, in `sitzungen.ts`.
  *
- * Zwei Bausteine:
- *
- *   1. Das Passwort liegt NUR als scrypt-Hash in secrets.json. Wer die Datei
- *      liest, hat damit noch kein Passwort. scrypt ist absichtlich langsam und
- *      speicherhungrig, damit Ausprobieren teuer bleibt.
- *
- *   2. Die Sitzung ist ein signierter Keks ohne Serverspeicher: Ablaufzeitpunkt
- *      plus HMAC darüber. Das übersteht einen Neustart des Servers, ohne dass
- *      jemand neu anmelden muss — genau das, was bei einem Dienst erwünscht ist,
- *      der sich nach jedem Deploy neu startet.
- *
- * In die Signatur geht der Passwort-Hash mit ein. Folge: Ein geändertes Passwort
- * macht alle bestehenden Sitzungen ungültig, ohne dass irgendwo eine Liste
- * gepflegt werden müsste.
+ * Das Passwort liegt NUR als scrypt-Hash in secrets.json. Wer die Datei liest,
+ * hat damit noch kein Passwort. scrypt ist absichtlich langsam und
+ * speicherhungrig, damit Ausprobieren teuer bleibt.
  */
 
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 /** scrypt-Parameter. Kostet ~100 ms pro Versuch - fuer eine Anmeldung nicht spürbar. */
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 } as const;
@@ -34,12 +25,6 @@ const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 } as const;
 export const SESSION_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
 export const SESSION_COOKIE = 'sh_session';
-
-export interface AuthSettings {
-  readonly username: string;
-  readonly passwordHash: string;
-  readonly sessionSecret: string;
-}
 
 // ── Passwort ────────────────────────────────────────────────────────────────
 
@@ -77,52 +62,6 @@ export function verifyPassword(password: string, stored: string): boolean {
 }
 
 // ── Sitzung ─────────────────────────────────────────────────────────────────
-
-function signature(secret: string, passwordHash: string, expiresAt: number): string {
-  return createHmac('sha256', secret).update(`${expiresAt}.${passwordHash}`).digest('base64url');
-}
-
-/** Token für eine neue Sitzung: `<ablauf>.<signatur>`. */
-export function createSessionToken(settings: AuthSettings, now = Date.now()): string {
-  const expiresAt = now + SESSION_TTL_MS;
-  return `${expiresAt}.${signature(settings.sessionSecret, settings.passwordHash, expiresAt)}`;
-}
-
-/** Prüft Signatur und Ablauf. Gibt es den geringsten Zweifel, ist die Antwort nein. */
-export function verifySessionToken(
-  token: string | undefined,
-  settings: AuthSettings,
-  now = Date.now(),
-): boolean {
-  if (!token) return false;
-  const punkt = token.lastIndexOf('.');
-  if (punkt <= 0) return false;
-
-  const expiresAt = Number(token.slice(0, punkt));
-  if (!Number.isFinite(expiresAt) || expiresAt <= now) return false;
-
-  const erwartet = Buffer.from(
-    signature(settings.sessionSecret, settings.passwordHash, expiresAt),
-    'utf8',
-  );
-  const bekommen = Buffer.from(token.slice(punkt + 1), 'utf8');
-  if (erwartet.length !== bekommen.length) return false;
-  return timingSafeEqual(erwartet, bekommen);
-}
-
-/**
- * Ablaufzeitpunkt eines Tokens, ohne die Signatur zu prüfen.
- *
- * Nur dafür gedacht zu entscheiden, ob ein gültiger Keks vorsorglich erneuert
- * wird. Über die Echtheit sagt das nichts aus — dafür ist `verifySessionToken`
- * zuständig, und die läuft vorher.
- */
-export function tokenAblauf(token: string): number | null {
-  const punkt = token.lastIndexOf('.');
-  if (punkt <= 0) return null;
-  const wert = Number(token.slice(0, punkt));
-  return Number.isFinite(wert) ? wert : null;
-}
 
 /**
  * Ziel nach der Anmeldung, auf sichere Werte eingegrenzt.

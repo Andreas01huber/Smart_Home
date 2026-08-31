@@ -3,7 +3,6 @@ import { describe, it } from 'node:test';
 
 import {
   clearCookie,
-  createSessionToken,
   hashPassword,
   herkunftVon,
   istHttps,
@@ -13,17 +12,7 @@ import {
   SESSION_TTL_MS,
   sicheresZiel,
   verifyPassword,
-  verifySessionToken,
-  type AuthSettings,
 } from './auth.ts';
-
-function einstellungen(passwort = 'ein-langes-passwort'): AuthSettings {
-  return {
-    username: 'andreas',
-    passwordHash: hashPassword(passwort),
-    sessionSecret: 'a'.repeat(64),
-  };
-}
 
 describe('Passwort', () => {
   it('erkennt das richtige Passwort wieder', () => {
@@ -51,47 +40,6 @@ describe('Passwort', () => {
     for (const kaputt of ['', 'unsinn', 'scrypt$nur-ein-teil', 'md5$a$b', 'scrypt$$']) {
       assert.equal(verifyPassword('egal', kaputt), false, kaputt);
     }
-  });
-});
-
-describe('Sitzung', () => {
-  it('akzeptiert einen frisch erzeugten Token', () => {
-    const s = einstellungen();
-    assert.equal(verifySessionToken(createSessionToken(s), s), true);
-  });
-
-  it('lehnt einen abgelaufenen Token ab', () => {
-    const s = einstellungen();
-    const alt = createSessionToken(s, Date.now() - SESSION_TTL_MS - 1000);
-    assert.equal(verifySessionToken(alt, s), false);
-  });
-
-  it('lehnt einen verfälschten Token ab', () => {
-    const s = einstellungen();
-    const token = createSessionToken(s);
-    const spaeter = `${Date.now() + SESSION_TTL_MS * 10}.${token.split('.')[1] ?? ''}`;
-    assert.equal(verifySessionToken(spaeter, s), false);
-  });
-
-  it('lehnt Unsinn ab, statt zu stolpern', () => {
-    const s = einstellungen();
-    for (const murks of [undefined, '', '.', 'abc', '123', 'abc.def']) {
-      assert.equal(verifySessionToken(murks, s), false, String(murks));
-    }
-  });
-
-  it('macht ein geändertes Passwort zur Abmeldung aller Geräte', () => {
-    const alt = einstellungen('altes-passwort-x');
-    const token = createSessionToken(alt);
-    const neu: AuthSettings = { ...alt, passwordHash: hashPassword('neues-passwort-y') };
-    assert.equal(verifySessionToken(token, alt), true);
-    assert.equal(verifySessionToken(token, neu), false);
-  });
-
-  it('gilt nicht mit einem fremden Sitzungsgeheimnis', () => {
-    const a = einstellungen();
-    const b: AuthSettings = { ...a, sessionSecret: 'b'.repeat(64) };
-    assert.equal(verifySessionToken(createSessionToken(a), b), false);
   });
 });
 

@@ -6,7 +6,7 @@
  * veraltete Messwerte dürfen nicht als aktuell erscheinen (Anforderung 4P/53).
  */
 
-const CACHE = 'energie-shell-v54';
+const CACHE = 'energie-shell-v55';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/format.js', '/scene.js', '/favicon-64.png?v=20260827', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
@@ -26,17 +26,39 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+/**
+ * Seiten, die nie in den Cache dürfen.
+ *
+ * Anmeldung und Verwaltung hängen davon ab, wer gerade angemeldet ist, und die
+ * Verwaltung zeigt Namen, Geräte und IP-Adressen. Aus dem Cache beantwortet
+ * hiesse: Wer nach dem Abmelden /admin öffnet, bekäme die Benutzerliste des
+ * letzten Aufrufs zu sehen, ganz ohne Anmeldung.
+ */
+function nurAusDemNetz(pfad) {
+  return (
+    pfad.startsWith('/api/') ||
+    pfad === '/admin' ||
+    pfad.startsWith('/admin/') ||
+    pfad === '/login' ||
+    pfad === '/logout'
+  );
+}
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // API und Event-Stream immer aus dem Netz, niemals aus dem Cache.
-  if (url.pathname.startsWith('/api/')) return;
+  // API, Anmeldung und Verwaltung immer aus dem Netz, niemals aus dem Cache.
+  if (nurAusDemNetz(url.pathname)) return;
   if (event.request.method !== 'GET') return;
 
   event.respondWith(
     caches.match(event.request).then((cached) => {
       const network = fetch(event.request)
         .then((resp) => {
-          if (resp.ok && url.origin === self.location.origin) {
+          // `no-store` ernst nehmen. Der Server schickt das bei allem, was von
+          // der Anmeldung abhängt - auch bei einer Umleitung dorthin, die hier
+          // sonst unter dem ursprünglichen Pfad im Cache landen würde.
+          const nichtSpeichern = (resp.headers.get('cache-control') ?? '').includes('no-store');
+          if (resp.ok && !nichtSpeichern && url.origin === self.location.origin) {
             const copy = resp.clone();
             caches.open(CACHE).then((c) => c.put(event.request, copy));
           }
