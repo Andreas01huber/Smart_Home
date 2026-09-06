@@ -43,6 +43,7 @@ import { loadConfig, ladeanschlussAus, type AppConfig } from './config.ts';
 import { EnergyEngine, type EngineState } from './engine.ts';
 import { EnergyAccumulator, localDate } from './history.ts';
 import { ChargeSessionLog } from './ev-log.ts';
+import { Ladesteuerung } from './ladesteuerung.ts';
 import { readBody } from './http-util.ts';
 
 const PUBLIC_DIR = resolve(import.meta.dirname, '..', 'public');
@@ -61,8 +62,19 @@ const MIME_TYPES: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
 };
 
-function buildConnectors(config: AppConfig): ManagedConnector[] {
+/**
+ * Baut die Connectoren und reicht die Wallbox gesondert heraus.
+ *
+ * Die Regelung braucht den Adapter selbst und nicht nur seine Messwerte: Sie
+ * muss den Ladestrom stellen können, und das geht nur am Original vorbei am
+ * Health-Gate, das ausschliesslich lesende Aufrufe kennt.
+ */
+function buildConnectors(config: AppConfig): {
+  connectors: ManagedConnector[];
+  wallbox: TuyaEvseConnector | null;
+} {
   const inner: EnergyConnector[] = [];
+  let wallbox: TuyaEvseConnector | null = null;
 
   const { fronius, froniusGen24, victron } = config.sources;
 
@@ -106,25 +118,24 @@ function buildConnectors(config: AppConfig): ManagedConnector[] {
   // wird sie übersprungen und erscheint als "nicht eingerichtet".
   const ev = config.sources.evCharger;
   if (ev?.enabled === true && ev.accessId && ev.accessSecret && ev.deviceId) {
-    inner.push(
-      new TuyaEvseConnector({
-        accessId: ev.accessId,
-        accessSecret: ev.accessSecret,
-        deviceId: ev.deviceId,
-        connectorId: 'ev-charger',
-        displayName: ev.displayName ?? 'Wallbox',
-        ...(ev.region !== undefined ? { region: ev.region } : {}),
-        ...(ev.idleIntervalMs !== undefined ? { idleIntervalMs: ev.idleIntervalMs } : {}),
-        ...(ev.activeIntervalMs !== undefined
-          ? { activeIntervalMs: ev.activeIntervalMs }
-          : {}),
-      }),
-    );
+    wallbox = new TuyaEvseConnector({
+      accessId: ev.accessId,
+      accessSecret: ev.accessSecret,
+      deviceId: ev.deviceId,
+      connectorId: 'ev-charger',
+      displayName: ev.displayName ?? 'Wallbox',
+      ...(ev.region !== undefined ? { region: ev.region } : {}),
+      ...(ev.idleIntervalMs !== undefined ? { idleIntervalMs: ev.idleIntervalMs } : {}),
+      ...(ev.activeIntervalMs !== undefined
+        ? { activeIntervalMs: ev.activeIntervalMs }
+        : {}),
+    });
+    inner.push(wallbox);
   }
 
   // Jeder Connector bekommt ein Health-Gate: Statusmodell, Auto-Reconnect mit
   // Backoff, und Entkopplung, damit ein totes Gerät die anderen nicht bremst.
-  return inner.map((c) => new ManagedConnector(c));
+  return { connectors: inner.map((c) => new ManagedConnector(c)), wallbox };
 }
 
 /**
@@ -158,7 +169,11 @@ function announcedPlaceholders(
 }
 
 /** Aufbereitung für die Oberfläche — hier entstehen keine neuen Zahlen. */
-function serializeState(state: EngineState, config: AppConfig): unknown {
+function serializeState(
+  state: EngineState,
+  config: AppConfig,
+  regelung: ReturnType<Ladesteuerung['kurz']> | null = null,
+): unknown {
   const { snapshot, unavailable, disagreements, derivedConsumptionNegative } =
     state.resolution;
 
@@ -226,7 +241,12 @@ function serializeState(state: EngineState, config: AppConfig): unknown {
     inverters: perInverterLive(state, config),
     // Wallbox / E-Auto. Ohne konfiguriertes Ladegerät bleibt es beim
     // bisherigen Platzhalter-Zustand (Anforderung 38).
-    ev: serializeEv(snapshot.evCharger, ladeanschlussAus(config)),
+    ev: {
+      ...(serializeEv(snapshot.evCharger, ladeanschlussAus(config)) as object),
+      // Was die Überschussregelung gerade denkt. Echte Werte aus dem Dienst -
+      // die Oberfläche erfindet hier nichts.
+      regelung,
+    },
     unavailable,
     disagreements,
     derivedConsumptionNegative,
@@ -383,6 +403,7 @@ function handleEvents(
   engine: EnergyEngine,
   config: AppConfig,
   nochAngemeldet: () => boolean = () => true,
+  regelung: () => ReturnType<Ladesteuerung['kurz']> | null = () => null,
 ): void {
   response.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -411,7 +432,9 @@ function handleEvents(
       return;
     }
     try {
-      response.write(`data: ${JSON.stringify(serializeState(state, config))}\n\n`);
+      response.write(
+        `data: ${JSON.stringify(serializeState(state, config, regelung()))}\n\n`,
+      );
     } catch {
       unsubscribe?.();
       response.end();
@@ -441,7 +464,7 @@ function lanAddresses(): string[] {
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const connectors = buildConnectors(config);
+  const { connectors, wallbox } = buildConnectors(config);
 
   if (connectors.length === 0) {
     console.error(
@@ -478,7 +501,13 @@ async function main(): Promise<void> {
   const evLog = new ChargeSessionLog(resolve(process.cwd(), 'data'));
   engine.subscribe((state) => evLog.integrate(state));
 
+  // Überschussregelung. Stellt den Ladestrom so, dass das Auto nur Sonne und
+  // freigegebene Speicherleistung nimmt. Im Modus "beobachten" (Vorgabe)
+  // rechnet sie mit, sendet aber nichts.
+  const ladesteuerung = new Ladesteuerung(engine, wallbox, config);
+
   engine.start();
+  ladesteuerung.start();
 
   const sendJson = (response: ServerResponse, status: number, payload: unknown): void => {
     response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
@@ -560,6 +589,7 @@ async function main(): Promise<void> {
         sitzungen === null || kennung === null || konten === null
           ? undefined
           : () => sitzungen.gilt(kennung) && konten.nachId(konto?.id ?? '') !== null,
+        () => ladesteuerung.kurz(),
       );
       return;
     }
@@ -569,7 +599,9 @@ async function main(): Promise<void> {
       sendJson(
         response,
         state === null ? 503 : 200,
-        state === null ? { error: 'Noch keine Messung' } : serializeState(state, config),
+        state === null
+          ? { error: 'Noch keine Messung' }
+          : serializeState(state, config, ladesteuerung.kurz()),
       );
       return;
     }
@@ -646,6 +678,12 @@ async function main(): Promise<void> {
       const date =
         dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : localDate(new Date());
       sendJson(response, 200, evLog.stats(range, date));
+      return;
+    }
+
+    // Zustand der Überschussregelung samt Protokoll der letzten Entscheidungen.
+    if (url.pathname === '/api/ev/regelung') {
+      sendJson(response, 200, ladesteuerung.zustand());
       return;
     }
 
@@ -750,6 +788,7 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     engine.stop();
+    ladesteuerung.stop();
     accumulator.persist();
     evLog.persist();
     sitzungen?.persist();

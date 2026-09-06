@@ -43,6 +43,36 @@
     }
   },
 
+  "ueberschussladen": {
+    "_hinweis": "Das Auto soll niemals der Grund fuer Netzbezug sein. Die Regelung stellt dafuer den Ladestrom der Wallbox nach, damit der Netzbezug bei etwa 0 W bleibt. Mindest- und Hoechstladestrom stehen absichtlich NICHT hier: die liest die App vom Geraet selbst (charge_cur_set meldet min/max/step), damit es keine zweite, womoeglich falsche Wahrheit gibt.",
+
+    "_hinweis_modus": "aus = Regelung schlaeft. beobachten = rechnet und zeigt alles, sendet aber nichts an die Wallbox. regeln = stellt den Ladestrom wirklich. Vorgabe ist beobachten: erst zusehen, was die Automatik tun wuerde, dann freigeben.",
+    "modus": "beobachten",
+
+    "intervallSekunden": 30,
+
+    "_hinweis_reserve": "reserveW haelt Abstand zum Netzbezug. netzTotzoneW ist der Bereich um 0 W, in dem gar nicht nachgeregelt wird - ohne ihn wuerde die Regelung wegen jeder Wolke zwischen zwei Amperewerten pendeln. notbremseAbW ist der echte Netzbezug, ab dem sofort gesenkt wird, ohne auf irgendeine Frist zu warten.",
+    "reserveW": 200,
+    "netzTotzoneW": 150,
+    "notbremseAbW": 300,
+    "maxMessalterSekunden": 30,
+
+    "_hinweis_zeiten": "Erhoehen ist absichtlich traege, Senken schnell: zu spaet gesenkt heisst Netzbezug, zu spaet erhoeht heisst nur ein paar Sekunden weniger Ladung.",
+    "mindestabstandSekunden": 60,
+    "erhoehenNachSekunden": 90,
+    "senkenNachSekunden": 20,
+    "pausierenNachSekunden": 30,
+    "startenNachSekunden": 120,
+
+    "_hinweis_speicher": "Was die Speicher fuer das AUTO beisteuern duerfen - nicht was sie koennen. Unterhalb von minSocPercent gibt ein Speicher nichts mehr her, darueber hoechstens entladenMaxW. Eine laufende Entladung wird nie automatisch als Ueberschuss verbucht: sonst wuerde das Auto den Speicher leersaugen, den das Haus fuer die Nacht braucht.",
+    "speicherEntladenErlaubt": true,
+    "speicher": {
+      "victron-modbus:system": { "minSocPercent": 40, "entladenMaxW": 3000 },
+      "fronius-gen24:0": { "minSocPercent": 50, "entladenMaxW": 2000 }
+    },
+    "speicherStandard": { "minSocPercent": 50, "entladenMaxW": 0 }
+  },
+
   "announcedBatteries": [],
 
   "tariff": {

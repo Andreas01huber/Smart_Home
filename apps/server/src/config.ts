@@ -56,6 +56,65 @@ export interface EvChargerConfig {
   readonly accessSecret?: string;
 }
 
+/**
+ * Überschussladen — alle Stellschrauben an einer Stelle.
+ *
+ * Bewusst vollständig in config.json und nicht über den Code verteilt: Wer die
+ * Regelung im Betrieb beruhigen oder schärfer stellen will, soll genau eine
+ * Datei anfassen müssen.
+ *
+ * Mindest- und Höchstladestrom stehen hier NICHT. Die liest der Adapter vom
+ * Gerät selbst (`charge_cur_set` meldet min/max/step) — ein zweiter Satz Zahlen
+ * in der Konfiguration wäre eine Quelle für Widersprüche mit der Hardware.
+ */
+export interface UeberschussConfig {
+  /**
+   * `aus`         — Regelung schläft.
+   * `beobachten`  — rechnet und zeigt alles, sendet aber keinen Befehl.
+   * `regeln`      — stellt den Ladestrom tatsächlich.
+   */
+  readonly modus: 'aus' | 'beobachten' | 'regeln';
+  readonly intervallSekunden: number;
+  /** Sicherheitsabstand zum Netzbezug. */
+  readonly reserveW: number;
+  /** Totzone um 0 W Netz, innerhalb derer nicht nachgeregelt wird. */
+  readonly netzTotzoneW: number;
+  /** Ab diesem Netzbezug wird sofort gesenkt, ohne Fristen. */
+  readonly notbremseAbW: number;
+  readonly maxMessalterSekunden: number;
+  readonly mindestabstandSekunden: number;
+  readonly erhoehenNachSekunden: number;
+  readonly senkenNachSekunden: number;
+  readonly pausierenNachSekunden: number;
+  readonly startenNachSekunden: number;
+  readonly speicherEntladenErlaubt: boolean;
+  readonly speicher: Readonly<Record<string, { minSocPercent: number; entladenMaxW: number }>>;
+  readonly speicherStandard: { readonly minSocPercent: number; readonly entladenMaxW: number };
+}
+
+const UEBERSCHUSS_STANDARD: UeberschussConfig = {
+  // Vorsicht als Vorgabe: Wer die Wallbox zum ersten Mal stellen lässt, will
+  // erst sehen, was die Regelung tun WÜRDE. Auf "regeln" stellt man selbst.
+  modus: 'beobachten',
+  // 30 s ist der Kompromiss: Die Wallbox wird ohnehin nur alle 10 s (ladend)
+  // abgefragt, das Fahrzeug folgt einem neuen Sollwert erst nach einigen
+  // Sekunden, und die Tuya-Cloud hat ein Tageskontingent. Schneller brächte
+  // keine bessere Regelung, nur mehr Anfragen.
+  intervallSekunden: 30,
+  reserveW: 200,
+  netzTotzoneW: 150,
+  notbremseAbW: 300,
+  maxMessalterSekunden: 30,
+  mindestabstandSekunden: 60,
+  erhoehenNachSekunden: 90,
+  senkenNachSekunden: 20,
+  pausierenNachSekunden: 30,
+  startenNachSekunden: 120,
+  speicherEntladenErlaubt: true,
+  speicher: {},
+  speicherStandard: { minSocPercent: 50, entladenMaxW: 0 },
+};
+
 export interface AppConfig {
   readonly port: number;
   /**
@@ -82,6 +141,8 @@ export interface AppConfig {
    * anlegt, und eine Kopie im Konfigurationsobjekt wäre danach veraltet.
    */
   readonly secretsPfad: string;
+  /** Regelung des Ladestroms nach Überschuss. */
+  readonly ueberschuss: UeberschussConfig;
 }
 
 const DEFAULTS = {
@@ -150,8 +211,11 @@ export function loadConfig(path = resolve(process.cwd(), 'config.json')): AppCon
       : {}),
   };
 
+  const ueberschuss = leseUeberschuss(record['ueberschussladen']);
+
   return {
     secretsPfad,
+    ueberschuss,
     port: typeof record['port'] === 'number' ? record['port'] : DEFAULTS.port,
     host: typeof record['host'] === 'string' ? record['host'] : DEFAULTS.host,
     pollIntervalMs:
@@ -189,4 +253,74 @@ export function ladeanschlussAus(config: AppConfig): Ladeanschluss {
       ? ev.voltageV
       : vorgabe;
   return { phasen, spannungV };
+}
+
+/**
+ * Liest den Abschnitt `ueberschussladen`, Feld für Feld gegen den Standard.
+ *
+ * Absichtlich nachsichtig: Ein Tippfehler in einer einzelnen Zahl darf nicht
+ * den ganzen Server am Start hindern — er fällt auf den Vorgabewert zurück.
+ * Der Modus ist die Ausnahme, die keine ist: Steht dort etwas Unbekanntes, wird
+ * NICHT geregelt. Ein unklarer Wert darf nie dazu führen, dass die Anlage
+ * plötzlich Befehle an die Wallbox schickt.
+ */
+function leseUeberschuss(roh: unknown): UeberschussConfig {
+  if (typeof roh !== 'object' || roh === null) return UEBERSCHUSS_STANDARD;
+  const r = roh as Record<string, unknown>;
+
+  const zahl = (schluessel: string, vorgabe: number): number => {
+    const wert = r[schluessel];
+    return typeof wert === 'number' && Number.isFinite(wert) && wert >= 0 ? wert : vorgabe;
+  };
+
+  const modus =
+    r['modus'] === 'regeln' ? 'regeln' : r['modus'] === 'aus' ? 'aus' : 'beobachten';
+
+  const speicher: Record<string, { minSocPercent: number; entladenMaxW: number }> = {};
+  const rohSpeicher = r['speicher'];
+  if (typeof rohSpeicher === 'object' && rohSpeicher !== null) {
+    for (const [id, wert] of Object.entries(rohSpeicher as Record<string, unknown>)) {
+      if (typeof wert !== 'object' || wert === null) continue;
+      const w = wert as Record<string, unknown>;
+      speicher[id] = {
+        minSocPercent:
+          typeof w['minSocPercent'] === 'number' ? w['minSocPercent'] : 50,
+        entladenMaxW: typeof w['entladenMaxW'] === 'number' ? w['entladenMaxW'] : 0,
+      };
+    }
+  }
+
+  const rohStandard = r['speicherStandard'];
+  const standard =
+    typeof rohStandard === 'object' && rohStandard !== null
+      ? {
+          minSocPercent:
+            typeof (rohStandard as Record<string, unknown>)['minSocPercent'] === 'number'
+              ? ((rohStandard as Record<string, unknown>)['minSocPercent'] as number)
+              : UEBERSCHUSS_STANDARD.speicherStandard.minSocPercent,
+          entladenMaxW:
+            typeof (rohStandard as Record<string, unknown>)['entladenMaxW'] === 'number'
+              ? ((rohStandard as Record<string, unknown>)['entladenMaxW'] as number)
+              : UEBERSCHUSS_STANDARD.speicherStandard.entladenMaxW,
+        }
+      : UEBERSCHUSS_STANDARD.speicherStandard;
+
+  return {
+    modus,
+    // Unter 10 s wird nicht geregelt: Das Fahrzeug folgt einem neuen Sollwert
+    // ohnehin langsamer, und die Cloud dankt es nicht.
+    intervallSekunden: Math.max(10, zahl('intervallSekunden', UEBERSCHUSS_STANDARD.intervallSekunden)),
+    reserveW: zahl('reserveW', UEBERSCHUSS_STANDARD.reserveW),
+    netzTotzoneW: zahl('netzTotzoneW', UEBERSCHUSS_STANDARD.netzTotzoneW),
+    notbremseAbW: zahl('notbremseAbW', UEBERSCHUSS_STANDARD.notbremseAbW),
+    maxMessalterSekunden: zahl('maxMessalterSekunden', UEBERSCHUSS_STANDARD.maxMessalterSekunden),
+    mindestabstandSekunden: zahl('mindestabstandSekunden', UEBERSCHUSS_STANDARD.mindestabstandSekunden),
+    erhoehenNachSekunden: zahl('erhoehenNachSekunden', UEBERSCHUSS_STANDARD.erhoehenNachSekunden),
+    senkenNachSekunden: zahl('senkenNachSekunden', UEBERSCHUSS_STANDARD.senkenNachSekunden),
+    pausierenNachSekunden: zahl('pausierenNachSekunden', UEBERSCHUSS_STANDARD.pausierenNachSekunden),
+    startenNachSekunden: zahl('startenNachSekunden', UEBERSCHUSS_STANDARD.startenNachSekunden),
+    speicherEntladenErlaubt: r['speicherEntladenErlaubt'] !== false,
+    speicher,
+    speicherStandard: standard,
+  };
 }
