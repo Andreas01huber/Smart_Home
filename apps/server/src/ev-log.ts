@@ -11,6 +11,19 @@
  * sie. Das ist der zuverlässigste verfügbare Indikator und vermeidet, dass eine
  * Ladepause (Leistung kurz 0) fälschlich als zwei Sessions gezählt wird.
  *
+ * Das allein reichte aber nicht. Die Wallbox hängt an der Tuya-Cloud, und die
+ * hat Aussetzer; jeder davon meldete bisher „offline“ und schloss die Session.
+ * Ein Ladevorgang zerfiel so in ein Dutzend Einträge. Seit dieser Fassung gilt
+ * eine ABKLINGZEIT: Erst wenn das Fahrzeug ABKLINGZEIT_MS lang durchgehend weg
+ * ist, wird geschlossen. Ein kurzer Wolkenbruch in der Cloud, ein Neustart des
+ * Servers nach einem Deploy oder eine Regelpause laufen durch, ohne die Session
+ * zu zerreissen.
+ *
+ * ── Verlauf ─────────────────────────────────────────────────────────────────
+ * Innerhalb einer Session werden Leistungsstufen als Abschnitte mitgeschrieben
+ * (`verlauf`). Eine Ampereänderung ist damit ein Abschnitt IN der Session und
+ * kein neuer Ladevorgang.
+ *
  * Innerhalb der Session wird getrennt gezählt:
  *   - `connectedSeconds`  gesamte Steckzeit
  *   - `chargingSeconds`   nur Zeit mit tatsächlichem Ladefluss
@@ -44,6 +57,21 @@ const CHARGING_THRESHOLD_W = 50;
 const MAX_DT_SECONDS = 60;
 /** Sessions unterhalb dieser Energie sind Fehlanschlüsse, kein Ladevorgang. */
 const MIN_SESSION_WH = 10;
+/**
+ * So lange darf das Fahrzeug „weg“ sein, ohne dass die Session endet.
+ *
+ * Deckt Cloud-Aussetzer, kurze Control-Pilot-Wackler, Regelpausen und einen
+ * Neustart des Servers ab. Zehn Minuten sind lang genug für all das und kurz
+ * genug, dass zwei wirklich getrennte Ladevorgänge nicht verschmelzen — dazu
+ * müsste man das Auto binnen zehn Minuten ab- und wieder anstecken.
+ */
+const ABKLINGZEIT_MS = 10 * 60_000;
+/** Ab dieser Leistungsänderung beginnt ein neuer Abschnitt im Verlauf. */
+const ABSCHNITT_SCHWELLE_W = 300;
+/** Obergrenze für den Verlauf je Session — schützt die Datei vor Wildwuchs. */
+const VERLAUF_MAX = 400;
+/** Aktuelle Fassung des Dateiformats. */
+const FORMAT_VERSION = 2;
 
 interface OpenSession {
   id: string;
@@ -56,6 +84,11 @@ interface OpenSession {
   hasGaps: boolean;
   faultText: string | null;
   lastSeenAt: number;
+  /** Zeitpunkt, seit dem das Fahrzeug nicht mehr gemeldet wird. */
+  getrenntSeit: number | null;
+  verlauf: { ab: string; leistungW: number; stromA: number | null }[];
+  /** Aus wie vielen zuvor getrennten Vorgängen zusammengeführt. */
+  teile: number;
 }
 
 export class ChargeSessionLog {
@@ -80,19 +113,27 @@ export class ChargeSessionLog {
     const previous = this.lastAt;
     this.lastAt = now;
 
-    // Ladegerät nicht erreichbar: laufende Session sauber abschliessen, statt
-    // sie mit erfundenen Werten weiterlaufen zu lassen.
+    // Ladegerät nicht erreichbar. Früher wurde hier sofort geschlossen — das
+    // war der Grund für die vielen zerstückelten Ladevorgänge: Jeder Aussetzer
+    // der Tuya-Cloud beendete den Vorgang. Jetzt läuft die Abklingzeit.
     if (ev === null || ev.state === 'offline') {
-      if (this.open !== null) this.close('interrupted');
+      this.abwesend(now, 'interrupted');
       return;
     }
 
     const connected = ev.vehicleConnected === true;
 
-    if (connected && this.open === null) this.begin(state.polledAt);
-    if (!connected && this.open !== null) {
-      this.close(ev.state === 'fault' ? 'fault' : 'unplugged');
+    if (!connected) {
+      // `null` heisst "Control Pilot unklar", nicht "abgesteckt". Auch das
+      // läuft über die Abklingzeit, statt sofort zu schliessen.
+      this.abwesend(now, ev.state === 'fault' ? 'fault' : 'unplugged');
+      return;
     }
+
+    // Fahrzeug ist (wieder) da.
+    if (this.open === null) this.begin(state.polledAt);
+    else this.open.getrenntSeit = null;
+
     const session = this.open;
     if (session === null || previous === null) return;
 
@@ -111,6 +152,12 @@ export class ChargeSessionLog {
       this.dirty = true;
       return;
     }
+
+    // Verlauf mitschreiben: Stufen, nicht jeder Messwert. Ein neuer Abschnitt
+    // beginnt, wenn sich die Leistung deutlich ändert oder der eingestellte
+    // Strom wechselt — also genau bei den Ereignissen, die früher fälschlich
+    // wie ein neuer Ladevorgang aussahen.
+    this.merkeAbschnitt(session, powerW, ev.maxCurrentA, state.polledAt);
 
     if (powerW > CHARGING_THRESHOLD_W) {
       session.chargingSeconds += dtSeconds;
@@ -199,6 +246,48 @@ export class ChargeSessionLog {
 
   // ── intern ────────────────────────────────────────────────────────────
 
+  /**
+   * Das Fahrzeug meldet sich gerade nicht.
+   *
+   * Schliesst die Session NICHT sofort, sondern merkt sich den Zeitpunkt und
+   * wartet die Abklingzeit ab. Kommt das Fahrzeug vorher zurück, läuft dieselbe
+   * Session weiter — das ist der ganze Unterschied zwischen einem Ladevorgang
+   * und fünfzehn Einträgen in der Historie.
+   */
+  private abwesend(now: number, grund: ChargeSessionEnd): void {
+    const session = this.open;
+    if (session === null) return;
+    if (session.getrenntSeit === null) {
+      session.getrenntSeit = now;
+      this.dirty = true;
+      return;
+    }
+    if (now - session.getrenntSeit >= ABKLINGZEIT_MS) this.close(grund);
+  }
+
+  /** Hält Leistungsstufen fest, statt jeden Messwert zu speichern. */
+  private merkeAbschnitt(
+    session: OpenSession,
+    powerW: number,
+    stromA: number | null,
+    at: Date,
+  ): void {
+    const letzter = session.verlauf[session.verlauf.length - 1];
+    const stufeNeu =
+      letzter === undefined ||
+      Math.abs(powerW - letzter.leistungW) >= ABSCHNITT_SCHWELLE_W ||
+      (stromA !== null && stromA !== letzter.stromA);
+    if (!stufeNeu) return;
+    session.verlauf.push({
+      ab: at.toISOString(),
+      leistungW: Math.round(powerW),
+      stromA,
+    });
+    // Ältestes verwerfen statt unbegrenzt wachsen. Der Verlauf ist Beiwerk;
+    // die Kennzahlen der Session bleiben davon unberührt.
+    if (session.verlauf.length > VERLAUF_MAX) session.verlauf.shift();
+  }
+
   private begin(at: Date): void {
     this.open = {
       id: `${at.toISOString()}`,
@@ -211,6 +300,9 @@ export class ChargeSessionLog {
       hasGaps: false,
       faultText: null,
       lastSeenAt: at.getTime(),
+      getrenntSeit: null,
+      verlauf: [],
+      teile: 1,
     };
     this.dirty = true;
   }
@@ -247,6 +339,8 @@ export class ChargeSessionLog {
       endReason: reason,
       faultText: open.faultText,
       hasGaps: open.hasGaps,
+      verlauf: open.verlauf,
+      teile: open.teile,
     };
   }
 
@@ -255,14 +349,40 @@ export class ChargeSessionLog {
     try {
       const parsed = JSON.parse(readFileSync(this.path, 'utf8'));
       if (Array.isArray(parsed?.sessions)) this.sessions = parsed.sessions as ChargeSession[];
-      // Eine beim Herunterfahren offene Session wird als unterbrochen
-      // übernommen — ihre Daten gehen nicht verloren.
+
+      // Eine beim Herunterfahren offene Session wird fortgesetzt, sofern sie
+      // frisch genug ist. Vorher wurde sie hier abgeschlossen — mit der Folge,
+      // dass jeder Deploy mitten im Laden den Vorgang in zwei zerschnitt.
       if (parsed?.open && typeof parsed.open === 'object') {
-        const open = parsed.open as OpenSession;
-        if (open.energyWh >= MIN_SESSION_WH) {
-          this.sessions.push(this.toSession(open, 'interrupted'));
-          this.sessions.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+        const open = parsed.open as Partial<OpenSession> & { lastSeenAt?: number };
+        const alterMs = Date.now() - (open.lastSeenAt ?? 0);
+        if (alterMs < ABKLINGZEIT_MS) {
+          this.open = {
+            ...(open as OpenSession),
+            getrenntSeit: open.lastSeenAt ?? Date.now(),
+            verlauf: Array.isArray(open.verlauf) ? open.verlauf : [],
+            teile: typeof open.teile === 'number' ? open.teile : 1,
+          };
+        } else if ((open.energyWh ?? 0) >= MIN_SESSION_WH) {
+          this.sessions.push(this.toSession(open as OpenSession, 'interrupted'));
         }
+      }
+
+      this.sessions.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+
+      // Migration auf Fassung 2: Was früher als eigener Ladevorgang gezählt
+      // wurde, aber nur ein Aussetzer war, wird jetzt zusammengeführt.
+      if (parsed?.version !== FORMAT_VERSION) {
+        const vorher = this.sessions.length;
+        this.sessions = fuehreZusammen(this.sessions);
+        const zusammengefuehrt = vorher - this.sessions.length;
+        if (zusammengefuehrt > 0) {
+          console.log(
+            `Ladeprotokoll: ${vorher} Einträge zu ${this.sessions.length} echten `
+              + `Ladevorgängen zusammengefasst (${zusammengefuehrt} Fragmente).`,
+          );
+        }
+        this.persist();
       }
     } catch (error) {
       console.warn('Ladeprotokoll konnte nicht geladen werden:', error);
@@ -271,7 +391,11 @@ export class ChargeSessionLog {
 
   persist(): void {
     try {
-      writeJsonAtomic(this.path, { sessions: this.sessions, open: this.open });
+      writeJsonAtomic(this.path, {
+        version: FORMAT_VERSION,
+        sessions: this.sessions,
+        open: this.open,
+      });
       this.dirty = false;
     } catch (error) {
       console.warn('Ladeprotokoll konnte nicht gespeichert werden:', error);
@@ -315,4 +439,66 @@ function matchesRange(iso: string, range: string, dateStr: string): boolean {
     return day >= from && day <= localDate(start);
   }
   return true;
+}
+
+/**
+ * Führt Bruchstücke eines Ladevorgangs wieder zu einer Session zusammen.
+ *
+ * Nötig, weil die frühere Fassung bei jedem Cloud-Aussetzer und bei jedem
+ * Neustart des Servers geschlossen hat. In der Historie stehen dadurch
+ * Ladevorgänge, die in Wahrheit einer waren — genau die "vielen einzelnen
+ * Ladevorgänge", über die man in der Oberfläche stolpert.
+ *
+ * Zusammengeführt wird nur, was zeitlich unmittelbar aneinander anschliesst
+ * (Lücke kleiner als die Abklingzeit). Zwei Ladevorgänge mit einer echten Pause
+ * dazwischen bleiben zwei — dafür müsste man das Auto binnen zehn Minuten ab-
+ * und wieder anstecken.
+ *
+ * Läuft einmalig beim Laden; danach steht Fassung 2 in der Datei.
+ */
+export function fuehreZusammen(
+  sessions: readonly ChargeSession[],
+  abklingzeitMs = ABKLINGZEIT_MS,
+): ChargeSession[] {
+  const sortiert = [...sessions].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  const ergebnis: ChargeSession[] = [];
+
+  for (const s of sortiert) {
+    const vorher = ergebnis[ergebnis.length - 1];
+    const endeVorher = vorher?.endedAt ?? vorher?.startedAt ?? null;
+    const luecke =
+      vorher === undefined || endeVorher === null
+        ? Number.POSITIVE_INFINITY
+        : new Date(s.startedAt).getTime() - new Date(endeVorher).getTime();
+
+    if (vorher === undefined || !Number.isFinite(luecke) || luecke > abklingzeitMs || luecke < 0) {
+      ergebnis.push(s);
+      continue;
+    }
+
+    ergebnis[ergebnis.length - 1] = {
+      ...vorher,
+      endedAt: s.endedAt,
+      chargingSeconds: vorher.chargingSeconds + s.chargingSeconds,
+      // Die Lücke zählt als Steckzeit: Das Auto hing dran, nur die Cloud nicht.
+      connectedSeconds:
+        vorher.connectedSeconds + s.connectedSeconds + Math.round(luecke / 1000),
+      energyWh: vorher.energyWh + s.energyWh,
+      maxPowerW: Math.max(vorher.maxPowerW, s.maxPowerW),
+      avgPowerW:
+        vorher.chargingSeconds + s.chargingSeconds > 0
+          ? ((vorher.energyWh + s.energyWh) * 3600) /
+            (vorher.chargingSeconds + s.chargingSeconds)
+          : null,
+      split: addSplit(vorher.split, s.split),
+      endReason: s.endReason,
+      faultText: s.faultText ?? vorher.faultText,
+      // Eine zusammengeführte Session hatte per Definition eine Lücke.
+      hasGaps: true,
+      verlauf: [...(vorher.verlauf ?? []), ...(s.verlauf ?? [])],
+      teile: (vorher.teile ?? 1) + (s.teile ?? 1),
+    };
+  }
+
+  return ergebnis;
 }

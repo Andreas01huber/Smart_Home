@@ -152,4 +152,26 @@ export interface ChargeSession {
   readonly faultText: string | null;
   /** true, wenn während des Ladens Messwerte fehlten. */
   readonly hasGaps: boolean;
+  /**
+   * Verlauf innerhalb der Session: Leistungsstufen, Ampereänderungen, Pausen.
+   *
+   * Optional, weil ältere Aufzeichnungen ihn nicht haben. Er ersetzt nicht die
+   * Session, sondern steckt in ihr — eine Ampereänderung ist ein Abschnitt,
+   * kein neuer Ladevorgang.
+   */
+  readonly verlauf?: readonly Ladeabschnitt[];
+  /**
+   * Aus wie vielen zuvor getrennt gezählten Vorgängen diese Session
+   * zusammengeführt wurde. 1 = unverändert.
+   */
+  readonly teile?: number;
+}
+
+/** Ein Abschnitt innerhalb einer Ladesession. */
+export interface Ladeabschnitt {
+  /** Beginn des Abschnitts. */
+  readonly ab: string;
+  readonly leistungW: number;
+  /** Eingestellter Ladestrom, falls bekannt. */
+  readonly stromA: number | null;
 }

@@ -6,13 +6,14 @@
  * die Logik selbst ist dieselbe wie im Betrieb.
  */
 
-import { test, describe, afterEach } from 'node:test';
+import { test, describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type {
+  ChargeSession,
   BatterySnapshot,
   EnergySnapshot,
   EvChargerSnapshot,
@@ -20,7 +21,7 @@ import type {
   PowerMetric,
 } from '@energy/core';
 
-import { ChargeSessionLog } from './ev-log.ts';
+import { ChargeSessionLog, fuehreZusammen } from './ev-log.ts';
 import { localDate } from './history.ts';
 import type { EngineState } from './engine.ts';
 
@@ -113,6 +114,23 @@ function tick(opts: {
 const t0 = new Date('2026-08-26T18:00:00');
 const at = (minutes: number) => new Date(t0.getTime() + minutes * 60_000);
 
+/**
+ * Steckt das Fahrzeug ab und wartet die Abklingzeit aus.
+ *
+ * Seit der Umstellung schliesst ein einzelner "nicht verbunden"-Messwert die
+ * Session nicht mehr — sonst hätte jeder Aussetzer der Tuya-Cloud einen
+ * Ladevorgang zerrissen. Erst zehn Minuten Abwesenheit beenden ihn.
+ */
+function steckeAb(
+  log: ChargeSessionLog,
+  abMinute: number,
+  ev: EvChargerSnapshot = charger({ connected: false, powerW: 0 }),
+): void {
+  for (let m = abMinute; m <= abMinute + 12; m++) {
+    log.integrate(tick({ at: at(m), ev }));
+  }
+}
+
 describe('Ladeprotokoll — Session-Erkennung', () => {
   test('erkennt Anstecken, Laden und Abstecken als EINE Session', () => {
     const log = new ChargeSessionLog(tempDir());
@@ -124,7 +142,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
         tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }),
       );
     }
-    log.integrate(tick({ at: at(32), ev: charger({ connected: false, powerW: 0 }) }));
+    steckeAb(log, 32);
 
     const sessions = log.list();
     assert.equal(sessions.length, 1, 'genau eine Session');
@@ -149,7 +167,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
     for (let m = 21; m <= 30; m++) {
       log.integrate(tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }));
     }
-    log.integrate(tick({ at: at(31), ev: charger({ connected: false, powerW: 0 }) }));
+    steckeAb(log, 31);
 
     assert.equal(log.list().length, 1);
     const s = log.list()[0]!;
@@ -179,7 +197,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
         }),
       );
     }
-    log.integrate(tick({ at: at(31), ev: charger({ connected: false, powerW: 0 }) }));
+    steckeAb(log, 31);
 
     const s = log.list()[0]!;
     assert.ok(s.split.pvWh > 0, 'PV-Anteil vorhanden');
@@ -197,7 +215,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
       log.integrate(tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }));
     }
     // Ladegerät ausgesteckt -> offline
-    log.integrate(tick({ at: at(21), ev: charger({ connected: null, powerW: null, state: 'offline' }) }));
+    steckeAb(log, 21, charger({ connected: null, powerW: null, state: 'offline' }));
     const s = log.list()[0]!;
     assert.equal(s.endReason, 'interrupted');
     assert.ok(s.energyWh > 0);
@@ -210,7 +228,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
     for (let m = 1; m <= 20; m++) {
       first.integrate(tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }));
     }
-    first.integrate(tick({ at: at(21), ev: charger({ connected: false, powerW: 0 }) }));
+    steckeAb(first, 21);
     const before = first.list()[0]!;
 
     // Neustart: neue Instanz auf demselben Verzeichnis
@@ -227,7 +245,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
     for (let m = 1; m <= 20; m++) {
       log.integrate(tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }));
     }
-    log.integrate(tick({ at: at(21), ev: charger({ connected: false, powerW: 0 }) }));
+    steckeAb(log, 21);
 
     const day = log.stats('day', '2026-08-26') as { sessionCount: number; energyWh: number };
     assert.equal(day.sessionCount, 1);
@@ -274,5 +292,128 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
     for (let m = 0; m <= 5; m++) log.integrate(tick({ at: at(m), ev: null }));
     assert.equal(log.list().length, 0);
     assert.equal(log.current(), null);
+  });
+});
+
+describe('Eine Ladung ist ein Ladevorgang', () => {
+  /** Fährt eine Folge von Messpunkten durch und gibt das Protokoll zurück. */
+  function fahre(
+    log: ChargeSessionLog,
+    schritte: readonly { minute: number; ev: EvChargerSnapshot | null }[],
+  ): void {
+    const start = new Date('2026-09-06T12:00:00Z').getTime();
+    for (const s of schritte) {
+      log.integrate(tick({ at: new Date(start + s.minute * 60_000), ev: s.ev, pv: 9000 }));
+    }
+  }
+
+  it('Szenario I — Ampere wechselt und pausiert: trotzdem EINE Session', () => {
+    const log = new ChargeSessionLog(tempDir());
+    const schritte: { minute: number; ev: EvChargerSnapshot }[] = [];
+    // 14:00-14:20 5 kW, 14:20-14:35 3 kW, 14:35-14:40 Pause, 14:40-15:10 6 kW,
+    // 15:10-15:30 2 kW - genau der Ablauf aus der Anforderung.
+    const plan: [number, number][] = [
+      [0, 5000], [20, 3000], [35, 0], [40, 6000], [70, 2000], [90, 2000],
+    ];
+    for (let minute = 0; minute <= 90; minute++) {
+      const stufe = [...plan].reverse().find(([ab]) => minute >= ab);
+      schritte.push({
+        minute,
+        ev: charger({ connected: true, powerW: stufe?.[1] ?? 0 }),
+      });
+    }
+    fahre(log, schritte);
+
+    // Abstecken beendet die Session - nach der Abklingzeit.
+    for (let minute = 91; minute <= 110; minute++) {
+      fahre(log, [{ minute, ev: charger({ connected: false, powerW: 0 }) }]);
+    }
+
+    assert.equal(log.list(50).length, 1, 'es sollte genau eine Session sein');
+    const s = log.list(50)[0];
+    assert.ok(s);
+    assert.equal(s.endReason, 'unplugged');
+    // Ladezeit ist kürzer als Steckzeit — die Pause ist getrennt gezählt.
+    assert.ok(s.chargingSeconds < s.connectedSeconds);
+    // Der Verlauf hält die Stufen fest, ohne eigene Sessions zu erzeugen.
+    assert.ok((s.verlauf?.length ?? 0) >= 4, `Verlauf hatte ${s.verlauf?.length} Stufen`);
+  });
+
+  it('übersteht einen Aussetzer der Tuya-Cloud ohne neue Session', () => {
+    const log = new ChargeSessionLog(tempDir());
+    const laedt = charger({ connected: true, powerW: 5000 });
+    const weg = charger({ connected: null, powerW: null, state: 'offline' });
+    const schritte: { minute: number; ev: EvChargerSnapshot }[] = [];
+    for (let m = 0; m <= 10; m++) schritte.push({ minute: m, ev: laedt });
+    // Drei Minuten Cloud-Loch.
+    for (let m = 11; m <= 13; m++) schritte.push({ minute: m, ev: weg });
+    for (let m = 14; m <= 25; m++) schritte.push({ minute: m, ev: laedt });
+    fahre(log, schritte);
+
+    assert.equal(log.list(50).length, 0, 'Session wurde vorzeitig geschlossen');
+    assert.ok(log.current() !== null, 'Session sollte noch offen sein');
+  });
+
+  it('Szenario J — Abstecken schliesst die Session ab', () => {
+    const log = new ChargeSessionLog(tempDir());
+    const schritte: { minute: number; ev: EvChargerSnapshot }[] = [];
+    for (let m = 0; m <= 30; m++) {
+      schritte.push({ minute: m, ev: charger({ connected: true, powerW: 6000 }) });
+    }
+    for (let m = 31; m <= 50; m++) {
+      schritte.push({ minute: m, ev: charger({ connected: false, powerW: 0 }) });
+    }
+    fahre(log, schritte);
+
+    const sessions = log.list(50);
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0]?.endReason, 'unplugged');
+    assert.ok((sessions[0]?.energyWh ?? 0) > 2500);
+    assert.equal(log.current(), null);
+  });
+});
+
+describe('Migration: Bruchstücke zusammenführen', () => {
+  const leer = { pvWh: 0, gridWh: 0, batteryWh: {}, unknownWh: 0 };
+  function stueck(vonMin: number, bisMin: number, wh: number): ChargeSession {
+    const basis = new Date('2026-09-06T12:00:00Z').getTime();
+    return {
+      id: `s${vonMin}`,
+      startedAt: new Date(basis + vonMin * 60_000).toISOString(),
+      endedAt: new Date(basis + bisMin * 60_000).toISOString(),
+      chargingSeconds: (bisMin - vonMin) * 60,
+      connectedSeconds: (bisMin - vonMin) * 60,
+      energyWh: wh,
+      maxPowerW: 5000,
+      avgPowerW: 5000,
+      socStartPercent: null,
+      socEndPercent: null,
+      split: leer,
+      endReason: 'interrupted',
+      faultText: null,
+      hasGaps: false,
+    };
+  }
+
+  it('fasst unmittelbar aneinander anschliessende Bruchstücke zusammen', () => {
+    const zusammen = fuehreZusammen([
+      stueck(0, 20, 1500),
+      stueck(21, 40, 1400),
+      stueck(42, 60, 1300),
+    ]);
+    assert.equal(zusammen.length, 1);
+    assert.equal(zusammen[0]?.energyWh, 4200);
+    assert.equal(zusammen[0]?.teile, 3);
+    assert.equal(zusammen[0]?.hasGaps, true);
+  });
+
+  it('lässt echte getrennte Ladevorgänge getrennt', () => {
+    // Zwei Stunden Abstand — das war zweimal Laden.
+    const zusammen = fuehreZusammen([stueck(0, 20, 1500), stueck(140, 160, 1500)]);
+    assert.equal(zusammen.length, 2);
+  });
+
+  it('kommt mit einer leeren Historie zurecht', () => {
+    assert.deepEqual(fuehreZusammen([]), []);
   });
 });
