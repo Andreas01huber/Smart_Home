@@ -681,6 +681,18 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Volladung erzwingen — bewusster Netzbezug auf Wunsch des Menschen.
+    if (url.pathname === '/api/ev/volladung' && request.method === 'POST') {
+      void readBody(request, 1_000)
+        .then((body) => {
+          const an = (JSON.parse(body) as { an?: unknown }).an === true;
+          ladesteuerung.setzeVolladung(an);
+          sendJson(response, 200, { volladung: an });
+        })
+        .catch(() => sendJson(response, 400, { error: 'Ungültige Anfrage' }));
+      return;
+    }
+
     // Zustand der Überschussregelung samt Protokoll der letzten Entscheidungen.
     if (url.pathname === '/api/ev/regelung') {
       sendJson(response, 200, ladesteuerung.zustand());

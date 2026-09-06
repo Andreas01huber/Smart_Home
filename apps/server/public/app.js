@@ -1773,6 +1773,32 @@ function regelKopfMarkup(ev) {
 }
 
 /**
+ * Der Knopf für die erzwungene Volladung.
+ *
+ * Absichtlich unbequem formuliert. Er hebelt die eine Regel aus, für die diese
+ * ganze Regelung gebaut wurde — das soll man beim Drücken wissen und beim
+ * Hinsehen erkennen. Deshalb steht im eingeschalteten Zustand auch dauerhaft
+ * da, dass gerade Netzstrom gekauft wird.
+ */
+function volladungMarkup(ev) {
+  const r = ev.regelung;
+  if (!r || r.modus === 'aus') return '';
+  const an = r.volladung === true;
+  return `
+    <div class="ev-volladung ${an ? 'an' : ''}">
+      <div class="ev-volladung-text">
+        <b>${an ? 'Volladung läuft' : 'Volladung erzwingen'}</b>
+        <span>${an
+          ? 'Es wird bis zur Obergrenze geladen — auch aus dem Netz. Endet, wenn du sie ausschaltest oder das Auto absteckst.'
+          : 'Lädt mit voller Leistung, unabhängig von Sonne und Speicher. Kauft bewusst Netzstrom — für den Fall, dass das Auto morgen früh voll sein muss.'}</span>
+      </div>
+      <button class="btn-primary" id="volladung-btn" type="button" data-an="${an}">
+        ${an ? 'Beenden' : 'Volladung starten'}
+      </button>
+    </div>`;
+}
+
+/**
  * Live-Bereich der Detailansicht.
  *
  * Oben in einem Satz, was gerade passiert und warum; darunter die Zahlen, aus
@@ -1799,6 +1825,7 @@ function evLiveMarkup(ev) {
         ${tile('Netz', netzW >= 0 ? `${formatPower(netzW)} Bezug` : `${formatPower(-netzW)} Einspeisung`, true, netzW > 100 ? 'bad' : 'ok')}
         ${tile('Fahrzeug', ev.vehicleConnected === true ? 'Angesteckt' : ev.vehicleConnected === false ? 'Nicht angesteckt' : '—', ev.vehicleConnected !== true, ev.vehicleConnected === true ? 'ok' : '')}
       </div>
+      ${volladungMarkup(ev)}
       ${ev.socPercent == null ? `<p class="card-more">Der Fahrzeug-Akkustand wird beim Wechselstromladen technisch nicht übertragen (IEC 61851) — er kann nur aus dem Fahrzeug selbst kommen.</p>` : ''}
       ${ev.faultText ? `<p class="card-more" style="color:var(--danger)">${esc(ev.faultText)}</p>` : ''}
     </div>`;
@@ -2011,6 +2038,29 @@ function renderEvDetail() {
   // im Sekundentakt — das Protokoll so oft zu holen wäre sinnlose Last.
   if (Date.now() - evRegelungGeholtAt > 15_000) {
     void loadEvRegelung();
+  }
+
+  // Volladung ein-/ausschalten
+  const volladung = body.querySelector('#volladung-btn');
+  if (volladung) {
+    volladung.addEventListener('click', async () => {
+      const an = volladung.getAttribute('data-an') !== 'true';
+      volladung.disabled = true;
+      try {
+        await fetch('/api/ev/volladung', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ an }),
+        });
+        // Der Regler rechnet sofort neu — kurz warten, dann frisch anzeigen.
+        await new Promise((f) => setTimeout(f, 800));
+        await loadEvRegelung();
+        renderEvDetail();
+      } catch (err) {
+        console.error(err);
+        volladung.disabled = false;
+      }
+    });
   }
 
   // Zeitraum-Umschalter

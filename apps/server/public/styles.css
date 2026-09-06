@@ -1352,3 +1352,20 @@ main {
 .regel-tabelle th { color: var(--text-dim); font-weight: 600; font-size: 0.74rem;
                     text-transform: uppercase; letter-spacing: 0.03em; }
 .regel-tabelle td.regel-grund { white-space: normal; min-width: 16rem; color: var(--text-dim); }
+
+/* Volladung erzwingen — hebt die Autarkieregel bewusst auf, sieht deshalb
+   anders aus als der Rest und bleibt im eingeschalteten Zustand auffällig. */
+.ev-volladung {
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  margin-top: 0.9rem; padding: 0.8rem 0.95rem;
+  border: 1px dashed var(--border-strong, var(--border)); border-radius: 12px;
+}
+.ev-volladung.an {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--warn, #f59e0b) 55%, transparent);
+  background: color-mix(in srgb, var(--warn, #f59e0b) 12%, transparent);
+}
+.ev-volladung-text { flex: 1 1 16rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.ev-volladung-text b { font-size: 0.95rem; }
+.ev-volladung-text span { font-size: 0.82rem; color: var(--text-dim); line-height: 1.45; }
+.ev-volladung button { flex: 0 0 auto; }

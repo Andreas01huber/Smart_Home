@@ -254,6 +254,32 @@ export class TuyaEvseConnector implements EnergyConnector {
    *   2. Der Wert wird auf die vom Gerät gemeldeten Grenzen begrenzt. Kommt ein
    *      Wert ausserhalb an, wird er beschnitten, nicht gesendet und geglaubt.
    */
+  /**
+   * Schaltet den Ladevorgang ein oder aus.
+   *
+   * Musste nachgezogen werden: Zuerst sollte "Pause" bedeuten, den Ladestrom
+   * auf das Minimum zu senken und den Hauptschalter nicht anzufassen. Das war
+   * falsch gedacht — der kleinste Ladestrom sind immer noch gut 4 kW, und wenn
+   * die Sonne die nicht hergibt, kommen sie aus dem Netz. Genau das soll nicht
+   * passieren. Pausieren heisst deshalb: abschalten.
+   *
+   * `switch` ist ein regulärer, vom Gerät angebotener Steuerpunkt — hier wird
+   * keine Schutzfunktion umgangen, sondern die vorgesehene ausgeschaltet.
+   */
+  async setzeLaden(an: boolean): Promise<void> {
+    await this.client.sendCommands(this.deviceId, [{ code: 'switch', value: an }]);
+    this.cachedAt = 0;
+  }
+
+  /** Alle vom Gerät angebotenen Steuerfunktionen — für die Diagnose. */
+  async steuerfunktionen(): Promise<readonly { code: string; type: string; values: string }[]> {
+    try {
+      return await this.client.deviceFunctions(this.deviceId);
+    } catch {
+      return [];
+    }
+  }
+
   async setzeLadestrom(ampere: number): Promise<number> {
     if (!Number.isFinite(ampere)) throw new Error('Ungültiger Ladestrom');
     const grenzen = (await this.ladestromGrenzen()) ?? { minA: 6, maxA: 16, schrittA: 1 };

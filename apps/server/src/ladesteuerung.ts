@@ -18,10 +18,18 @@
  *                 stellen lässt, will vorher sehen, was passieren würde.
  *   regeln      — der Ladestrom wird tatsächlich gestellt.
  *
- * Es wird ausschliesslich der Ladestrom gestellt. Der Hauptschalter der Wallbox
- * bleibt unangetastet: "Pause" heisst hier, den Strom auf das Minimum zu senken
- * und den Ladevorgang über die Wallbox-eigene Logik auslaufen zu lassen — nicht,
- * dem Fahrzeug die Versorgung abzuschalten.
+ * Gestellt werden zwei Dinge: der Ladestrom (`charge_cur_set`) und der
+ * Hauptschalter (`switch`). Der Schalter musste dazu, weil "Pause" sonst gar
+ * keine Pause ist: Der kleinste Ladestrom sind gut 4 kW, und wenn die Sonne die
+ * nicht hergibt, kommen sie aus dem Netz — genau das, was diese Regelung
+ * verhindern soll. `work_mode` bleibt unangetastet.
+ *
+ * ── Volladung ───────────────────────────────────────────────────────────────
+ * Daneben gibt es den bewussten Übersteuerungsfall: Wer morgen früh voll
+ * losfahren muss, drückt "Volladung" und nimmt den Netzbezug in Kauf. Das ist
+ * kein Schlupfloch in der Autarkieregel, sondern eine ausdrückliche Entscheidung
+ * des Menschen — sie wird deshalb auch deutlich angezeigt und endet von selbst,
+ * sobald das Fahrzeug abgesteckt wird.
  */
 
 import {
@@ -80,6 +88,8 @@ export interface Steuerzustand {
   readonly letzterBefehlAt: string | null;
   readonly letzterFehler: string | null;
   readonly naechsteRegelungInS: number;
+  /** Erzwungene Volladung aus dem Netz — vom Menschen eingeschaltet. */
+  readonly volladung: boolean;
   readonly protokoll: readonly Regelschritt[];
 }
 
@@ -102,6 +112,12 @@ export class Ladesteuerung {
   private grenzen = { minA: 6, maxA: 16, schrittA: 1 };
   private letzterZustand: Ladezustand | null = null;
   private naechsteRegelungAt = 0;
+  /** Vom Benutzer erzwungene Volladung; Netzbezug ausdrücklich in Kauf genommen. */
+  private volladung = false;
+  /** Zuletzt an die Wallbox gesendeter Schalterzustand; null = unbekannt. */
+  private ladenAn: boolean | null = null;
+  /** Ob der Startwert schon aus dem Gerät übernommen wurde. */
+  private initialisiert = false;
 
   constructor(
     private readonly engine: EnergyEngine,
@@ -118,11 +134,52 @@ export class Ladesteuerung {
     // den konservativen Vorgabewerten - niemals bei erfundenen.
     void this.wallbox.ladestromGrenzen().then((g) => {
       if (g !== null) this.grenzen = g;
+      console.log(
+        `[Laderegelung] Ladestrom ${this.grenzen.minA}-${this.grenzen.maxA} A `
+          + `in Schritten von ${this.grenzen.schrittA} A `
+          + `(${g === null ? 'Vorgabe — Geraet hat keine Grenzen gemeldet' : 'vom Geraet gemeldet'}).`,
+      );
+    });
+    // Einmalig auflisten, was das Geraet an Steuerpunkten anbietet. Steht hier,
+    // weil sich sonst nur durch Ausprobieren klaeren laesst, ob das
+    // Cloud-Projekt ueberhaupt schreiben darf.
+    void this.wallbox.steuerfunktionen().then((f) => {
+      console.log(
+        f.length === 0
+          ? '[Laderegelung] Steuerfunktionen nicht abrufbar — moeglicherweise hat das '
+              + 'Tuya-Projekt nur Leserechte.'
+          : `[Laderegelung] Steuerbar laut Geraet: ${f.map((x) => x.code).join(', ')}`,
+      );
     });
 
     this.naechsteRegelungAt = Date.now() + intervallMs;
     this.timer = setInterval(() => void this.zyklus(), intervallMs);
     this.timer.unref();
+  }
+
+  /**
+   * Volladung ein- oder ausschalten.
+   *
+   * Bewusst ohne Zeitbegrenzung: Wer sie einschaltet, will sein Auto voll haben.
+   * Sie endet, wenn sie ausgeschaltet wird oder das Fahrzeug abgesteckt wird —
+   * so gilt sie nicht versehentlich für den nächsten Ladevorgang mit.
+   */
+  setzeVolladung(an: boolean): void {
+    if (this.volladung === an) return;
+    this.setzeVolladungStill(an);
+    // Nicht bis zum nächsten Zyklus warten: Wer den Knopf drückt, will es sehen.
+    void this.zyklus();
+  }
+
+  /** Wie `setzeVolladung`, aber ohne sofortigen Zyklus — für Aufrufe von innen. */
+  private setzeVolladungStill(an: boolean): void {
+    this.volladung = an;
+    console.log(
+      an
+        ? '[Laderegelung] Volladung eingeschaltet — es wird bis zur Obergrenze geladen, '
+            + 'auch aus dem Netz.'
+        : '[Laderegelung] Volladung beendet — zurück zur Überschussregelung.',
+    );
   }
 
   stop(): void {
@@ -154,6 +211,7 @@ export class Ladesteuerung {
         0,
         Math.round((this.naechsteRegelungAt - Date.now()) / 1000),
       ),
+      volladung: this.volladung,
       // Neueste zuerst — so liest man ein Protokoll.
       protokoll: [...this.protokoll].reverse(),
     };
@@ -175,6 +233,7 @@ export class Ladesteuerung {
     verfuegbarW: number;
     hausOhneAutoW: number | null;
     speicherbeitragW: number;
+    volladung: boolean;
   } {
     const e = this.letzte;
     return {
@@ -186,6 +245,7 @@ export class Ladesteuerung {
       verfuegbarW: Math.round(e?.verfuegbarW ?? 0),
       hausOhneAutoW: e?.hausOhneAutoW ?? null,
       speicherbeitragW: Math.round(e?.speicherbeitragW ?? 0),
+      volladung: this.volladung,
     };
   }
 
@@ -275,7 +335,35 @@ export class Ladesteuerung {
       if (state === null || this.wallbox === null) return;
 
       const messwerte = this.messwerte(state);
-      const entscheidung = berechneLadeziel(messwerte, this.parameter());
+
+      // Beim ersten Zyklus weiss die Regelung nicht, was an der Wallbox
+      // eingestellt ist — sie darf es aber auch nicht raten. Tat sie bisher:
+      // Die Historie startete mit "0 A gesetzt", ein gewünschter Stopp galt
+      // damit als bereits erledigt ("Sollwert unverändert") und es ging nie ein
+      // Befehl hinaus. Deshalb wird der Startwert aus dem Gerät übernommen;
+      // meldet es nichts, steht -1 für "unbekannt" und jeder Wunsch weicht ab.
+      if (!this.initialisiert) {
+        this.initialisiert = true;
+        this.historie = neueHistorie(messwerte.evStromA ?? -1, Date.now());
+      }
+
+      let entscheidung = berechneLadeziel(messwerte, this.parameter());
+
+      // Volladung endet, sobald das Fahrzeug weg ist — sonst gälte sie
+      // stillschweigend auch für den nächsten Ladevorgang.
+      if (this.volladung && messwerte.evAngesteckt === false) this.setzeVolladungStill(false);
+
+      // Übersteuerung durch den Menschen: bis zur Obergrenze laden, Netzbezug
+      // ausdrücklich in Kauf genommen. Die Gerätegrenzen gelten weiterhin.
+      if (this.volladung && messwerte.evAngesteckt === true && messwerte.wallboxErreichbar) {
+        entscheidung = {
+          ...entscheidung,
+          zustand: 'laedt',
+          zielA: this.grenzen.maxA,
+          zielLeistungW: 0,
+          grund: `Volladung erzwungen — lädt mit ${this.grenzen.maxA} A, auch aus dem Netz.`,
+        };
+      }
       this.letzte = entscheidung;
 
       const netzW =
@@ -330,11 +418,24 @@ export class Ladesteuerung {
         return;
       }
 
-      // Pause bedeutet: auf den kleinsten zulässigen Strom herunter. Der
-      // Hauptschalter wird nicht angefasst.
-      const zuSenden = ergebnis.stromA === 0 ? this.grenzen.minA : ergebnis.stromA;
       try {
-        const gesetzt = await this.wallbox.setzeLadestrom(zuSenden);
+        // Pause heisst abschalten, nicht "auf 6 A herunter". Der kleinste
+        // Ladestrom sind gut 4 kW — ohne Sonne kämen die aus dem Netz, und
+        // genau das ist der Fall, den diese Regelung ausschliessen soll.
+        let gesetzt: number;
+        if (ergebnis.stromA === 0) {
+          await this.wallbox.setzeLaden(false);
+          this.ladenAn = false;
+          gesetzt = 0;
+        } else {
+          gesetzt = await this.wallbox.setzeLadestrom(ergebnis.stromA);
+          // Nach einer Pause muss erst wieder eingeschaltet werden. Der Strom
+          // zuerst, damit das Fahrzeug nicht kurz mit dem alten Wert anläuft.
+          if (this.ladenAn !== true) {
+            await this.wallbox.setzeLaden(true);
+            this.ladenAn = true;
+          }
+        }
         this.historie = { ...ergebnis.historie, gesetztA: ergebnis.stromA };
         this.letzterBefehlAt = Date.now();
         this.letzterFehler = null;
@@ -345,7 +446,7 @@ export class Ladesteuerung {
           entscheidung,
           netzW,
           true,
-          `${ergebnis.grund} Gesendet: ${gesetzt} A.`,
+          `${ergebnis.grund} Gesendet: ${gesetzt === 0 ? 'Ladung abgeschaltet' : `${gesetzt} A`}.`,
           null,
         );
       } catch (error) {
