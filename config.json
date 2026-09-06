@@ -47,7 +47,7 @@
     "_hinweis": "Das Auto soll niemals der Grund fuer Netzbezug sein. Die Regelung stellt dafuer den Ladestrom der Wallbox nach, damit der Netzbezug bei etwa 0 W bleibt. Mindest- und Hoechstladestrom stehen absichtlich NICHT hier: die liest die App vom Geraet selbst (charge_cur_set meldet min/max/step), damit es keine zweite, womoeglich falsche Wahrheit gibt.",
 
     "_hinweis_modus": "aus = Regelung schlaeft. beobachten = rechnet und zeigt alles, sendet aber nichts an die Wallbox. regeln = stellt den Ladestrom wirklich. Vorgabe ist beobachten: erst zusehen, was die Automatik tun wuerde, dann freigeben.",
-    "modus": "beobachten",
+    "modus": "regeln",
 
     "intervallSekunden": 30,
 
