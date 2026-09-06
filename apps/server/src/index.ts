@@ -20,6 +20,9 @@ import {
   checkEnergyBalance,
   formatAgeDe,
   aggregateStorage,
+  ladeleistungAusStromW,
+  ladestromAusLeistungA,
+  type Ladeanschluss,
   type EnergySnapshot,
   type Tariff,
 } from '@energy/core';
@@ -36,7 +39,7 @@ import { authGate } from './auth-gate.ts';
 import { adminRouten } from './admin-routes.ts';
 import { Kontenspeicher, type Benutzer } from './benutzer.ts';
 import { Sitzungsspeicher } from './sitzungen.ts';
-import { loadConfig, type AppConfig } from './config.ts';
+import { loadConfig, ladeanschlussAus, type AppConfig } from './config.ts';
 import { EnergyEngine, type EngineState } from './engine.ts';
 import { EnergyAccumulator, localDate } from './history.ts';
 import { ChargeSessionLog } from './ev-log.ts';
@@ -223,7 +226,7 @@ function serializeState(state: EngineState, config: AppConfig): unknown {
     inverters: perInverterLive(state, config),
     // Wallbox / E-Auto. Ohne konfiguriertes Ladegerät bleibt es beim
     // bisherigen Platzhalter-Zustand (Anforderung 38).
-    ev: serializeEv(snapshot.evCharger),
+    ev: serializeEv(snapshot.evCharger, ladeanschlussAus(config)),
     unavailable,
     disagreements,
     derivedConsumptionNegative,
@@ -269,7 +272,10 @@ function serializeState(state: EngineState, config: AppConfig): unknown {
  * daraus „Nicht verfügbar“, niemals 0. Der Fahrzeug-Ladestand ist bei
  * AC-Ladegeräten grundsätzlich nicht übertragbar und daher stets null.
  */
-function serializeEv(charger: EnergySnapshot['evCharger']): unknown {
+function serializeEv(
+  charger: EnergySnapshot['evCharger'],
+  anschluss: Ladeanschluss,
+): unknown {
   if (charger === null) {
     // Keine Wallbox eingerichtet — bisheriger Platzhalter, kein Fehlerzustand.
     return {
@@ -280,6 +286,10 @@ function serializeEv(charger: EnergySnapshot['evCharger']): unknown {
       sessionEnergyWh: null,
       totalEnergyWh: null,
       maxCurrentA: null,
+      maxPowerW: null,
+      currentFromPowerA: null,
+      phases: anschluss.phasen,
+      voltageV: anschluss.spannungV,
       temperatureC: null,
       socPercent: null,
       faultText: null,
@@ -293,6 +303,15 @@ function serializeEv(charger: EnergySnapshot['evCharger']): unknown {
     sessionEnergyWh: charger.sessionEnergyWh,
     totalEnergyWh: charger.totalEnergyWh,
     maxCurrentA: charger.maxCurrentA,
+    // Was die eingestellte Strombegrenzung an Leistung bedeutet. Gerechnet,
+    // nicht gemessen — die Oberfläche muss das kenntlich machen.
+    maxPowerW: ladeleistungAusStromW(charger.maxCurrentA, anschluss),
+    // Und umgekehrt: welcher Strom hinter der gemessenen Leistung steckt. Damit
+    // ist ablesbar, ob das Auto die Begrenzung ausschöpft oder von sich aus
+    // weniger nimmt.
+    currentFromPowerA: ladestromAusLeistungA(charger.chargePowerW, anschluss),
+    phases: anschluss.phasen,
+    voltageV: anschluss.spannungV,
     temperatureC: charger.temperatureC,
     socPercent: charger.vehicleSocPercent,
     faultText: charger.faultText,

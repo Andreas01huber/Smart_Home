@@ -34,6 +34,11 @@
       "region": "eu",
       "idleIntervalMs": 30000,
       "activeIntervalMs": 10000,
+
+      "phases": 3,
+      "voltageV": 400,
+      "_hinweis_leistung": "Fuer die Umrechnung Ampere -> Kilowatt. Dreiphasig an 400 V gilt P = Wurzel(3) * 400 V * I, also 16 A = 11,1 kW und 6 A = 4,2 kW. Die Wallbox meldet nur die eingestellte Stromstaerke; was das an Leistung bedeutet, steht in keinem Datenpunkt und haengt am Anschluss. Bei einphasigem Anschluss hier 1 und 230 eintragen - dieselben 16 A waeren dann nur 3,7 kW.",
+
       "_hinweis": "Aimiler EV Charger (Tuya, Kategorie qccdz) - AUSSCHLIESSLICH LESEND. Zugangsdaten stehen in secrets.json, nicht hier. Der lokale Tuya-Port 6668 ist zwar offen, beantwortet aber weder Protokoll 3.3 noch 3.4 noch 3.5 (geprueft 26.08.2026), daher Cloud-Abfrage."
     }
   },

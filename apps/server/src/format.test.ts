@@ -8,6 +8,8 @@ import {
   formatPower,
   formatEnergy,
   formatCurrency,
+  formatLadestrom,
+  formatLadeleistung,
 } from '../public/format.js';
 
 describe('formatSoc — SOC ohne unnötige Nachkommastellen (13/14)', () => {
@@ -39,4 +41,32 @@ describe('formatCurrency (16)', () => {
 describe('formatPercentage (16)', () => {
   test('93 -> "93 %"', () => assert.equal(formatPercentage(93), '93 %'));
   test('89.66 -> "90 %"', () => assert.equal(formatPercentage(89.66), '90 %'));
+});
+
+describe('Wallbox: Ampere und Kilowatt nebeneinander', () => {
+  test('stellt die Strombegrenzung mit ihrer Leistung dar', () => {
+    // Die beiden Werte, die an der Anlage tatsächlich vorkommen.
+    assert.equal(formatLadestrom({ maxCurrentA: 16, maxPowerW: 11085 }), '16 A ≈ 11,1 kW');
+    assert.equal(formatLadestrom({ maxCurrentA: 6, maxPowerW: 4157 }), '6 A ≈ 4,2 kW');
+  });
+
+  test('zeigt die Ampere allein, wenn die Leistung fehlt', () => {
+    assert.equal(formatLadestrom({ maxCurrentA: 10, maxPowerW: null }), '10 A');
+  });
+
+  test('erfindet nichts, wenn nichts bekannt ist', () => {
+    assert.equal(formatLadestrom({ maxCurrentA: null, maxPowerW: null }), '—');
+    assert.equal(formatLadestrom(null), '—');
+    assert.equal(formatLadeleistung(null), '—');
+    assert.equal(formatLadeleistung({ powerW: null }), '—');
+  });
+
+  test('stellt die gemessene Leistung mit dem Strom dahinter dar', () => {
+    // Aus einem echten Ladevorgang: 10351 W entsprechen rund 15 A.
+    assert.equal(formatLadeleistung({ powerW: 10351, currentFromPowerA: 14.94 }), '10,4 kW ≈ 15 A');
+  });
+
+  test('zeigt die Leistung allein, wenn der Strom nicht ableitbar ist', () => {
+    assert.equal(formatLadeleistung({ powerW: 3700, currentFromPowerA: null }), '3,7 kW');
+  });
 });

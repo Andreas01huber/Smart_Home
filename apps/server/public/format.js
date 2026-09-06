@@ -96,3 +96,28 @@ export function formatDuration(seconds) {
   if (h === 0) return `${m} min`;
   return m === 0 ? `${h} h` : `${h} h ${m} min`;
 }
+
+// ── Wallbox: Ampere und Kilowatt nebeneinander ──────────────────────────────
+//
+// Die Wallbox lässt sich zwischen 6 und 16 A einstellen, meldet aber nur die
+// Ampere. Was das an Leistung bedeutet, rechnet der Server (siehe
+// packages/core/src/ladeleistung.ts) und liefert es mit — hier wird es nur noch
+// nebeneinandergestellt.
+//
+// Das „≈“ ist kein Zierrat: Die Ampere sind eine Einstellung, die Kilowatt
+// daraus gerechnet, und das Fahrzeug darf jederzeit weniger ziehen.
+
+/** Eingestellte Strombegrenzung mit ihrer Leistung: „16 A ≈ 11,1 kW“. */
+export function formatLadestrom(ev) {
+  if (!ev || ev.maxCurrentA == null) return MISSING;
+  const strom = `${ev.maxCurrentA} A`;
+  return ev.maxPowerW == null ? strom : `${strom} ≈ ${formatPower(ev.maxPowerW)}`;
+}
+
+/** Gemessene Ladeleistung mit dem Strom dahinter: „10,4 kW ≈ 15 A“. */
+export function formatLadeleistung(ev) {
+  if (!ev || !isNum(ev.powerW)) return MISSING;
+  const leistung = formatPower(ev.powerW);
+  if (!isNum(ev.currentFromPowerA)) return leistung;
+  return `${leistung} ≈ ${Math.round(ev.currentFromPowerA)} A`;
+}

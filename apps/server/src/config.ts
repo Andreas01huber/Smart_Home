@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import type { SourceMapping, Tariff } from '@energy/core';
+import type { Ladeanschluss, SourceMapping, Tariff } from '@energy/core';
 
 export interface SourceConfig {
   readonly enabled: boolean;
@@ -41,6 +41,16 @@ export interface EvChargerConfig {
   readonly region?: string;
   readonly idleIntervalMs?: number;
   readonly activeIntervalMs?: number;
+  /**
+   * Wie das Fahrzeug angeschlossen ist — für die Umrechnung von Ampere in
+   * Kilowatt. Die Wallbox meldet nur die eingestellte Strombegrenzung; was das
+   * an Leistung bedeutet, hängt am Anschluss und steht in keinem Datenpunkt.
+   *
+   * Standard ist dreiphasig an 400 V (16 A = 11 kW). Einphasig wären dieselben
+   * 16 A nur 3,7 kW — wer das falsch einträgt, liest überall die falsche Zahl.
+   */
+  readonly phases?: 1 | 3;
+  readonly voltageV?: number;
   /** Aus secrets.json ergänzt, niemals aus config.json gelesen. */
   readonly accessId?: string;
   readonly accessSecret?: string;
@@ -160,4 +170,23 @@ export function loadConfig(path = resolve(process.cwd(), 'config.json')): AppCon
     },
     tariff,
   };
+}
+
+/**
+ * Der Ladeanschluss aus der Konfiguration, mit sinnvollem Standard.
+ *
+ * Wird erst hier geprüft und nicht beim Einlesen: `sources` kommt als Ganzes
+ * aus der JSON-Datei, und ein einzelner Tippfehler soll nicht den Start des
+ * Servers verhindern, sondern still auf den Normalfall zurückfallen —
+ * dreiphasig an 400 V, wie jede 11-kW-Wallbox.
+ */
+export function ladeanschlussAus(config: AppConfig): Ladeanschluss {
+  const ev = config.sources.evCharger;
+  const phasen: 1 | 3 = ev?.phases === 1 ? 1 : 3;
+  const vorgabe = phasen === 3 ? 400 : 230;
+  const spannungV =
+    typeof ev?.voltageV === 'number' && Number.isFinite(ev.voltageV) && ev.voltageV > 0
+      ? ev.voltageV
+      : vorgabe;
+  return { phasen, spannungV };
 }

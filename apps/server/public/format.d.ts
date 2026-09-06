@@ -10,3 +10,11 @@ export function formatCurrency(value: number | null | undefined): string;
 export function formatTimestamp(value: string | Date | null | undefined): string;
 export function formatClock(value: string | Date | null | undefined): string;
 export function formatDuration(seconds: number | null | undefined): string;
+export interface LadeAnzeige {
+  maxCurrentA?: number | null;
+  maxPowerW?: number | null;
+  powerW?: number | null;
+  currentFromPowerA?: number | null;
+}
+export function formatLadestrom(ev: LadeAnzeige | null | undefined): string;
+export function formatLadeleistung(ev: LadeAnzeige | null | undefined): string;

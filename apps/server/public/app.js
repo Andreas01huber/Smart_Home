@@ -11,6 +11,7 @@
 import {
   formatSoc, formatPercentage, formatPower, formatPowerParts,
   formatEnergy, formatEnergyParts, formatCurrency, formatClock, formatDuration,
+  formatLadestrom, formatLadeleistung,
 } from './format.js';
 import { buildScene, fitScene, createSkyGate, sceneViewBox, pickSceneLayout } from './scene.js';
 
@@ -916,6 +917,7 @@ function buildNow(d) {
       <div class="breakdown">
         <div class="breakdown-row"><span>Fahrzeug</span><b data-f="ev-plug">—</b></div>
         <div class="breakdown-row"><span>Akkustand</span><b data-f="ev-soc">—</b></div>
+        <div class="breakdown-row"><span>Lädt gerade mit</span><b data-f="ev-power">—</b></div>
         <div class="breakdown-row"><span>Ladevorgang</span><b data-f="ev-session">—</b></div>
         <div class="breakdown-row"><span>Gesamt geladen</span><b data-f="ev-total">—</b></div>
         <div class="breakdown-row"><span>Max. Ladestrom</span><b data-f="ev-cur">—</b></div>
@@ -1047,8 +1049,15 @@ function updateEv(root, ev) {
     charging ? 'value' : 'value muted',
     charging && hasPower ? formatPower(ev.powerW) : (EV_SHORT[ev.state] ?? 'Nicht verbunden'),
   );
+  // Beim Laden sagt die Unterzeile, wie viel von der eingestellten Begrenzung
+  // gerade wirklich abgerufen wird — genau die Frage, die man vor der Wallbox
+  // stehend hat.
+  const ladeZeile =
+    charging && ev.currentFromPowerA != null && ev.maxCurrentA != null
+      ? `Lädt mit ca. ${Math.round(ev.currentFromPowerA)} A von max. ${ev.maxCurrentA} A`
+      : null;
   setF(root, 'ev-sub',
-    ev.faultText ?? EV_STATE_TEXT[ev.state] ?? 'Wallbox noch nicht eingerichtet');
+    ev.faultText ?? ladeZeile ?? EV_STATE_TEXT[ev.state] ?? 'Wallbox noch nicht eingerichtet');
 
   setF(root, 'ev-plug',
     ev.vehicleConnected === true ? 'Angeschlossen'
@@ -1058,7 +1067,8 @@ function updateEv(root, ev) {
   setF(root, 'ev-soc', ev.socPercent == null ? 'nicht verfügbar' : formatSoc(ev.socPercent));
   setF(root, 'ev-session', ev.sessionEnergyWh == null ? '—' : formatEnergy(ev.sessionEnergyWh));
   setF(root, 'ev-total', ev.totalEnergyWh == null ? '—' : formatEnergy(ev.totalEnergyWh));
-  setF(root, 'ev-cur', ev.maxCurrentA == null ? '—' : `${ev.maxCurrentA} A`);
+  setF(root, 'ev-power', formatLadeleistung(ev));
+  setF(root, 'ev-cur', formatLadestrom(ev));
   setF(root, 'ev-temp', ev.temperatureC == null ? '—' : `${ev.temperatureC} °C`);
   setF(root, 'ev-brand', ev.configured ? 'Aimiler Ladegerät' : 'Wallbox nicht eingerichtet');
   setClassText(root, 'ev-meta', metaClass(ev.quality ?? 'unknown'),
@@ -1696,6 +1706,30 @@ function tile(label, value, muted, state) {
     `<span class="dt-value${muted ? ' muted' : ''}">${dot}${esc(value)}</span></div>`;
 }
 
+/**
+ * Erklärt, wie aus Ampere Kilowatt werden.
+ *
+ * Die Wallbox lässt sich zwischen 6 und 16 A einstellen, zeigt aber nur die
+ * Ampere. Ohne diese Zeile bleibt offen, was eine Änderung an der Einstellung
+ * eigentlich bewirkt — und der Unterschied ist beträchtlich: Zwischen 6 und
+ * 16 A liegt der Faktor knapp drei.
+ */
+function ampereErklaerung(ev) {
+  if (!ev.configured || ev.phases == null || ev.voltageV == null) return '';
+  const proAmpere = (ev.phases === 3 ? Math.sqrt(3) : 1) * ev.voltageV;
+  const art = ev.phases === 3 ? 'Dreiphasig' : 'Einphasig';
+  const formel = ev.phases === 3
+    ? `P = √3 × ${ev.voltageV} V × I`
+    : `P = ${ev.voltageV} V × I`;
+  return `<p class="card-more">
+    <b>Ampere in Kilowatt:</b> ${art} an ${ev.voltageV} V gilt ${formel}.
+    Ein Ampere sind also rund ${formatPower(proAmpere)} —
+    6 A ≈ ${formatPower(proAmpere * 6)}, 16 A ≈ ${formatPower(proAmpere * 16)}.
+    Der Wert aus der Strombegrenzung ist eine Obergrenze; was tatsächlich
+    fliesst, misst die Wallbox und steht oben unter „Ladeleistung“.
+  </p>`;
+}
+
 /** Live-Bereich der Detailansicht — trennt Ladegerät und Fahrzeug sauber. */
 function evLiveMarkup(ev) {
   const chargerOnline = ev.configured && ev.state !== 'offline' && ev.state !== 'not-connected';
@@ -1707,12 +1741,13 @@ function evLiveMarkup(ev) {
         ${tile('Ladegerät', chargerOnline ? 'Online' : (ev.configured ? 'Offline' : 'Nicht eingerichtet'), !chargerOnline, chargerOnline ? 'ok' : ev.configured ? 'bad' : '')}
         ${tile('Fahrzeug', ev.vehicleConnected === true ? 'Verbunden' : ev.vehicleConnected === false ? 'Nicht verbunden' : '—', ev.vehicleConnected !== true, ev.vehicleConnected === true ? 'ok' : '')}
         ${tile('Ladevorgang', EV_SHORT[ev.state] ?? '—', !charging, charging ? 'ok' : ev.state === 'fault' ? 'bad' : '')}
-        ${tile('Ladeleistung', charging && ev.powerW != null ? formatPower(ev.powerW) : (chargerOnline ? '0 W' : '—'), !charging)}
+        ${tile('Ladeleistung', charging ? formatLadeleistung(ev) : (chargerOnline ? '0 W' : '—'), !charging)}
         ${tile('Akkustand', ev.socPercent == null ? 'nicht verfügbar' : formatSoc(ev.socPercent), ev.socPercent == null)}
-        ${tile('Max. Ladestrom', ev.maxCurrentA == null ? '—' : `${ev.maxCurrentA} A`, true)}
+        ${tile('Max. Ladestrom', formatLadestrom(ev), true)}
         ${tile('Temperatur', ev.temperatureC == null ? '—' : `${ev.temperatureC} °C`, true)}
         ${tile('Gesamt geladen', ev.totalEnergyWh == null ? '—' : formatEnergy(ev.totalEnergyWh), true)}
       </div>
+      ${ampereErklaerung(ev)}
       ${ev.socPercent == null ? `<p class="card-more">Der Fahrzeug-Akkustand wird beim Wechselstromladen technisch nicht übertragen (IEC 61851) — er kann nur aus dem Fahrzeug selbst kommen.</p>` : ''}
       ${ev.faultText ? `<p class="card-more" style="color:var(--danger)">${esc(ev.faultText)}</p>` : ''}
     </div>`;
