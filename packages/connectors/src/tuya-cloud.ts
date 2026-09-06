@@ -1,9 +1,13 @@
 /**
- * Minimaler Tuya-Cloud-Client — AUSSCHLIESSLICH LESEND.
+ * Minimaler Tuya-Cloud-Client.
  *
- * Es gibt in dieser Datei bewusst nur `get()`. Es existiert keine Funktion, die
- * POST/PUT sendet, und damit keine Möglichkeit, ein Gerät zu steuern oder zu
- * verändern. Wer später Steuerung braucht, muss das ausdrücklich ergänzen.
+ * Bis zur Überschussregelung war diese Datei ausdrücklich nur lesend. Sie kann
+ * jetzt auch senden — aber eng geführt: `sendCommands()` ist die einzige
+ * schreibende Funktion, und der Aufrufer (`tuya-evse.ts`) lässt nur einen
+ * einzigen Datenpunkt durch. Der Ladestrom. Nichts sonst.
+ *
+ * Warum überhaupt: Das Auto soll nur laden, wenn Sonne oder freigegebener
+ * Speicher da sind. Ohne Stellgriff wäre das nicht regelbar.
  *
  * Signaturverfahren nach offizieller Tuya-Doku (HMAC-SHA256):
  *   sign = HMAC-SHA256(clientId + [accessToken] + t + nonce + stringToSign)
@@ -84,6 +88,52 @@ export class TuyaCloudClient {
     };
   }
 
+  /**
+   * Sendet Befehle an ein Gerät.
+   *
+   * Die einzige schreibende Funktion dieser Klasse. Sie prüft NICHT, ob ein
+   * Befehl fachlich zulässig ist — das gehört dort hin, wo die Gerätegrenzen
+   * bekannt sind (`tuya-evse.ts`). Hier wird nur übertragen.
+   *
+   * Wirft bei Ablehnung durch die Cloud. Häufigster Grund im Alltag: Das
+   * Cloud-Projekt hat nur Leserechte, dann kommt "permission deny" zurück.
+   */
+  async sendCommands(
+    deviceId: string,
+    commands: readonly { readonly code: string; readonly value: unknown }[],
+  ): Promise<void> {
+    const token = await this.ensureToken();
+    const body = await this.post<boolean>(
+      `/v1.0/iot-03/devices/${encodeURIComponent(deviceId)}/commands`,
+      token,
+      { commands },
+    );
+    if (!body.success) {
+      if (body.code === 1010 || body.code === 1011) this.token = null;
+      throw new Error(body.msg ?? 'Tuya hat den Befehl abgelehnt');
+    }
+  }
+
+  /**
+   * Die vom Gerät angebotenen Steuerfunktionen samt ihrer Wertebereiche.
+   *
+   * Damit lassen sich Mindest- und Höchststrom sowie die Schrittweite vom Gerät
+   * selbst erfragen, statt sie in der Konfiguration zu raten.
+   */
+  async deviceFunctions(
+    deviceId: string,
+  ): Promise<readonly { code: string; type: string; values: string }[]> {
+    const token = await this.ensureToken();
+    const body = await this.get<{ functions?: { code: string; type: string; values: string }[] }>(
+      `/v1.0/iot-03/devices/${encodeURIComponent(deviceId)}/functions`,
+      token,
+    );
+    if (!body.success || !body.result) {
+      throw new Error(body.msg ?? 'Tuya-Funktionsliste nicht abrufbar');
+    }
+    return body.result.functions ?? [];
+  }
+
   // --- intern --------------------------------------------------------------
 
   private async ensureToken(): Promise<string> {
@@ -101,8 +151,14 @@ export class TuyaCloudClient {
     return this.token;
   }
 
-  private sign(path: string, token: string | null, t: string): string {
-    const stringToSign = ['GET', EMPTY_BODY_HASH, '', path].join('\n');
+  private sign(
+    method: 'GET' | 'POST',
+    path: string,
+    token: string | null,
+    t: string,
+    bodyHash: string = EMPTY_BODY_HASH,
+  ): string {
+    const stringToSign = [method, bodyHash, '', path].join('\n');
     const payload = this.accessId + (token ?? '') + t + stringToSign;
     return createHmac('sha256', this.accessSecret)
       .update(payload)
@@ -110,12 +166,12 @@ export class TuyaCloudClient {
       .toUpperCase();
   }
 
-  /** Der einzige HTTP-Zugriff dieser Klasse. Bewusst nur GET. */
+  /** Lesender Zugriff. */
   private async get<T>(path: string, token: string | null): Promise<TuyaResponse<T>> {
     const t = Date.now().toString();
     const headers: Record<string, string> = {
       client_id: this.accessId,
-      sign: this.sign(path, token, t),
+      sign: this.sign('GET', path, token, t),
       t,
       sign_method: 'HMAC-SHA256',
     };
@@ -127,6 +183,39 @@ export class TuyaCloudClient {
       const response = await fetch(this.base + path, {
         method: 'GET',
         headers,
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.json()) as TuyaResponse<T>;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Schreibender Zugriff. Der Körper geht in die Signatur ein. */
+  private async post<T>(
+    path: string,
+    token: string,
+    payload: unknown,
+  ): Promise<TuyaResponse<T>> {
+    const t = Date.now().toString();
+    const koerper = JSON.stringify(payload);
+    const bodyHash = createHash('sha256').update(koerper).digest('hex');
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(this.base + path, {
+        method: 'POST',
+        headers: {
+          client_id: this.accessId,
+          sign: this.sign('POST', path, token, t, bodyHash),
+          t,
+          sign_method: 'HMAC-SHA256',
+          access_token: token,
+          'content-type': 'application/json',
+        },
+        body: koerper,
         signal: controller.signal,
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);

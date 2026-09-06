@@ -2,10 +2,12 @@
  * Adapter für Tuya-basierte EV-Ladegeräte (Kategorie `qccdz`),
  * konkret geprüft mit dem "Aimiler EV Charger".
  *
- * STRIKT LESEND. Dieser Adapter kennt keinen einzigen Schreibpfad: Er nutzt nur
- * `TuyaCloudClient`, der ausschliesslich GET beherrscht. Die vom Gerät
- * angebotenen Steuerfunktionen (`switch`, `charge_cur_set`, `work_mode`) werden
- * bewusst NICHT verwendet — `charge_cur_set` wird nur *angezeigt*.
+ * FAST NUR LESEND. Von den drei Steuerfunktionen des Geräts (`switch`,
+ * `charge_cur_set`, `work_mode`) wird genau eine benutzt: `charge_cur_set`,
+ * über `setzeLadestrom()`, für die Überschussregelung. `switch` und
+ * `work_mode` bleiben unangetastet — die Regelung pausiert über den
+ * Mindestladestrom, nicht über den Hauptschalter, und greift damit in keine
+ * Schutzfunktion der Wallbox ein.
  *
  * Die Datenpunkte stammen nicht aus Vermutungen, sondern aus der am 26.08.2026
  * vom Gerät selbst gelieferten Spezifikation:
@@ -164,6 +166,9 @@ export class TuyaEvseConnector implements EnergyConnector {
   private cached: EvChargerSnapshot | null = null;
   private cachedAt = 0;
   private inFlight: Promise<void> | null = null;
+  /** Vom Gerät gemeldete Grenzen des Ladestroms; einmal geholt, dann behalten. */
+  private grenzen: { minA: number; maxA: number; schrittA: number } | null = null;
+  private grenzenVersucht = false;
 
   constructor(options: TuyaEvseOptions) {
     this.client = new TuyaCloudClient({
@@ -205,6 +210,64 @@ export class TuyaEvseConnector implements EnergyConnector {
     };
   }
 
+  /**
+   * Die vom GERÄT gemeldeten Grenzen des Ladestroms.
+   *
+   * Nicht geraten und nicht aus der Konfiguration: Tuya liefert zu
+   * `charge_cur_set` einen Wertebereich mit Minimum, Maximum und Schrittweite.
+   * Das sind die Grenzen, die die Wallbox selbst akzeptiert — sie zu überschreiten
+   * hiesse, gegen die Hardware zu arbeiten.
+   *
+   * Wird einmal geholt und behalten; sie ändern sich im Betrieb nicht.
+   */
+  async ladestromGrenzen(): Promise<{ minA: number; maxA: number; schrittA: number } | null> {
+    if (this.grenzen !== null) return this.grenzen;
+    if (this.grenzenVersucht) return null;
+    this.grenzenVersucht = true;
+    try {
+      const funktionen = await this.client.deviceFunctions(this.deviceId);
+      const eintrag = funktionen.find((f) => f.code === 'charge_cur_set');
+      if (!eintrag) return null;
+      const roh = JSON.parse(eintrag.values) as { min?: number; max?: number; step?: number };
+      if (typeof roh.min !== 'number' || typeof roh.max !== 'number') return null;
+      this.grenzen = {
+        minA: roh.min,
+        maxA: roh.max,
+        schrittA: typeof roh.step === 'number' && roh.step > 0 ? roh.step : 1,
+      };
+      return this.grenzen;
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      return null;
+    }
+  }
+
+  /**
+   * Setzt den Ladestrom. Die einzige schreibende Handlung dieses Adapters.
+   *
+   * Zwei Riegel, bewusst hier und nicht beim Aufrufer:
+   *
+   *   1. Es geht ausschliesslich `charge_cur_set` hinaus. `switch` und
+   *      `work_mode` bleiben unangetastet — die Regelung pausiert über den
+   *      Mindeststrom, nicht über den Hauptschalter, und Schutzfunktionen der
+   *      Wallbox werden nicht angefasst.
+   *   2. Der Wert wird auf die vom Gerät gemeldeten Grenzen begrenzt. Kommt ein
+   *      Wert ausserhalb an, wird er beschnitten, nicht gesendet und geglaubt.
+   */
+  async setzeLadestrom(ampere: number): Promise<number> {
+    if (!Number.isFinite(ampere)) throw new Error('Ungültiger Ladestrom');
+    const grenzen = (await this.ladestromGrenzen()) ?? { minA: 6, maxA: 16, schrittA: 1 };
+    const gestuft = Math.round(ampere / grenzen.schrittA) * grenzen.schrittA;
+    const sicher = Math.max(grenzen.minA, Math.min(grenzen.maxA, gestuft));
+
+    await this.client.sendCommands(this.deviceId, [
+      { code: 'charge_cur_set', value: sicher },
+    ]);
+    // Der Zwischenspeicher hält jetzt einen überholten Sollwert.
+    this.cachedAt = 0;
+    return sicher;
+  }
+
   diagnostics(): ConnectorDiagnostics {
     return {
       connectorId: this.id,
@@ -217,7 +280,7 @@ export class TuyaEvseConnector implements EnergyConnector {
       missingMetrics: this.missingMetrics,
       errorCount: this.errorCount,
       lastError: this.lastError,
-      mode: 'Tuya Cloud API (nur lesend)',
+      mode: 'Tuya Cloud API (lesend, Ladestrom stellbar)',
       endpoint: `Tuya · ${this.deviceId.slice(0, 6)}…`,
     };
   }
