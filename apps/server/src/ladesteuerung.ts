@@ -99,6 +99,35 @@ const PROTOKOLL_MAX = 240;
 /** Obergrenze für den Wiederholabstand nach Tuya-Fehlern. */
 const BACKOFF_MAX_MS = 5 * 60_000;
 
+/**
+ * Kürzere Obergrenze, wenn ein STOPP nicht durchkam.
+ *
+ * Fünf Minuten zu warten ist richtig, wenn eine Erhöhung scheitert — dann lädt
+ * das Auto eben etwas langsamer. Bei einem misslungenen Stopp sind fünf Minuten
+ * fünf Minuten Netzbezug. Deshalb wird hier deutlich schneller nachgefasst.
+ */
+const BACKOFF_STOPP_MAX_MS = 60_000;
+
+/**
+ * Ab dieser gemessenen Leistung gilt das Fahrzeug als ladend.
+ *
+ * Deutlich unter dem kleinsten Ladestrom (6 A sind gut 4 kW) und deutlich über
+ * dem Grundrauschen der Wallbox-Elektronik.
+ */
+const LAEDT_AB_W = 200;
+
+/** Platzhalter für "wir wissen nicht, was an der Wallbox eingestellt ist". */
+const UNBEKANNT_A = -1;
+
+/**
+ * Kürzester Abstand zwischen zwei Schnellprüfungen.
+ *
+ * Die Engine misst alle zwei Sekunden. Jedes Mal einen vollen Zyklus samt
+ * Tuya-Aufruf zu starten waere Unfug; fuenf Sekunden sind schnell genug, um
+ * eine Wolke abzufangen, und langsam genug, um die Cloud nicht zu ueberrennen.
+ */
+const SCHNELLPRUEFUNG_ABSTAND_MS = 5000;
+
 export class Ladesteuerung {
   private timer: NodeJS.Timeout | null = null;
   private historie: Reglerhistorie = neueHistorie(0, 0);
@@ -118,6 +147,8 @@ export class Ladesteuerung {
   private ladenAn: boolean | null = null;
   /** Ob der Startwert schon aus dem Gerät übernommen wurde. */
   private initialisiert = false;
+  private letzteSchnellpruefungAt = 0;
+  private abmelden: (() => void) | null = null;
 
   constructor(
     private readonly engine: EnergyEngine,
@@ -155,6 +186,31 @@ export class Ladesteuerung {
     this.naechsteRegelungAt = Date.now() + intervallMs;
     this.timer = setInterval(() => void this.zyklus(), intervallMs);
     this.timer.unref();
+
+    // ── Schnellpfad ─────────────────────────────────────────────────────────
+    // Der 30-Sekunden-Takt ist richtig für das gemächliche Nachführen, aber zu
+    // träge für den einen Fall, der wirklich zählt: Eine Wolke zieht vor die
+    // Sonne, acht Kilowatt fehlen schlagartig, und bis zum nächsten Zyklus
+    // holt sich das Auto die Differenz aus dem Netz.
+    //
+    // Vorhersehen lässt sich das nicht — eine Wolke kündigt sich nicht an. Was
+    // sich verkürzen lässt, ist die Zeit bis zur Reaktion. Deshalb hängt sich
+    // die Regelung zusätzlich an den Messtakt der Engine (alle zwei Sekunden)
+    // und greift sofort ein, sobald wirklich Strom aus dem Netz fliesst,
+    // während das Auto lädt. Aus einem halben Minutchen werden zwei Sekunden.
+    this.abmelden = this.engine.subscribe((state) => {
+      if (this.config.ueberschuss.modus !== 'regeln' || this.laeuft) return;
+      if (Date.now() - this.letzteSchnellpruefungAt < SCHNELLPRUEFUNG_ABSTAND_MS) return;
+
+      const snap = state.resolution.snapshot;
+      const netzbezug = snap.gridImportW.valueW ?? 0;
+      const evLeistung = snap.evCharger?.chargePowerW ?? 0;
+      if (evLeistung <= LAEDT_AB_W) return;
+      if (netzbezug <= this.config.ueberschuss.notbremseAbW) return;
+
+      this.letzteSchnellpruefungAt = Date.now();
+      void this.zyklus();
+    });
   }
 
   /**
@@ -185,6 +241,8 @@ export class Ladesteuerung {
   stop(): void {
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
+    this.abmelden?.();
+    this.abmelden = null;
   }
 
   zustand(): Steuerzustand {
@@ -277,6 +335,7 @@ export class Ladesteuerung {
       startenNachMs: u.startenNachSekunden * 1000,
       notbremseAbW: u.notbremseAbW,
       netzTotzoneW: u.netzTotzoneW,
+      netzImportTotzoneW: u.netzImportTotzoneW,
     };
   }
 
@@ -337,14 +396,34 @@ export class Ladesteuerung {
       const messwerte = this.messwerte(state);
 
       // Beim ersten Zyklus weiss die Regelung nicht, was an der Wallbox
-      // eingestellt ist — sie darf es aber auch nicht raten. Tat sie bisher:
+      // eingestellt ist — und sie darf es auch nicht annehmen. Tat sie bisher:
       // Die Historie startete mit "0 A gesetzt", ein gewünschter Stopp galt
       // damit als bereits erledigt ("Sollwert unverändert") und es ging nie ein
-      // Befehl hinaus. Deshalb wird der Startwert aus dem Gerät übernommen;
-      // meldet es nichts, steht -1 für "unbekannt" und jeder Wunsch weicht ab.
+      // Befehl hinaus. UNBEKANNT ist die einzige ehrliche Aussage, und sie
+      // sorgt dafür, dass der erste Zyklus in jedem Fall einen Befehl schickt.
       if (!this.initialisiert) {
         this.initialisiert = true;
-        this.historie = neueHistorie(messwerte.evStromA ?? -1, Date.now());
+        this.historie = neueHistorie(UNBEKANNT_A, Date.now());
+      }
+
+      // ── Abgleich mit der Wirklichkeit ───────────────────────────────────
+      // Der wichtigste Sicherheitsnetz-Griff dieser Datei. Bisher glaubte die
+      // Regelung ihrem eigenen Gedächtnis: Stand dort "abgeschaltet", wurde
+      // nichts mehr gesendet. Schaltet die Wallbox aber von sich aus wieder ein
+      // — neu angesteckt, eigener Zeitplan, verlorener Befehl —, lädt das Auto
+      // munter aus dem Netz weiter, und niemand merkt es.
+      //
+      // Deshalb entscheidet hier der Messwert, nicht die Erinnerung: Fliesst
+      // Strom, obwohl wir pausiert zu haben glauben, wird das Gedächtnis
+      // verworfen und der Stopp erneut geschickt.
+      const laedtWirklich = (messwerte.evLeistungW ?? 0) > LAEDT_AB_W;
+      if (laedtWirklich && this.historie.gesetztA === 0) {
+        console.warn(
+          `[Laderegelung] Die Wallbox lädt mit ${Math.round(messwerte.evLeistungW ?? 0)} W, `
+            + 'obwohl sie abgeschaltet sein sollte — Stopp wird erneut gesendet.',
+        );
+        this.historie = { ...this.historie, gesetztA: messwerte.evStromA ?? UNBEKANNT_A };
+        this.ladenAn = null;
       }
 
       let entscheidung = berechneLadeziel(messwerte, this.parameter());
@@ -455,7 +534,11 @@ export class Ladesteuerung {
         // einen Wert, den das Gerät nie gesehen hat.
         this.fehlerzahl += 1;
         this.letzterFehler = error instanceof Error ? error.message : String(error);
-        const wartenMs = Math.min(BACKOFF_MAX_MS, 30_000 * 2 ** (this.fehlerzahl - 1));
+        // Ein misslungener Stopp wird schneller wiederholt als eine misslungene
+        // Erhöhung — die eine Richtung kostet Netzstrom, die andere nur Zeit.
+        const obergrenze =
+          ergebnis.stromA === 0 ? BACKOFF_STOPP_MAX_MS : BACKOFF_MAX_MS;
+        const wartenMs = Math.min(obergrenze, 30_000 * 2 ** (this.fehlerzahl - 1));
         this.gesperrtBis = Date.now() + wartenMs;
         console.warn(
           `[Laderegelung] Tuya-Befehl fehlgeschlagen (${this.fehlerzahl}. Mal): `

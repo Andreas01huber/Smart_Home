@@ -145,14 +145,36 @@ describe('Szenario A — viel Sonne, wenig Haus', () => {
 });
 
 describe('Szenario B — knapper Überschuss', () => {
-  it('lädt nur mit dem, was übrig ist', () => {
-    // PV 5 kW, Haus 4 kW -> 1 kW übrig, dazu Speicherfreigabe 5 kW.
+  it('lädt nur mit dem, was wirklich übrig ist — nicht mit versprochener Speicherleistung', () => {
+    // PV 5 kW, Haus 4 kW: 1 kW echte Einspeisung. Die Speicherfreigabe von
+    // 5 kW ändert daran nichts — sie ist ein Versprechen, keine Messung, und
+    // ein Versprechen darf nicht zu Netzbezug führen. 1 kW reicht nicht für
+    // den Mindestladestrom, also Pause.
     const e = berechneLadeziel(
       messwerte({ pv: 5000, hausOhneAuto: 4000, ev: 0 }),
       parameter(),
     );
+    assert.equal(e.zielA, 0);
+    assert.ok(e.verfuegbarW < 1000, `verfügbar ${e.verfuegbarW}`);
+  });
+
+  it('lädt weiter, wenn der Speicher freiwillig mithilft', () => {
+    // Das Auto zieht die 4157 W eines Sechs-Ampere-Ladevorgangs, der Speicher
+    // deckt 2 kW davon — innerhalb seiner Freigabe. Der Netzzähler steht auf
+    // null, also ist alles in Ordnung und der Ladestrom bleibt.
+    //
+    // Ohne die Ausnahme für den Mindestladestrom würde hier die Reserve von
+    // 200 W das Laden abwürgen: 4157 minus 200 sind rechnerisch 5 A, also
+    // unter dem Minimum. Und wieder anfangen ginge dann erst recht nicht.
+    const liste = speicher(80, 80, 2000, 0);
+    const e = berechneLadeziel(
+      // PV plus Speicherbeitrag decken den Bedarf genau — der Netzzähler steht
+      // auf null, und darum geht es hier.
+      messwerte({ pv: 6157, hausOhneAuto: 4000, ev: 4157, speicher: liste }),
+      parameter(),
+    );
     assert.equal(e.zustand, 'laedt');
-    assert.ok(e.zielA >= 6 && e.zielA <= 9, `zielA war ${e.zielA}`);
+    assert.equal(e.zielA, 6);
   });
 
   it('pausiert, wenn der Mindestladestrom nicht erreicht wird', () => {

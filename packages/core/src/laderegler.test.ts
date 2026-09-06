@@ -25,6 +25,7 @@ const ZEIT: Zeitparameter = {
   startenNachMs: 120_000,
   notbremseAbW: 300,
   netzTotzoneW: 150,
+  netzImportTotzoneW: 40,
 };
 
 /** Lässt den Wunsch `wunschA` über `dauerMs` anliegen und regelt dabei. */
@@ -120,10 +121,22 @@ describe('Notbremse', () => {
 });
 
 describe('Totzone gegen das Pendeln', () => {
-  it('sitzt eine Ein-Ampere-Änderung bei ruhigem Netz aus', () => {
+  it('sitzt eine Ein-Ampere-Änderung aus, solange eingespeist wird', () => {
     const start: Reglerhistorie = { gesetztA: 10, gesetztAtMs: 0, wunschA: 10, wunschSeitMs: 0 };
-    const { befehle } = laufe(start, 11, 50, 0, 600_000);
+    // 50 W Einspeisung — daran ist nichts zu verbessern, also Ruhe.
+    const { befehle } = laufe(start, 11, -50, 0, 600_000);
     assert.equal(befehle.length, 0, 'hat trotz Totzone geregelt');
+  });
+
+  it('sitzt Netzbezug NICHT aus, auch nicht ein bisschen', () => {
+    // Die Totzone ist absichtlich unsymmetrisch. Mit der frueheren
+    // symmetrischen Fassung blieben 150 W Netzbezug minutenlang stehen, weil
+    // die Wallbox nur ganze Ampere kennt und der Rest darunter lag. Beim
+    // Einspeisen ist Ruhe richtig, beim Beziehen nicht.
+    const start: Reglerhistorie = { gesetztA: 10, gesetztAtMs: 0, wunschA: 10, wunschSeitMs: 0 };
+    const { befehle } = laufe(start, 9, 120, 0, 120_000);
+    assert.equal(befehle.length, 1, 'hat den Netzbezug ausgesessen');
+    assert.equal(befehle[0]?.a, 9);
   });
 
   it('regelt sehr wohl, wenn die Abweichung grösser ist', () => {

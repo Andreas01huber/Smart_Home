@@ -245,14 +245,48 @@ export function berechneLadeziel(
   const freigabe = speicherFreigabeW(messwerte.speicher, parameter);
   const entladung = entladungJetztW(messwerte.speicher);
 
-  // Rückführung über den Netzzähler, dann die Speicher zurechtrücken:
-  // laufende Entladung raus (die gehört dem Haus), erlaubte Freigabe rein.
+  // Die Speicherfreigabe wird NICHT als verfügbare Leistung dazugerechnet.
+  //
+  // Das war der erste Entwurf und er war falsch. Die Freigabe ist ein
+  // Versprechen — "bis zu 3 kW dürften aus dem Speicher kommen" —, und ein
+  // Versprechen ist keine Messung. Steht der Speicher genau an seiner Reserve,
+  // ist seine eigene Regelung anderer Meinung oder begrenzt der Wechselrichter,
+  // dann liefert er die versprochene Leistung nicht. Das Auto zieht sie
+  // trotzdem, und die Differenz kommt aus dem Netz. Im Tagesdurchlauf waren das
+  // rund 2 kWh — genau das, was nie passieren darf.
+  //
+  // Die Freigabe entscheidet deshalb nur noch, wie viel einer LAUFENDEN
+  // Entladung dem Auto zugerechnet werden darf. Was darüber hinausgeht, gehört
+  // dem Haus und wird abgezogen. Wächst der Ladestrom, dann nur gegen echte
+  // Einspeisung — und wenn der Speicher dabei freiwillig mithilft, bleibt der
+  // Netzzähler auf null und alles ist gut. Was er nicht hergibt, wird auch nicht
+  // eingeplant.
+  const ueberEntladung = Math.max(0, entladung - freigabe);
+
   const verfuegbar =
-    evLeistung + einspeisung - netzbezug - parameter.reserveW - entladung + freigabe;
+    evLeistung + einspeisung - netzbezug - parameter.reserveW - ueberEntladung;
 
   const maxLeistung = ladeleistungAusStromW(parameter.maxA, parameter.anschluss) ?? 0;
   const zielLeistung = Math.max(0, Math.min(verfuegbar, maxLeistung));
-  const zielA = stromAusLeistungA(zielLeistung, parameter);
+  let zielA = stromAusLeistungA(zielLeistung, parameter);
+
+  // Die Reserve ist ein Sicherheitsabstand fürs Wachsen, kein Grund zum
+  // Abwürgen. Ohne diese Ausnahme beendet sie das Laden am Minimum von selbst:
+  // Bei 6 A fliessen gut 4150 W, abzüglich 200 W Reserve bleiben 3950 W — das
+  // sind rechnerisch 5 A, also unter dem Minimum, also Pause. Und nach der
+  // Pause fehlen erst recht 4150 W, um wieder anzufangen. Das Auto käme nie
+  // über den kleinsten Ladestrom hinaus.
+  //
+  // Wer schon lädt und dabei nachweislich keinen Netzbezug verursacht, darf
+  // deshalb weiterladen. Nachweislich heisst: gemessen, nicht gehofft.
+  if (
+    zielA < parameter.minA &&
+    evLeistung > 0 &&
+    netzbezug <= parameter.netzTotzoneW &&
+    stromAusLeistungA(Math.max(0, verfuegbar + parameter.reserveW), parameter) >= parameter.minA
+  ) {
+    zielA = parameter.minA;
+  }
 
   // ── Reicht es für den Mindeststrom? ──────────────────────────────────────
   if (zielA < parameter.minA) {

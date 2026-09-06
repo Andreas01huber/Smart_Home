@@ -52,8 +52,25 @@ export interface Zeitparameter {
   readonly startenNachMs: number;
   /** Netzbezug, ab dem sofort gesenkt wird, ohne auf Fristen zu warten. */
   readonly notbremseAbW: number;
-  /** Totzone um 0 W: darunter wird eine Ein-Schritt-Änderung ausgesessen. */
+  /**
+   * Totzone auf der EINSPEISE-Seite: So viel darf ins Netz gehen, ohne dass
+   * wegen eines einzelnen Ampereschritts nachgeregelt wird.
+   */
   readonly netzTotzoneW: number;
+  /**
+   * Totzone auf der BEZUGS-Seite. Deutlich kleiner, und das ist der Punkt.
+   *
+   * Die erste Fassung hatte eine symmetrische Totzone von ±150 W. Im
+   * Tagesdurchlauf zeigte sich, was das bedeutet: Weil die Wallbox nur ganze
+   * Ampere kennt, bleibt beim Nachregeln fast immer ein Rest — und lag der bei
+   * +150 W Netzbezug, sass die Regelung ihn minutenlang aus, statt einen
+   * Schritt zurückzugehen. Fünf solche Phasen an einem wolkenlosen Tag ergaben
+   * 24 Wh aus dem Netz. Wenig Geld, aber genau das Verhalten, das hier nicht
+   * vorkommen darf.
+   *
+   * Einspeisen darf ruhig ein bisschen daneben liegen. Beziehen nicht.
+   */
+  readonly netzImportTotzoneW: number;
 }
 
 export interface BeruhigungsEingang {
@@ -126,12 +143,15 @@ export function beruhige(eingang: BeruhigungsEingang): BeruhigungsErgebnis {
   // ── Totzone: Ein-Schritt-Zappeln unterdrücken ────────────────────────────
   // Nur wenn beide Werte echtes Laden sind. Start und Pause sind nie "ein
   // Schritt", die sollen die eigenen Fristen unten durchlaufen.
+  //
+  // Und nur, solange nichts nennenswertes aus dem Netz kommt: Beim Einspeisen
+  // ist Ruhe die richtige Antwort, beim Beziehen nicht.
   const beidesLaedt = wunschA > 0 && historie.gesetztA > 0;
-  if (
-    beidesLaedt &&
-    Math.abs(wunschA - historie.gesetztA) <= 1 &&
-    Math.abs(netzbezugW) <= zeit.netzTotzoneW
-  ) {
+  const imRuhebereich =
+    netzbezugW >= 0
+      ? netzbezugW <= zeit.netzImportTotzoneW
+      : -netzbezugW <= zeit.netzTotzoneW;
+  if (beidesLaedt && Math.abs(wunschA - historie.gesetztA) <= 1 && imRuhebereich) {
     return bleibt(
       `Netz bei ${Math.round(netzbezugW)} W innerhalb der Totzone — ${historie.gesetztA} A bleibt.`,
     );

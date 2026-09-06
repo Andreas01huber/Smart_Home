@@ -54,6 +54,7 @@
     "_hinweis_reserve": "reserveW haelt Abstand zum Netzbezug. netzTotzoneW ist der Bereich um 0 W, in dem gar nicht nachgeregelt wird - ohne ihn wuerde die Regelung wegen jeder Wolke zwischen zwei Amperewerten pendeln. notbremseAbW ist der echte Netzbezug, ab dem sofort gesenkt wird, ohne auf irgendeine Frist zu warten.",
     "reserveW": 200,
     "netzTotzoneW": 150,
+    "netzImportTotzoneW": 40,
     "notbremseAbW": 300,
     "maxMessalterSekunden": 30,
 

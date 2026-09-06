@@ -77,8 +77,16 @@ export interface UeberschussConfig {
   readonly intervallSekunden: number;
   /** Sicherheitsabstand zum Netzbezug. */
   readonly reserveW: number;
-  /** Totzone um 0 W Netz, innerhalb derer nicht nachgeregelt wird. */
+  /** Totzone auf der Einspeiseseite, innerhalb derer nicht nachgeregelt wird. */
   readonly netzTotzoneW: number;
+  /**
+   * Totzone auf der Bezugsseite — bewusst viel kleiner.
+   *
+   * Einspeisen darf ruhig ein bisschen daneben liegen, beziehen nicht: Eine
+   * symmetrische Totzone hielt im Tagesdurchlauf 150 W Netzbezug minutenlang
+   * aus, weil die Wallbox nur ganze Ampere kennt und der Rest darunter blieb.
+   */
+  readonly netzImportTotzoneW: number;
   /** Ab diesem Netzbezug wird sofort gesenkt, ohne Fristen. */
   readonly notbremseAbW: number;
   readonly maxMessalterSekunden: number;
@@ -103,6 +111,7 @@ const UEBERSCHUSS_STANDARD: UeberschussConfig = {
   intervallSekunden: 30,
   reserveW: 200,
   netzTotzoneW: 150,
+  netzImportTotzoneW: 40,
   notbremseAbW: 300,
   maxMessalterSekunden: 30,
   mindestabstandSekunden: 60,
@@ -312,6 +321,7 @@ function leseUeberschuss(roh: unknown): UeberschussConfig {
     intervallSekunden: Math.max(10, zahl('intervallSekunden', UEBERSCHUSS_STANDARD.intervallSekunden)),
     reserveW: zahl('reserveW', UEBERSCHUSS_STANDARD.reserveW),
     netzTotzoneW: zahl('netzTotzoneW', UEBERSCHUSS_STANDARD.netzTotzoneW),
+    netzImportTotzoneW: zahl('netzImportTotzoneW', UEBERSCHUSS_STANDARD.netzImportTotzoneW),
     notbremseAbW: zahl('notbremseAbW', UEBERSCHUSS_STANDARD.notbremseAbW),
     maxMessalterSekunden: zahl('maxMessalterSekunden', UEBERSCHUSS_STANDARD.maxMessalterSekunden),
     mindestabstandSekunden: zahl('mindestabstandSekunden', UEBERSCHUSS_STANDARD.mindestabstandSekunden),
