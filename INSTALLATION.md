@@ -354,3 +354,48 @@ also im Klartext. Wenn das stört, ist der VPN-Weg unten der richtige.
 Nicht über eine Portfreigabe — die Anlage gehört nicht offen ins Internet. Der
 sichere und kostenlose Weg steht in [deploy/README.md](deploy/README.md):
 WireGuard-VPN in der FritzBox oder, bei DS-Lite-Anschlüssen, Tailscale.
+
+## Überschussladen — das Auto nimmt nur, was übrig ist
+
+**Die Regel:** Das Auto darf niemals der Grund dafür sein, dass Strom aus dem
+Netz kommt. Die App stellt dafür den Ladestrom der Wallbox laufend nach, so
+dass der Netzbezug bei etwa 0 W bleibt.
+
+Wie sie rechnet, in einem Satz: Was das Auto gerade zieht, plus was trotzdem
+noch eingespeist wird, minus was aus dem Netz kommt, minus eine Sicherheits­reserve
+— und dazu nur so viel Speicherleistung, wie ausdrücklich freigegeben ist.
+Der Netzzähler ist damit das Maß der Dinge und nicht eine Rechnung aus vier
+Einzelmessungen, die jede für sich danebenliegen kann.
+
+Steigt der Hausverbrauch, sinkt der Ladestrom. Reicht es nicht mehr für die
+kleinstmögliche Ladeleistung, pausiert die Ladung, statt die Differenz aus dem
+Netz zu holen. Kommt die Sonne zurück, läuft sie von selbst wieder an.
+
+### Einschalten
+
+In `config.json` unter `ueberschussladen`:
+
+```json
+"modus": "regeln"
+```
+
+Drei Stufen: `aus` (nichts passiert), `beobachten` (rechnet und zeigt alles,
+sendet aber nichts an die Wallbox) und `regeln` (stellt den Ladestrom wirklich).
+**Vorgabe ist `beobachten`** — erst zusehen, was die Automatik tun würde, dann
+freigeben. Danach den Server neu starten.
+
+Was die Regelung gerade denkt, steht auf der Fahrzeugseite ganz oben, das
+vollständige Protokoll darunter unter „Regelprotokoll".
+
+### Was sie anfasst und was nicht
+
+Ausschliesslich den Ladestrom (`charge_cur_set`, 6–16 A). Der Hauptschalter der
+Wallbox und ihr Arbeitsmodus bleiben unangetastet; Mindest- und Höchststrom
+liest die App vom Gerät selbst, damit keine Zahl aus einer Konfigurationsdatei
+gegen die Hardware arbeiten kann.
+
+### Wenn Werte fehlen
+
+Fehlt der Netzzähler oder sind die Messwerte älter als eine halbe Minute, wird
+pausiert — nicht geraten. Lieber eine Viertelstunde nicht geladen als eine
+Viertelstunde am Netz.

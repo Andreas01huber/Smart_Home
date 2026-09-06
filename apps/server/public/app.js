@@ -1052,10 +1052,14 @@ function updateEv(root, ev) {
   // Beim Laden sagt die Unterzeile, wie viel von der eingestellten Begrenzung
   // gerade wirklich abgerufen wird — genau die Frage, die man vor der Wallbox
   // stehend hat.
+  const pausiert = String(ev.regelung?.zustand ?? '').startsWith('pausiert');
   const ladeZeile =
     charging && ev.currentFromPowerA != null && ev.maxCurrentA != null
       ? `Lädt mit ca. ${Math.round(ev.currentFromPowerA)} A von max. ${ev.maxCurrentA} A`
-      : null;
+      // Pausiert die Automatik, ist ihr Grund die nützlichste Auskunft der Karte.
+      : pausiert && ev.regelung?.grund
+        ? ev.regelung.grund
+        : null;
   setF(root, 'ev-sub',
     ev.faultText ?? ladeZeile ?? EV_STATE_TEXT[ev.state] ?? 'Wallbox noch nicht eingerichtet');
 
@@ -1646,6 +1650,8 @@ async function refreshTodayKpis() {
 
 // ── LEAPMOTOR-Detailansicht ───────────────────────────────────────────
 let evSessions = null;      // { current, sessions[] }
+let evRegelung = null;      // Zustand + Protokoll der Überschussregelung
+let evRegelungGeholtAt = 0; // Drosselung: das Protokoll braucht keine 2-s-Frische
 let evStats = null;         // Antwort von /api/ev/stats
 let evStatsRange = 'month'; // day | week | month | year | total
 let evOpenSessionId = null; // aufgeklappter Ladevorgang in der Liste
@@ -1730,24 +1736,69 @@ function ampereErklaerung(ev) {
   </p>`;
 }
 
-/** Live-Bereich der Detailansicht — trennt Ladegerät und Fahrzeug sauber. */
+/**
+ * Was die Überschussregelung gerade tut — in einem Satz.
+ *
+ * Das ist die wichtigste Zeile der ganzen Seite: Sie beantwortet die Frage,
+ * mit der man vor dem Auto steht — "warum lädt es gerade nicht?". Der Text
+ * kommt aus dem Regler selbst, nicht aus einer Übersetzungstabelle hier: Nur
+ * dort ist bekannt, welche Zahl den Ausschlag gegeben hat.
+ */
+const REGEL_KOPF = {
+  aus: 'Überschussregelung ist ausgeschaltet',
+  wartet: 'Wartet auf Freigabe',
+  'nicht-verbunden': 'Kein Fahrzeug angesteckt',
+  laedt: 'Lädt mit Überschuss',
+  'pausiert-leistung': 'Laden pausiert – zu wenig Überschuss',
+  'pausiert-speicher': 'Laden pausiert – Speicherreserve',
+  'pausiert-messwerte': 'Laden pausiert – Messwerte unsicher',
+  gestoert: 'Wallbox nicht erreichbar',
+  beendet: 'Ladevorgang beendet',
+};
+
+function regelKopfMarkup(ev) {
+  const r = ev.regelung;
+  if (!r) return '';
+  const laedt = r.zustand === 'laedt';
+  const pausiert = String(r.zustand).startsWith('pausiert');
+  const klasse = laedt ? 'ok' : pausiert || r.zustand === 'gestoert' ? 'warn' : '';
+  const nurBeobachtet = r.modus === 'beobachten';
+  return `
+    <div class="ev-kopf ${esc(klasse)}">
+      <span class="ev-kopf-titel">${esc(REGEL_KOPF[r.zustand] ?? 'Zustand unbekannt')}</span>
+      <span class="ev-kopf-grund">${esc(r.grund ?? '')}</span>
+      ${nurBeobachtet ? `<span class="ev-kopf-hinweis">Beobachtungsmodus — die Wallbox wird noch nicht gestellt. Umschalten in config.json unter <code>ueberschussladen.modus</code>.</span>` : ''}
+      ${r.modus === 'aus' ? `<span class="ev-kopf-hinweis">Die Regelung ist abgeschaltet. Die Wallbox lädt mit ihrer eigenen Einstellung.</span>` : ''}
+    </div>`;
+}
+
+/**
+ * Live-Bereich der Detailansicht.
+ *
+ * Oben in einem Satz, was gerade passiert und warum; darunter die Zahlen, aus
+ * denen sich das ergibt — in genau der Reihenfolge, in der man sie nachrechnet:
+ * Sonne, Haus, Speicher, Netz, und was daraus für das Auto übrig bleibt.
+ */
 function evLiveMarkup(ev) {
   const chargerOnline = ev.configured && ev.state !== 'offline' && ev.state !== 'not-connected';
   const charging = ev.state === 'charging';
+  const r = ev.regelung;
+  const live = lastLive ?? {};
+  const netzW = (live.gridImport?.valueW ?? 0) - (live.gridExport?.valueW ?? 0);
+
   return `
     <div class="detail-section">
-      <h3>Live-Status</h3>
+      ${regelKopfMarkup(ev)}
       <div class="detail-grid">
-        ${tile('Ladegerät', chargerOnline ? 'Online' : (ev.configured ? 'Offline' : 'Nicht eingerichtet'), !chargerOnline, chargerOnline ? 'ok' : ev.configured ? 'bad' : '')}
-        ${tile('Fahrzeug', ev.vehicleConnected === true ? 'Verbunden' : ev.vehicleConnected === false ? 'Nicht verbunden' : '—', ev.vehicleConnected !== true, ev.vehicleConnected === true ? 'ok' : '')}
-        ${tile('Ladevorgang', EV_SHORT[ev.state] ?? '—', !charging, charging ? 'ok' : ev.state === 'fault' ? 'bad' : '')}
-        ${tile('Ladeleistung', charging ? formatLadeleistung(ev) : (chargerOnline ? '0 W' : '—'), !charging)}
-        ${tile('Akkustand', ev.socPercent == null ? 'nicht verfügbar' : formatSoc(ev.socPercent), ev.socPercent == null)}
-        ${tile('Max. Ladestrom', formatLadestrom(ev), true)}
-        ${tile('Temperatur', ev.temperatureC == null ? '—' : `${ev.temperatureC} °C`, true)}
-        ${tile('Gesamt geladen', ev.totalEnergyWh == null ? '—' : formatEnergy(ev.totalEnergyWh), true)}
+        ${tile('Ladeleistung', charging ? formatLadeleistung(ev) : (chargerOnline ? '0 W' : '—'), !charging, charging ? 'ok' : '')}
+        ${tile('Ladestrom', formatLadestrom(ev), !charging)}
+        ${tile('Verfügbare Leistung', r ? formatPower(r.verfuegbarW) : '—', !r)}
+        ${tile('PV-Produktion', live.solar?.valueW == null ? '—' : formatPower(live.solar.valueW), true)}
+        ${tile('Haus ohne Auto', r?.hausOhneAutoW == null ? '—' : formatPower(r.hausOhneAutoW), true)}
+        ${tile('Speicher freigegeben', r ? formatPower(r.speicherbeitragW) : '—', true)}
+        ${tile('Netz', netzW >= 0 ? `${formatPower(netzW)} Bezug` : `${formatPower(-netzW)} Einspeisung`, true, netzW > 100 ? 'bad' : 'ok')}
+        ${tile('Fahrzeug', ev.vehicleConnected === true ? 'Angesteckt' : ev.vehicleConnected === false ? 'Nicht angesteckt' : '—', ev.vehicleConnected !== true, ev.vehicleConnected === true ? 'ok' : '')}
       </div>
-      ${ampereErklaerung(ev)}
       ${ev.socPercent == null ? `<p class="card-more">Der Fahrzeug-Akkustand wird beim Wechselstromladen technisch nicht übertragen (IEC 61851) — er kann nur aus dem Fahrzeug selbst kommen.</p>` : ''}
       ${ev.faultText ? `<p class="card-more" style="color:var(--danger)">${esc(ev.faultText)}</p>` : ''}
     </div>`;
@@ -1756,22 +1807,61 @@ function evLiveMarkup(ev) {
 /** Ein Ladevorgang als Kennzahlen-Raster. */
 function sessionMarkup(s, heading) {
   const end = s.endedAt ? formatClock(s.endedAt) : 'läuft';
+  // Pausenzeit ergibt sich aus der Differenz — angesteckt, aber ohne Ladefluss.
+  const pauseSeconds = Math.max(0, (s.connectedSeconds ?? 0) - (s.chargingSeconds ?? 0));
   return `
     <div class="detail-section">
       <h3>${esc(heading)}</h3>
       <div class="detail-grid">
-        ${tile('Start', `${new Date(s.startedAt).toLocaleDateString('de-DE')} ${formatClock(s.startedAt)}`)}
-        ${tile('Ende', end, !s.endedAt)}
-        ${tile('Ladedauer', formatDuration(s.chargingSeconds))}
-        ${tile('Angesteckt', formatDuration(s.connectedSeconds), true)}
+        ${tile('Zeitraum', `${formatClock(s.startedAt)} – ${end}`, false)}
         ${tile('Geladen', formatEnergy(s.energyWh))}
+        ${tile('Ladezeit', formatDuration(s.chargingSeconds), true)}
+        ${tile('Davon Pause', formatDuration(pauseSeconds), true)}
         ${tile('Ø Leistung', s.avgPowerW == null ? '—' : formatPower(s.avgPowerW), true)}
         ${tile('Max. Leistung', s.maxPowerW ? formatPower(s.maxPowerW) : '—', true)}
-        ${tile('Akku Start / Ende', 'nicht verfügbar', true)}
       </div>
+      ${verlaufMarkup(s)}
       <h3 style="margin-top:1rem">Woher kam der Strom?</h3>
       ${splitMarkup(s.split)}
       ${s.hasGaps ? `<p class="card-more">Während dieses Ladevorgangs fehlten zeitweise Messwerte — ein Teil ist als „nicht zuordenbar“ ausgewiesen.</p>` : ''}
+    </div>`;
+}
+
+/**
+ * Der Leistungsverlauf innerhalb einer Session.
+ *
+ * Genau das, was früher als fünf getrennte Ladevorgänge in der Liste stand:
+ * die Stufen. Hier gehören sie hin — in die Session, nicht daneben.
+ */
+function verlaufMarkup(s) {
+  const stufen = s.verlauf ?? [];
+  if (stufen.length < 2) return '';
+  const W = 640, H = 120, padL = 4, padB = 16, padT = 6;
+  const von = new Date(s.startedAt).getTime();
+  const bis = new Date(s.endedAt ?? stufen[stufen.length - 1].ab).getTime();
+  const spanne = Math.max(1, bis - von);
+  const max = Math.max(...stufen.map((p) => p.leistungW), 1000);
+
+  let pfad = '';
+  stufen.forEach((p, i) => {
+    const x = padL + ((new Date(p.ab).getTime() - von) / spanne) * (W - padL * 2);
+    const y = H - padB - (p.leistungW / max) * (H - padT - padB);
+    // Treppenform: die Leistung springt zwischen den Stufen, sie gleitet nicht.
+    pfad += i === 0 ? `M ${x.toFixed(1)} ${y.toFixed(1)}` : ` H ${x.toFixed(1)} V ${y.toFixed(1)}`;
+  });
+  pfad += ` H ${(W - padL).toFixed(1)}`;
+
+  const wechsel = stufen.filter((p, i) => i > 0 && p.stromA !== stufen[i - 1].stromA).length;
+  return `
+    <div class="ev-verlauf">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
+           aria-label="Ladeleistung im Verlauf dieses Ladevorgangs">
+        <path d="${pfad}" fill="none" stroke="var(--ev, #22c55e)" stroke-width="2" />
+      </svg>
+      <p class="card-more">
+        ${stufen.length} Leistungsstufen${wechsel > 0 ? `, davon ${wechsel} Änderung${wechsel === 1 ? '' : 'en'} des Ladestroms` : ''}
+        — alles innerhalb dieses einen Ladevorgangs. Spitze ${esc(formatPower(max))}.
+      </p>
     </div>`;
 }
 
@@ -1830,7 +1920,9 @@ function evHistoryMarkup() {
   }
   const rows = list.map((s) => {
     const d = new Date(s.startedAt);
-    const times = `${formatClock(s.startedAt)} – ${s.endedAt ? formatClock(s.endedAt) : 'läuft'} · ${formatDuration(s.chargingSeconds)}`;
+    const dauer = formatDuration(s.chargingSeconds);
+    const schnitt = s.avgPowerW == null ? null : formatPower(s.avgPowerW);
+    const times = `${formatClock(s.startedAt)} – ${s.endedAt ? formatClock(s.endedAt) : 'läuft'} · ${dauer}${schnitt ? ` · Ø ${schnitt}` : ''}`;
     const open = evOpenSessionId === s.id;
     return `
       <button class="session-row" type="button" data-session="${esc(s.id)}" aria-expanded="${open}">
@@ -1840,9 +1932,65 @@ function evHistoryMarkup() {
         </span>
         <span class="session-energy">${esc(formatEnergy(s.energyWh))}</span>
       </button>
-      ${open ? `<div class="session-detail">${splitMarkup(s.split)}${s.hasGaps ? `<p class="card-more">Teilweise ohne Messwerte — als „nicht zuordenbar“ ausgewiesen.</p>` : ''}</div>` : ''}`;
+      ${open ? `<div class="session-detail">
+          ${verlaufMarkup(s)}
+          ${splitMarkup(s.split)}
+          ${s.hasGaps ? `<p class="card-more">Teilweise ohne Messwerte — als „nicht zuordenbar“ ausgewiesen.</p>` : ''}
+        </div>` : ''}`;
   }).join('');
-  return `<div class="detail-section"><h3>Letzte Ladevorgänge</h3><div class="session-list">${rows}</div></div>`;
+  return `<div class="detail-section">
+      <h3>Ladevorgänge</h3>
+      <p class="card-more" style="margin:0 0 0.7rem">
+        Eine Zeile ist ein zusammenhängender Ladevorgang — vom Anstecken bis zum
+        Abstecken. Leistungswechsel und automatische Pausen stecken darin;
+        antippen zeigt den Verlauf.
+      </p>
+      <div class="session-list">${rows}</div>
+    </div>`;
+}
+
+/**
+ * Das Regelprotokoll — was die Automatik entschieden hat und warum.
+ *
+ * Bewusst ganz unten und eingeklappt: Im Alltag will man es nicht sehen. Wenn
+ * das Auto aber nicht lädt, obwohl die Sonne scheint, steht hier die Antwort.
+ */
+function regelProtokollMarkup() {
+  const r = evRegelung;
+  if (!r || r.modus === 'aus') return '';
+  const zeilen = (r.protokoll ?? []).slice(0, 40).map((p) => `
+    <tr>
+      <td>${esc(formatClock(p.zeit))}</td>
+      <td>${esc(formatPower(p.pvW))}</td>
+      <td>${esc(formatPower(p.hausOhneAutoW))}</td>
+      <td>${esc(formatPower(p.netzW))}</td>
+      <td>${esc(formatPower(p.verfuegbarW))}</td>
+      <td>${p.wunschA === 0 ? 'Pause' : `${p.wunschA} A`}</td>
+      <td>${p.gesendet ? '✓' : ''}</td>
+      <td class="regel-grund">${esc(p.fehler ?? p.grund)}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="detail-section">
+      <details>
+        <summary><h3 style="display:inline">Regelprotokoll</h3></summary>
+        <p class="card-more">
+          Alle ${esc(String(r.naechsteRegelungInS))} s bis zur nächsten Prüfung.
+          Gesetzt: ${r.gesetztA === 0 ? 'Pause' : `${esc(String(r.gesetztA))} A`},
+          zulässig ${esc(String(r.minA))}–${esc(String(r.maxA))} A.
+          ${r.letzterFehler ? `<span style="color:var(--danger)">Letzter Fehler: ${esc(r.letzterFehler)}</span>` : ''}
+        </p>
+        <div class="regel-tabelle">
+          <table>
+            <thead><tr>
+              <th>Zeit</th><th>PV</th><th>Haus</th><th>Netz</th>
+              <th>Verfügbar</th><th>Ziel</th><th>Gesendet</th><th>Grund</th>
+            </tr></thead>
+            <tbody>${zeilen || '<tr><td colspan="8">Noch keine Regelschritte.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </details>
+    </div>`;
 }
 
 function renderEvDetail() {
@@ -1856,7 +2004,14 @@ function renderEvDetail() {
       ? sessionMarkup(currentOrLast, evSessions?.current ? 'Laufender Ladevorgang' : 'Letzter Ladevorgang')
       : '') +
     evStatsMarkup() +
-    evHistoryMarkup();
+    evHistoryMarkup() +
+    regelProtokollMarkup();
+
+  // Das Protokoll alle 15 s nachladen. Der Live-Strom aktualisiert die Ansicht
+  // im Sekundentakt — das Protokoll so oft zu holen wäre sinnlose Last.
+  if (Date.now() - evRegelungGeholtAt > 15_000) {
+    void loadEvRegelung();
+  }
 
   // Zeitraum-Umschalter
   body.querySelectorAll('#ev-range .vt-btn').forEach((btn) => {
@@ -1880,6 +2035,12 @@ async function loadEvSessions() {
     evSessions = await (await fetch('/api/ev/sessions?limit=50')).json();
   } catch (err) { console.error(err); evSessions = { current: null, sessions: [] }; }
 }
+async function loadEvRegelung() {
+  try {
+    evRegelung = await (await fetch('/api/ev/regelung')).json();
+    evRegelungGeholtAt = Date.now();
+  } catch (err) { console.error(err); }
+}
 async function loadEvStats() {
   try {
     evStats = await (await fetch(`/api/ev/stats?range=${encodeURIComponent(evStatsRange)}&date=${todayStr()}`)).json();
@@ -1890,7 +2051,7 @@ function openEvDetail() {
   el('ev-detail').hidden = false;
   document.body.style.overflow = 'hidden';
   renderEvDetail();
-  Promise.all([loadEvSessions(), loadEvStats()]).then(renderEvDetail);
+  Promise.all([loadEvSessions(), loadEvStats(), loadEvRegelung()]).then(renderEvDetail);
 }
 function closeEvDetail() {
   el('ev-detail').hidden = true;
