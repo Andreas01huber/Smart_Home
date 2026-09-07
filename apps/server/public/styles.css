@@ -1340,8 +1340,54 @@ main {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95em;
 }
 
-.ev-verlauf { margin-top: 0.9rem; }
-.ev-verlauf svg { width: 100%; height: 120px; display: block; }
+/* Verlauf eines Ladevorgangs. Die Flaeche ist die geladene Energie, die Treppe
+   die Leistung, der graue Streifen eine Pause - drei Aussagen, ein Bild. */
+.ev-verlauf { margin-top: 1rem; }
+.ev-verlauf svg {
+  width: 100%; height: auto; display: block; overflow: visible;
+}
+.vl-raster { stroke: var(--border); stroke-width: 1; }
+.vl-achse {
+  fill: var(--text-dim); font-size: 11px;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.vl-flaeche { fill: color-mix(in srgb, var(--ev, #22c55e) 18%, transparent); }
+.vl-linie {
+  fill: none; stroke: var(--ev, #22c55e); stroke-width: 2.5;
+  stroke-linejoin: round; stroke-linecap: round;
+}
+.vl-pause { fill: color-mix(in srgb, var(--text-dim) 12%, transparent); }
+.vl-ampere {
+  fill: var(--text-dim); font-size: 10.5px; font-weight: 600;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.vl-legende {
+  display: flex; flex-wrap: wrap; gap: 0.4rem 1.1rem;
+  margin: 0.6rem 0 0; font-size: 0.8rem; color: var(--text-dim);
+}
+.vl-legende span { display: inline-flex; align-items: center; gap: 0.35rem; }
+.vl-punkt { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+.vl-punkt.laden { background: var(--ev, #22c55e); }
+.vl-punkt.pause { background: color-mix(in srgb, var(--text-dim) 45%, transparent); }
+.vl-hinweis { margin-left: auto; font-style: italic; opacity: 0.85; }
+
+/* Zusammenklappbares Regelprotokoll: die Ueberschrift war zuvor ein h3 im
+   summary - das brach die Klickflaeche auf manchen Browsern auf. */
+#regel-details > summary {
+  cursor: pointer; list-style: none; padding: 0.35rem 0;
+  display: flex; align-items: center; gap: 0.45rem; min-height: 44px;
+}
+#regel-details > summary::-webkit-details-marker { display: none; }
+#regel-details > summary::before {
+  content: "›"; display: inline-block; font-size: 1.15rem; line-height: 1;
+  color: var(--accent-strong, var(--text-dim)); transition: transform 0.15s ease;
+}
+#regel-details[open] > summary::before { transform: rotate(90deg); }
+.regel-titel {
+  font-size: 0.86rem; font-weight: 640; letter-spacing: 0.02em;
+  text-transform: uppercase; color: var(--text-dim);
+}
 
 .regel-tabelle { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 0.6rem; }
 .regel-tabelle table { border-collapse: collapse; width: 100%; min-width: 44rem; font-size: 0.8rem; }

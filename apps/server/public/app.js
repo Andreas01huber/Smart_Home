@@ -1652,6 +1652,15 @@ async function refreshTodayKpis() {
 let evSessions = null;      // { current, sessions[] }
 let evRegelung = null;      // Zustand + Protokoll der Überschussregelung
 let evRegelungGeholtAt = 0; // Drosselung: das Protokoll braucht keine 2-s-Frische
+/**
+ * Ob das Regelprotokoll aufgeklappt ist.
+ *
+ * Muss ausserhalb der Ansicht leben: Die Detailseite wird bei jedem Messwert neu
+ * aufgebaut, also alle zwei Sekunden. Ein `<details>` ohne gemerkten Zustand
+ * klappte dabei sofort wieder zu — für den Benutzer sah es aus, als liesse es
+ * sich überhaupt nicht öffnen.
+ */
+let evProtokollOffen = false;
 let evStats = null;         // Antwort von /api/ev/stats
 let evStatsRange = 'month'; // day | week | month | year | total
 let evOpenSessionId = null; // aufgeklappter Ladevorgang in der Liste
@@ -1859,35 +1868,134 @@ function sessionMarkup(s, heading) {
  *
  * Genau das, was früher als fünf getrennte Ladevorgänge in der Liste stand:
  * die Stufen. Hier gehören sie hin — in die Session, nicht daneben.
+ *
+ * Gestaltung, und warum so:
+ *
+ *   - Treppe, keine geglättete Kurve. Die Ladeleistung springt zwischen zwei
+ *     Amperestufen, sie gleitet nicht. Eine weiche Linie würde etwas zeigen,
+ *     das nie passiert ist.
+ *   - Fläche unter der Treppe. Die Fläche IST die geladene Energie — das ist
+ *     die Grösse, um die es geht, und man sieht sie so ohne Nachdenken.
+ *   - Pausen als eigener Streifen statt als Loch in der Linie. Eine Lücke
+ *     liest sich wie fehlende Daten; ein grauer Balken liest sich wie eine
+ *     Pause, und genau das war es.
+ *   - Beschriftete Achse links, Uhrzeiten unten. Ohne Bezugsgrössen ist eine
+ *     Kurve nur Dekoration.
+ *   - Ampere nur dort, wo sich etwas geändert hat, und nur wenn Platz ist.
+ *     Zwölf Zahlen nebeneinander liest niemand.
  */
 function verlaufMarkup(s) {
   const stufen = s.verlauf ?? [];
   if (stufen.length < 2) return '';
-  const W = 640, H = 120, padL = 4, padB = 16, padT = 6;
+
+  // Eigene Maße für schmale Bildschirme. Ein 720 breites Bild auf 343 Pixel
+  // gequetscht macht aus 11-Pixel-Schrift 5 Pixel — lesbar ist das nicht. Mit
+  // einem kleineren Koordinatensystem bleibt die Schrift gross genug, und die
+  // Breitenprüfung weiter unten lässt automatisch weniger Ampere-Marken zu.
+  const schmal = typeof window !== 'undefined' && window.innerWidth < 560;
+  const W = schmal ? 380 : 720;
+  const H = schmal ? 215 : 210;
+  const padL = schmal ? 42 : 46;
+  const padR = schmal ? 8 : 14;
+  const padT = 16;
+  const padB = schmal ? 28 : 30;
+  const innenB = W - padL - padR;
+  const innenH = H - padT - padB;
+
   const von = new Date(s.startedAt).getTime();
   const bis = new Date(s.endedAt ?? stufen[stufen.length - 1].ab).getTime();
-  const spanne = Math.max(1, bis - von);
-  const max = Math.max(...stufen.map((p) => p.leistungW), 1000);
+  const spanne = Math.max(60_000, bis - von);
+  const roh = Math.max(...stufen.map((p) => p.leistungW), 1000);
+  // Auf eine runde Kilowattzahl aufrunden, damit die Achse lesbare Werte trägt.
+  const max = Math.ceil(roh / 1000) * 1000;
 
-  let pfad = '';
-  stufen.forEach((p, i) => {
-    const x = padL + ((new Date(p.ab).getTime() - von) / spanne) * (W - padL * 2);
-    const y = H - padB - (p.leistungW / max) * (H - padT - padB);
-    // Treppenform: die Leistung springt zwischen den Stufen, sie gleitet nicht.
-    pfad += i === 0 ? `M ${x.toFixed(1)} ${y.toFixed(1)}` : ` H ${x.toFixed(1)} V ${y.toFixed(1)}`;
+  const x = (zeit) => padL + ((zeit - von) / spanne) * innenB;
+  const y = (w) => padT + innenH - (w / max) * innenH;
+
+  // Abschnitte mit Anfang und Ende — daraus entstehen Treppe, Fläche und Pausen.
+  const abschnitte = stufen.map((p, i) => ({
+    von: new Date(p.ab).getTime(),
+    bis: i + 1 < stufen.length ? new Date(stufen[i + 1].ab).getTime() : bis,
+    leistungW: p.leistungW,
+    stromA: p.stromA,
+  }));
+
+  let treppe = '';
+  let flaeche = '';
+  abschnitte.forEach((a, i) => {
+    const x1 = x(a.von), x2 = x(a.bis), yy = y(a.leistungW);
+    treppe += i === 0 ? `M ${x1.toFixed(1)} ${yy.toFixed(1)}` : ` L ${x1.toFixed(1)} ${yy.toFixed(1)}`;
+    treppe += ` L ${x2.toFixed(1)} ${yy.toFixed(1)}`;
   });
-  pfad += ` H ${(W - padL).toFixed(1)}`;
+  flaeche = `M ${x(von).toFixed(1)} ${y(0).toFixed(1)} `
+    + abschnitte.map((a) => `L ${x(a.von).toFixed(1)} ${y(a.leistungW).toFixed(1)} L ${x(a.bis).toFixed(1)} ${y(a.leistungW).toFixed(1)}`).join(' ')
+    + ` L ${x(bis).toFixed(1)} ${y(0).toFixed(1)} Z`;
 
-  const wechsel = stufen.filter((p, i) => i > 0 && p.stromA !== stufen[i - 1].stromA).length;
+  // Pausen: Abschnitte ohne nennenswerte Leistung.
+  const pausen = abschnitte
+    .filter((a) => a.leistungW < 200 && a.bis > a.von)
+    .map((a) => `<rect class="vl-pause" x="${x(a.von).toFixed(1)}" y="${padT}" `
+      + `width="${Math.max(1, x(a.bis) - x(a.von)).toFixed(1)}" height="${innenH}" />`)
+    .join('');
+
+  // Waagrechte Hilfslinien mit Beschriftung.
+  const linien = [0, 0.5, 1]
+    .map((anteil) => {
+      const w = max * anteil;
+      const yy = y(w);
+      const text = schmal && w >= 1000 ? `${Math.round(w / 1000)} kW` : formatPower(w);
+      return `<line class="vl-raster" x1="${padL}" y1="${yy.toFixed(1)}" x2="${W - padR}" y2="${yy.toFixed(1)}" />`
+        + `<text class="vl-achse" x="${padL - 8}" y="${(yy + 4).toFixed(1)}" text-anchor="end">${esc(text)}</text>`;
+    })
+    .join('');
+
+  // Uhrzeiten unten: Anfang, Mitte, Ende.
+  const zeiten = [0, 0.5, 1]
+    .map((anteil) => {
+      const t = von + spanne * anteil;
+      const anker = anteil === 0 ? 'start' : anteil === 1 ? 'end' : 'middle';
+      return `<text class="vl-achse" x="${x(t).toFixed(1)}" y="${H - 10}" text-anchor="${anker}">${esc(formatClock(new Date(t)))}</text>`;
+    })
+    .join('');
+
+  // Ampere-Wechsel beschriften — aber nur, wo der Abschnitt breit genug ist.
+  const marken = abschnitte
+    .map((a, i) => {
+      if (a.stromA == null || a.leistungW < 200) return '';
+      if (i > 0 && abschnitte[i - 1].stromA === a.stromA) return '';
+      const breite = x(a.bis) - x(a.von);
+      if (breite < 34) return '';
+      const mx = x(a.von) + breite / 2;
+      return `<text class="vl-ampere" x="${mx.toFixed(1)}" y="${(y(a.leistungW) - 6).toFixed(1)}" text-anchor="middle">${a.stromA} A</text>`;
+    })
+    .join('');
+
+  const wechsel = abschnitte.filter((a, i) => i > 0 && a.stromA !== abschnitte[i - 1].stromA).length;
+  // Zusammenhängende Nullabschnitte sind EINE Pause. Sie einzeln zu zählen
+  // stünde im Widerspruch zum Bild, das nur einen grauen Streifen zeigt — und
+  // wäre genau die Kleinteiligkeit, die aus der Ansicht verschwinden sollte.
+  const pausenZahl = abschnitte.filter(
+    (a, i) => a.leistungW < 200 && !(i > 0 && abschnitte[i - 1].leistungW < 200),
+  ).length;
+  const beschreibung = `Ladeleistung von ${formatClock(s.startedAt)} bis ${formatClock(bis)}, `
+    + `Spitze ${formatPower(roh)}, ${wechsel} Änderungen des Ladestroms, ${pausenZahl} Pausen.`;
+
   return `
     <div class="ev-verlauf">
-      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
-           aria-label="Ladeleistung im Verlauf dieses Ladevorgangs">
-        <path d="${pfad}" fill="none" stroke="var(--ev, #22c55e)" stroke-width="2" />
+      <svg viewBox="0 0 ${W} ${H}" style="aspect-ratio:${W}/${H}"
+           role="img" aria-label="${esc(beschreibung)}">
+        ${pausen}
+        ${linien}
+        <path class="vl-flaeche" d="${flaeche}" />
+        <path class="vl-linie" d="${treppe}" />
+        ${marken}
+        ${zeiten}
       </svg>
-      <p class="card-more">
-        ${stufen.length} Leistungsstufen${wechsel > 0 ? `, davon ${wechsel} Änderung${wechsel === 1 ? '' : 'en'} des Ladestroms` : ''}
-        — alles innerhalb dieses einen Ladevorgangs. Spitze ${esc(formatPower(max))}.
+      <p class="vl-legende">
+        <span><i class="vl-punkt laden"></i>${esc(formatPower(roh))} Spitze</span>
+        ${pausenZahl > 0 ? `<span><i class="vl-punkt pause"></i>${pausenZahl} Pause${pausenZahl === 1 ? '' : 'n'}</span>` : ''}
+        <span>${wechsel} Mal Ladestrom angepasst</span>
+        <span class="vl-hinweis">alles ein Ladevorgang</span>
       </p>
     </div>`;
 }
@@ -1999,8 +2107,8 @@ function regelProtokollMarkup() {
 
   return `
     <div class="detail-section">
-      <details>
-        <summary><h3 style="display:inline">Regelprotokoll</h3></summary>
+      <details id="regel-details"${evProtokollOffen ? ' open' : ''}>
+        <summary><span class="regel-titel">Regelprotokoll</span></summary>
         <p class="card-more">
           Alle ${esc(String(r.naechsteRegelungInS))} s bis zur nächsten Prüfung.
           Gesetzt: ${r.gesetztA === 0 ? 'Pause' : `${esc(String(r.gesetztA))} A`},
@@ -2023,6 +2131,9 @@ function regelProtokollMarkup() {
 function renderEvDetail() {
   const body = el('ev-detail-body');
   if (!body || el('ev-detail').hidden) return;
+  // Die Ansicht wird bei jedem Messwert neu aufgebaut. Ohne das hier springt
+  // sie beim Lesen alle zwei Sekunden nach oben.
+  const scrollVorher = body.scrollTop;
   const ev = lastLive?.ev ?? { state: 'not-connected', configured: false };
   const currentOrLast = evSessions?.current ?? (evSessions?.sessions ?? [])[0] ?? null;
   body.innerHTML =
@@ -2038,6 +2149,16 @@ function renderEvDetail() {
   // im Sekundentakt — das Protokoll so oft zu holen wäre sinnlose Last.
   if (Date.now() - evRegelungGeholtAt > 15_000) {
     void loadEvRegelung();
+  }
+
+  if (scrollVorher > 0) body.scrollTop = scrollVorher;
+
+  // Aufgeklappt bleibt aufgeklappt, auch über den nächsten Messwert hinaus.
+  const regelDetails = body.querySelector('#regel-details');
+  if (regelDetails) {
+    regelDetails.addEventListener('toggle', () => {
+      evProtokollOffen = regelDetails.open;
+    });
   }
 
   // Volladung ein-/ausschalten
