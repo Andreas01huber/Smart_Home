@@ -1455,14 +1455,21 @@ main {
 .ev-art span { font-size: 0.72rem; opacity: 0.85; }
 .ev-art:hover:not(.aktiv):not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
 .ev-art:disabled { opacity: 0.55; cursor: default; }
+/* Der aktive Knopf traegt den vollen Akzentton, nicht nur eine hellere
+   Flaeche. Vorher war der Unterschied eine Spur Helligkeit - auf einem
+   Telefon im Sonnenlicht sah man nicht, was gerade gilt. */
 .ev-art.aktiv {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.14), 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
+  background: var(--accent-strong);
+  color: var(--on-accent);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.22);
 }
+.ev-art.aktiv span { opacity: 0.9; }
+.ev-art-haken { margin-right: 0.3rem; vertical-align: -1px; }
+/* Im Handbetrieb wird Netzstrom gekauft — dann traegt der aktive Knopf den
+   Warnton und nicht den Akzent. Die Farbe sagt, was passiert. */
 .ev-betrieb.netzstrom .ev-art.aktiv {
-  color: var(--warn-text);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.14), 0 0 0 1px color-mix(in srgb, var(--stale) 60%, transparent);
+  background: var(--stale);
+  color: #1b1206;
 }
 .ev-art:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
@@ -1493,6 +1500,11 @@ main {
 /* Der Regler. Die Zahl steht gross darueber und nicht als Marke am Griff:
    Am Telefon liegt der Daumen genau auf dem Griff und verdeckt sie dort. */
 .ev-regler { margin-top: 0.85rem; }
+/* Waehrend der Rueckfrage steht der Regler schon da: Man soll sehen und
+   einstellen koennen, worauf man sich einlaesst, statt erst zuzusagen,
+   nachzusehen und wieder abzubrechen. Leicht zurueckgenommen, weil er noch
+   nichts stellt. */
+.ev-regler.vorschau { opacity: 0.92; }
 .ev-regler-kopf { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
 .ev-regler-wert { font-size: 0.95rem; color: var(--text-dim); }
 .ev-regler-wert b {
@@ -1632,6 +1644,20 @@ main {
 /* Wer Bewegung nicht mag, bekommt keine. Die Geste bleibt, nur ohne Gleiten. */
 @media (prefers-reduced-motion: reduce) {
   .ev-wisch-griff, .ev-wisch::before { transition: none; }
+}
+
+/* Wisch oder Knopf — entschieden ueber die Art des Zeigegeraets, nicht ueber
+   die Fensterbreite. Ein schmales Browserfenster am Schreibtisch bleibt ein
+   Schreibtisch, und dort ist Ziehen mit der Maus umstaendlich.
+
+   Die Selektoren nennen beide Klassen, weil `.ev-wisch` und `.ev-stopp` weiter
+   oben schon ein `display` setzen — mit nur einer Klasse gewaenne die spaetere
+   Regel, und beide Bedienformen staenden nebeneinander. */
+.ev-wisch.nur-tippen { display: none; }
+.ev-stopp.nur-zeigen { display: block; }
+@media (pointer: coarse) {
+  .ev-wisch.nur-tippen { display: flex; }
+  .ev-stopp.nur-zeigen { display: none; }
 }
 
 .ev-betrieb-text {

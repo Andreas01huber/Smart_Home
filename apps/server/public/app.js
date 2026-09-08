@@ -1899,10 +1899,14 @@ function betriebsartMarkup(ev) {
   const dose = r.anschluss;
   const gestoppt = r.gestoppt === true;
 
+  // Der aktive Knopf traegt einen Haken und den vollen Akzentton. Vorher war
+  // er nur eine Spur heller als der andere — auf einem Telefon im Sonnenlicht
+  // sah man nicht, was gerade gilt.
+  const haken = `<svg class="ev-art-haken" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const knoepfe = EV_ARTEN.map((a) => `
     <button type="button" class="ev-art${a.id === art ? ' aktiv' : ''}" data-art="${a.id}"
             aria-pressed="${a.id === art}">
-      <b>${a.name}</b><span>${a.kurz}</span>
+      <b>${a.id === art ? haken : ''}${a.name}</b><span>${a.kurz}</span>
     </button>`).join('');
 
   // Die Rückfrage steht an der Stelle, an der sonst der Regler stünde — dort
@@ -1922,9 +1926,13 @@ function betriebsartMarkup(ev) {
   // Einen Regler bis 16 A anzubieten und dann still auf 10 zu kappen waere ein
   // Versprechen, das die App nicht haelt.
   const reglerMaxA = Math.min(maxA, r.haushaltMaxA ?? maxA);
-  const regler = art !== 'manuell' || evNachfrage || gestoppt
-    ? ''
-    : reglerMarkup(Math.min(schieber, reglerMaxA), minA, reglerMaxA, dose);
+  // Der Regler steht auch waehrend der Rueckfrage da. Wer wissen will, worauf
+  // er sich einlaesst, soll den Wert vorher sehen und einstellen koennen —
+  // nicht erst zusagen, dann nachsehen und wieder abbrechen muessen.
+  const reglerSichtbar = (art === 'manuell' || evNachfrage) && !gestoppt;
+  const regler = reglerSichtbar
+    ? reglerMarkup(Math.min(schieber, reglerMaxA), minA, reglerMaxA, dose, evNachfrage)
+    : '';
 
   const erklaerung = art === 'intelligent'
     ? 'Es wird nur geladen, was Sonne und Speicher hergeben. Das Auto verursacht keinen Netzbezug.'
@@ -1938,28 +1946,26 @@ function betriebsartMarkup(ev) {
       <p class="ev-betrieb-text">${esc(gestoppt ? 'Das Laden ist von Hand beendet. Die eingestellte Betriebsart gilt wieder, sobald du fortsetzt.' : erklaerung)}</p>
       ${dosenHinweis(ev)}
       ${umsteckHinweis(ev)}
-      ${wischMarkup(gestoppt)}
+      ${beendenMarkup(gestoppt)}
     </div>`;
 }
 
 /**
- * Der Wischschalter zum Beenden — festhalten und nach rechts ziehen.
+ * Laden beenden — am Telefon ein Wisch, am Schreibtisch ein Knopf.
  *
- * Ein Knopf wird versehentlich getroffen, ein Wisch nicht. Das Laden mitten im
- * Vorgang abzubrechen ist genau so eine Handlung: selten gewollt, ärgerlich
- * wenn ungewollt. Die Geste kostet eine halbe Sekunde und schliesst den
- * Fehlgriff aus — anders als eine Rückfrage, die man wegklickt, ohne sie
- * gelesen zu haben.
+ * Beides steht im Markup, sichtbar ist immer nur eines. Die Anzeige entscheidet
+ * über `pointer: coarse` (siehe styles.css), also über die Art des Zeigegeräts
+ * und nicht über die Fensterbreite: Ein schmales Browserfenster am Schreibtisch
+ * bleibt ein Schreibtisch, und dort ist Ziehen mit der Maus umständlich.
  *
- * Aufbau: eine Schiene, darin ein Griff, der sich mit dem Finger mitbewegt.
- * Ab neunzig Prozent der Strecke löst er aus, darunter gleitet er zurück. Der
- * Text dahinter wird beim Ziehen blasser — man sieht, dass man etwas erreicht,
- * bevor es passiert.
+ * Der Wisch ist am Telefon richtig, weil man dort mit dem Daumen scrollt und
+ * einen Knopf leicht streift. Mit der Maus trifft man, was man anklickt.
  */
-function wischMarkup(gestoppt) {
+function beendenMarkup(gestoppt) {
+  const wort = gestoppt ? 'Laden fortsetzen' : 'Laden beenden';
   return `
-    <div class="ev-wisch${gestoppt ? ' an' : ''}" id="ev-wisch"
-         role="button" tabindex="0" aria-label="${gestoppt ? 'Laden fortsetzen' : 'Laden beenden'}">
+    <div class="ev-wisch nur-tippen${gestoppt ? ' an' : ''}" id="ev-wisch"
+         role="button" tabindex="0" aria-label="${wort}">
       <span class="ev-wisch-text">${gestoppt ? 'Zum Fortsetzen wischen' : 'Zum Beenden wischen'}</span>
       <span class="ev-wisch-griff" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
@@ -1967,7 +1973,9 @@ function wischMarkup(gestoppt) {
           <path d="M5 12h13M13 6l6 6-6 6" />
         </svg>
       </span>
-    </div>`;
+    </div>
+    <button type="button" class="ev-stopp nur-zeigen${gestoppt ? ' an' : ''}"
+            id="ev-stopp" data-an="${gestoppt}">${wort}</button>`;
 }
 
 /**
@@ -1981,7 +1989,7 @@ function wischMarkup(gestoppt) {
  * Annahme: An der Haushaltssteckdose sind zehn Ampere 2,3 kW, an der
  * Starkstromdose 6,9 kW. Dieselbe Zahl am Regler, drei Mal so viel Leistung.
  */
-function reglerMarkup(wert, minA, maxA, dose) {
+function reglerMarkup(wert, minA, maxA, dose, vorschau = false) {
   const proA = dose?.wattProAmpere || 693;
   const stufen = [];
   for (let a = minA; a <= maxA; a++) {
@@ -1996,7 +2004,7 @@ function reglerMarkup(wert, minA, maxA, dose) {
     );
   }
   return `
-    <div class="ev-regler">
+    <div class="ev-regler${vorschau ? ' vorschau' : ''}">
       <div class="ev-regler-kopf">
         <span class="ev-regler-wert"><b id="ev-a-wert">${wert}</b> A</span>
         <span class="ev-regler-kw" id="ev-kw-wert">${formatPower(wert * proA)}</span>
@@ -2388,6 +2396,13 @@ function renderEvDetail() {
 
   const wisch = body.querySelector('#ev-wisch');
   if (wisch) verdrahteWisch(wisch);
+
+  const stopp = body.querySelector('#ev-stopp');
+  if (stopp) {
+    stopp.addEventListener('click', () => {
+      void sendeStopp(stopp.getAttribute('data-an') !== 'true');
+    });
+  }
 
 
   const bestaetigen = body.querySelector('#ev-bestaetigen');

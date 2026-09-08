@@ -24,6 +24,7 @@ import {
 import { FroniusLocalConnector, VictronModbusConnector, TuyaEvseConnector } from '@energy/connectors';
 
 import { ladeanschlussAus, loadConfig } from '../apps/server/src/config.ts';
+import { ladeDose } from '../apps/server/src/wallbox-speicher.ts';
 
 const config = loadConfig();
 const u = config.ueberschuss;
@@ -95,8 +96,15 @@ const ladung = batterien.reduce((s, b) => s + (b.chargeW ?? 0), 0);
 const entladung = batterien.reduce((s, b) => s + (b.dischargeW ?? 0), 0);
 const haus = pv + (netzbezug ?? 0) - (einspeisung ?? 0) + entladung - ladung;
 
+// Dieselbe Dose wie der Regeldienst, sonst rechnet die Probe mit 400 V, wo
+// 229 V anliegen — und meldet einen Mindestladestrom, den es dort nicht gibt.
+const gemerkteDose = ladeDose(resolve(process.cwd(), 'data'));
+const dose = gemerkteDose === null
+  ? ladeanschlussAus(config)
+  : { phasen: gemerkteDose.phasen, spannungV: gemerkteDose.spannungV };
+
 const parameter: Reglerparameter = {
-  anschluss: ladeanschlussAus(config),
+  anschluss: dose,
   minA: 6,
   maxA: 16,
   schrittA: 1,
