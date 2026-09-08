@@ -377,6 +377,47 @@ function setFlow(id, active, reverse, watts, colorClass) {
 
 const FLOW_MIN_W = 40;
 
+/**
+ * Der Hausverbrauch, wie ihn ein Mensch meint: ohne das Auto.
+ *
+ * Die Wallbox hängt hinter dem Hauszähler, ihre Leistung steckt also im
+ * gemessenen Hausverbrauch mit drin. Ohne diese Trennung springt "Haus" von
+ * 1,5 auf 11,5 kW, sobald das Auto lädt — und in der Hausansicht steht das Auto
+ * dann zweimal da: einmal als eigenes Gerät und einmal im Haus.
+ *
+ * Den Abzug macht der Server (`hausOhneAuto`), weil dort beide Messwerte samt
+ * ihrem Alter liegen. Hier steht nur der Rückfall auf den ungekürzten Wert,
+ * falls eine ältere Fassung des Servers antwortet.
+ */
+function hausW(d) {
+  return d?.hausOhneAuto?.valueW ?? d?.house?.valueW ?? null;
+}
+
+/** Was gerade ins Auto geht — 0, wenn nichts oder unbekannt. */
+function autoW(d) {
+  return d?.hausOhneAuto?.autoAbgezogenW ?? 0;
+}
+
+/**
+ * Die Zeile unter dem Hausverbrauch.
+ *
+ * Solange das Auto lädt, ist das die wichtigste Auskunft der ganzen Karte:
+ * Der grosse Wert ist ohne Auto, und hier steht, wie viel zusätzlich hinein
+ * geht. Ohne diesen Satz wirkt die Zahl darüber schlicht falsch, wenn jemand
+ * gleichzeitig den Netzzähler ansieht.
+ *
+ * Passen Ladewert und Zähler nicht zusammen — die Wallbox meldet über die Cloud
+ * und hinkt manchmal hinterher —, wird nichts abgezogen und auch nichts
+ * behauptet.
+ */
+function hausUntertitel(d) {
+  const auto = autoW(d);
+  if (auto > FLOW_MIN_W) return `Ohne Auto · ${formatPower(auto)} gehen zusätzlich ins Auto`;
+  const heute = lastToday?.totals?.houseConsumptionWh;
+  const auto0 = lastToday?.totals?.evChargeWh ?? 0;
+  return heute != null ? `Heute ${formatEnergy(Math.max(0, heute - auto0))} ohne Auto` : 'Aktueller Verbrauch';
+}
+
 // ── Ansicht des Energieflusses: Diagramm oder Haus ────────────────────
 const FLOW_VIEWS = [
   ['diagram', 'Diagramm'],
@@ -513,7 +554,7 @@ function renderScene(d) {
   ensureScene();
 
   const pv = d.solar.valueW;
-  const house = d.house.valueW;
+  const house = hausW(d);
   const imp = d.gridImport.valueW ?? 0;
   const exp = d.gridExport.valueW ?? 0;
   const bats = d.batteries.filter((b) => !b.unavailableReason);
@@ -590,7 +631,7 @@ function renderFlow(d) {
 
 function renderDiagram(d) {
   const pv = d.solar.valueW;
-  const house = d.house.valueW;
+  const house = hausW(d);
   const imp = d.gridImport.valueW ?? 0;
   const exp = d.gridExport.valueW ?? 0;
   const bats = d.batteries.filter((b) => !b.unavailableReason);
@@ -766,7 +807,7 @@ function renderKpis(d, today) {
   const net = d.storageAggregate?.netPowerW ?? 0;
   const gi = d.gridImport.valueW ?? 0, ge = d.gridExport.valueW ?? 0;
   const pvP = formatPowerParts(d.solar.valueW);
-  const houseP = formatPowerParts(d.house.valueW);
+  const houseP = formatPowerParts(hausW(d));
   const batP = formatPowerParts(Math.abs(net));
   const gridP = formatPowerParts(Math.max(gi, ge));
   const aut = today?.derived?.autarkyPercent;
@@ -864,7 +905,7 @@ function buildNow(d) {
   const pv = formatPowerParts(d.solar.valueW);
   const invRows = (d.inverters ?? []).map((inv, idx) =>
     `<div class="breakdown-row"><span><img class="inv-mini" src="${ICON.inverter}" alt="" />${esc(inv.name)}</span><b data-f="inv-${idx}"></b></div>`).join('');
-  const house = formatPowerParts(d.house.valueW);
+  const house = formatPowerParts(hausW(d));
   const agg = d.storageAggregate;
   const hasAgg = !!(agg && agg.socPercent !== null);
   const g = formatPowerParts(0);
@@ -960,10 +1001,9 @@ function updateNow(d) {
   });
   setClassText(root, 'solar-meta', metaClass(d.solar.quality), metaText(d.solar));
 
-  const house = formatPowerParts(d.house.valueW);
+  const house = formatPowerParts(hausW(d));
   setF(root, 'house-value', house.value); setF(root, 'house-unit', house.unit);
-  const houseToday = lastToday?.totals?.houseConsumptionWh;
-  setF(root, 'house-sub', houseToday != null ? `Heute ${formatEnergy(houseToday)}` : 'Aktueller Verbrauch');
+  setF(root, 'house-sub', hausUntertitel(d));
   setClassText(root, 'house-meta', metaClass(d.house.quality), metaText(d.house));
 
   d.batteries.forEach((b, i) => {
@@ -1661,6 +1701,15 @@ let evRegelungGeholtAt = 0; // Drosselung: das Protokoll braucht keine 2-s-Frisc
  * sich überhaupt nicht öffnen.
  */
 let evProtokollOffen = false;
+/**
+ * Der Ampere-Wert, den der Schieberegler gerade zeigt.
+ *
+ * Aus demselben Grund ausserhalb der Ansicht wie `evProtokollOffen`: Die Seite
+ * wird alle zwei Sekunden neu gebaut. Ohne diesen Merker spränge der Regler
+ * beim Ziehen ständig auf den Serverwert zurück — man käme nie ans Ziel.
+ * `null` heisst "noch nichts angefasst, nimm den Wert vom Server".
+ */
+let evSchieberA = null;
 let evStats = null;         // Antwort von /api/ev/stats
 let evStatsRange = 'month'; // day | week | month | year | total
 let evOpenSessionId = null; // aufgeklappter Ladevorgang in der Liste
@@ -1770,11 +1819,22 @@ function regelKopfMarkup(ev) {
   if (!r) return '';
   const laedt = r.zustand === 'laedt';
   const pausiert = String(r.zustand).startsWith('pausiert');
-  const klasse = laedt ? 'ok' : pausiert || r.zustand === 'gestoert' ? 'warn' : '';
+  const art = r.betriebsart ?? (r.volladung ? 'volladung' : 'autark');
+  // Im Handbetrieb ist "Lädt mit Überschuss" schlicht falsch — da wird
+  // notfalls Netzstrom gekauft. Und die Farbe darf dann nicht Grün sein:
+  // Grün heisst in dieser App "alles aus eigener Erzeugung".
+  const titel = laedt && art === 'volladung'
+    ? 'Volladung läuft'
+    : laedt && art === 'manuell'
+      ? 'Lädt mit festem Ladestrom'
+      : (REGEL_KOPF[r.zustand] ?? 'Zustand unbekannt');
+  const klasse = laedt && art !== 'autark' ? 'warn'
+    : laedt ? 'ok'
+    : pausiert || r.zustand === 'gestoert' ? 'warn' : '';
   const nurBeobachtet = r.modus === 'beobachten';
   return `
     <div class="ev-kopf ${esc(klasse)}">
-      <span class="ev-kopf-titel">${esc(REGEL_KOPF[r.zustand] ?? 'Zustand unbekannt')}</span>
+      <span class="ev-kopf-titel">${esc(titel)}</span>
       <span class="ev-kopf-grund">${esc(r.grund ?? '')}</span>
       ${nurBeobachtet ? `<span class="ev-kopf-hinweis">Beobachtungsmodus — die Wallbox wird noch nicht gestellt. Umschalten in config.json unter <code>ueberschussladen.modus</code>.</span>` : ''}
       ${r.modus === 'aus' ? `<span class="ev-kopf-hinweis">Die Regelung ist abgeschaltet. Die Wallbox lädt mit ihrer eigenen Einstellung.</span>` : ''}
@@ -1782,29 +1842,76 @@ function regelKopfMarkup(ev) {
 }
 
 /**
- * Der Knopf für die erzwungene Volladung.
+ * Die drei Betriebsarten.
  *
- * Absichtlich unbequem formuliert. Er hebelt die eine Regel aus, für die diese
- * ganze Regelung gebaut wurde — das soll man beim Drücken wissen und beim
- * Hinsehen erkennen. Deshalb steht im eingeschalteten Zustand auch dauerhaft
- * da, dass gerade Netzstrom gekauft wird.
+ * Als Segmentschalter und nicht als drei lose Knöpfe: Die Arten schliessen
+ * einander aus, und ein Segmentschalter sagt das schon durch seine Form. Drei
+ * einzelne Knöpfe liessen offen, ob man auch zwei drücken kann, und man sähe
+ * dem Bild nicht an, welcher gerade gilt.
+ *
+ * Darunter genau ein Satz zur aktiven Art. Zwei der drei kaufen bewusst
+ * Netzstrom — das muss dastehen, solange sie laufen, nicht nur beim Drücken.
  */
-function volladungMarkup(ev) {
+const EV_ARTEN = [
+  { id: 'autark', name: 'Autark', kurz: 'Nur Sonne' },
+  { id: 'manuell', name: 'Manuell', kurz: 'Fester Strom' },
+  { id: 'volladung', name: 'Volladung', kurz: 'Maximum' },
+];
+
+function betriebsartMarkup(ev) {
   const r = ev.regelung;
   if (!r || r.modus === 'aus') return '';
-  const an = r.volladung === true;
-  return `
-    <div class="ev-volladung ${an ? 'an' : ''}">
-      <div class="ev-volladung-text">
-        <b>${an ? 'Volladung läuft' : 'Volladung erzwingen'}</b>
-        <span>${an
-          ? 'Es wird bis zur Obergrenze geladen — auch aus dem Netz. Endet, wenn du sie ausschaltest oder das Auto absteckst.'
-          : 'Lädt mit voller Leistung, unabhängig von Sonne und Speicher. Kauft bewusst Netzstrom — für den Fall, dass das Auto morgen früh voll sein muss.'}</span>
+  const art = r.betriebsart ?? (r.volladung ? 'volladung' : 'autark');
+  const minA = r.minA || 6;
+  const maxA = r.maxA || 16;
+  const schieber = evSchieberA ?? (r.manuellA >= minA ? r.manuellA : Math.round((minA + maxA) / 2));
+  const netzstrom = art !== 'autark';
+
+  const knoepfe = EV_ARTEN.map((a) => `
+    <button type="button" class="ev-art${a.id === art ? ' aktiv' : ''}" data-art="${a.id}"
+            aria-pressed="${a.id === art}">
+      <b>${a.name}</b><span>${a.kurz}</span>
+    </button>`).join('');
+
+  const erklaerung =
+    art === 'autark'
+      ? 'Es wird nur geladen, was Sonne und freigegebene Speicherleistung hergeben. Das Auto verursacht keinen Netzbezug.'
+      : art === 'volladung'
+        ? `Lädt mit ${maxA} A, dem Höchstwert von Wallbox und Fahrzeug — unabhängig von Sonne und Speicher. Endet, wenn du zurückschaltest oder das Auto absteckst.`
+        : `Fest auf ${schieber} A. Reicht die Sonne nicht, kommt der Rest aus dem Netz. Endet, wenn du zurückschaltest oder das Auto absteckst.`;
+
+  // Der Schieberegler steht nur da, wenn er auch etwas tut. Ein ausgegrauter
+  // Regler in den anderen Arten wäre ein Angebot, das nicht gilt.
+  const regler = art !== 'manuell' ? '' : `
+    <div class="ev-regler">
+      <div class="ev-regler-kopf">
+        <span class="ev-regler-wert"><b id="ev-a-wert">${schieber}</b> A</span>
+        <span class="ev-regler-kw" id="ev-kw-wert">${formatPower(ampereZuWatt(schieber, r))}</span>
       </div>
-      <button class="btn-primary" id="volladung-btn" type="button" data-an="${an}">
-        ${an ? 'Beenden' : 'Volladung starten'}
-      </button>
+      <input type="range" id="ev-schieber" min="${minA}" max="${maxA}" step="1" value="${schieber}"
+             aria-label="Ladestrom in Ampere" />
+      <div class="ev-regler-skala"><span>${minA} A</span><span>${maxA} A</span></div>
     </div>`;
+
+  return `
+    <div class="ev-betrieb ${netzstrom ? 'netzstrom' : ''}">
+      <div class="ev-arten" role="group" aria-label="Betriebsart">${knoepfe}</div>
+      ${regler}
+      <p class="ev-betrieb-text">${esc(erklaerung)}</p>
+    </div>`;
+}
+
+/**
+ * Was ein Ladestrom an Leistung bedeutet.
+ *
+ * Kommt aus derselben Umrechnung wie überall sonst: dreiphasig an 400 V. Der
+ * Wert dient der Vorschau am Regler — was wirklich fliesst, steht darüber in
+ * "Ladeleistung" und ist erfahrungsgemäss etwas niedriger, weil das Fahrzeug
+ * seine eigene Grenze hat.
+ */
+function ampereZuWatt(ampere, r) {
+  if (r && r.zielA === ampere && r.zielLeistungW > 0) return r.zielLeistungW;
+  return Math.round(ampere * Math.sqrt(3) * 400);
 }
 
 /**
@@ -1829,12 +1936,12 @@ function evLiveMarkup(ev) {
         ${tile('Ladestrom', formatLadestrom(ev), !charging)}
         ${tile('Verfügbare Leistung', r ? formatPower(r.verfuegbarW) : '—', !r)}
         ${tile('PV-Produktion', live.solar?.valueW == null ? '—' : formatPower(live.solar.valueW), true)}
-        ${tile('Haus ohne Auto', r?.hausOhneAutoW == null ? '—' : formatPower(r.hausOhneAutoW), true)}
+        ${tile('Haus ohne Auto', hausW(live) == null ? '—' : formatPower(hausW(live)), true)}
         ${tile('Aus den Speichern', r ? formatPower(r.speicherbeitragW) : '—', true)}
         ${tile('Netz', netzW >= 0 ? `${formatPower(netzW)} Bezug` : `${formatPower(-netzW)} Einspeisung`, true, netzW > 100 ? 'bad' : 'ok')}
         ${tile('Fahrzeug', ev.vehicleConnected === true ? 'Angesteckt' : ev.vehicleConnected === false ? 'Nicht angesteckt' : '—', ev.vehicleConnected !== true, ev.vehicleConnected === true ? 'ok' : '')}
       </div>
-      ${volladungMarkup(ev)}
+      ${betriebsartMarkup(ev)}
       ${ev.socPercent == null ? `<p class="card-more">Der Fahrzeug-Akkustand wird beim Wechselstromladen technisch nicht übertragen (IEC 61851) — er kann nur aus dem Fahrzeug selbst kommen.</p>` : ''}
       ${ev.faultText ? `<p class="card-more" style="color:var(--danger)">${esc(ev.faultText)}</p>` : ''}
     </div>`;
@@ -2161,26 +2268,33 @@ function renderEvDetail() {
     });
   }
 
-  // Volladung ein-/ausschalten
-  const volladung = body.querySelector('#volladung-btn');
-  if (volladung) {
-    volladung.addEventListener('click', async () => {
-      const an = volladung.getAttribute('data-an') !== 'true';
-      volladung.disabled = true;
-      try {
-        await fetch('/api/ev/volladung', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ an }),
-        });
-        // Der Regler rechnet sofort neu — kurz warten, dann frisch anzeigen.
-        await new Promise((f) => setTimeout(f, 800));
-        await loadEvRegelung();
-        renderEvDetail();
-      } catch (err) {
-        console.error(err);
-        volladung.disabled = false;
-      }
+  // Betriebsart umschalten
+  body.querySelectorAll('.ev-art').forEach((knopf) => {
+    knopf.addEventListener('click', () => {
+      const art = knopf.getAttribute('data-art');
+      // Beim Wechsel in den Handbetrieb gilt der Wert, der am Regler steht —
+      // sonst müsste man erst umschalten und dann noch einmal schieben.
+      void sendeBetriebsart(art, art === 'manuell' ? evSchieberA : null);
+    });
+  });
+
+  // Schieberegler für den Ladestrom
+  const schieber = body.querySelector('#ev-schieber');
+  if (schieber) {
+    // Beim Ziehen nur die Anzeige mitführen. Jeden Zwischenwert an die Wallbox
+    // zu schicken hiesse: ein Dutzend Tuya-Befehle für eine Bewegung, und das
+    // Fahrzeug käme dem Sollwert ohnehin nicht hinterher.
+    schieber.addEventListener('input', () => {
+      const a = Number(schieber.value);
+      evSchieberA = a;
+      const wert = body.querySelector('#ev-a-wert');
+      const kw = body.querySelector('#ev-kw-wert');
+      if (wert) wert.textContent = String(a);
+      if (kw) kw.textContent = formatPower(ampereZuWatt(a, evRegelung));
+    });
+    // Erst beim Loslassen wird gestellt.
+    schieber.addEventListener('change', () => {
+      void sendeBetriebsart('manuell', Number(schieber.value));
     });
   }
 
@@ -2206,6 +2320,31 @@ async function loadEvSessions() {
     evSessions = await (await fetch('/api/ev/sessions?limit=50')).json();
   } catch (err) { console.error(err); evSessions = { current: null, sessions: [] }; }
 }
+/**
+ * Betriebsart an den Server schicken und die Ansicht sofort nachziehen.
+ *
+ * Die kurze Wartezeit ist kein Zieren: Der Regeldienst rechnet auf den Befehl
+ * hin neu und schickt seinen Tuya-Befehl hinaus. Ohne sie zeigte die Seite noch
+ * den Zustand von davor, und es sähe aus, als hätte der Knopf nichts getan.
+ */
+async function sendeBetriebsart(art, ampere) {
+  const bedienung = document.querySelectorAll('.ev-art, #ev-schieber');
+  bedienung.forEach((x) => { x.disabled = true; });
+  try {
+    await fetch('/api/ev/betriebsart', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(ampere === null || ampere === undefined ? { art } : { art, ampere }),
+    });
+    await new Promise((f) => setTimeout(f, 800));
+    await loadEvRegelung();
+    renderEvDetail();
+  } catch (err) {
+    console.error(err);
+    bedienung.forEach((x) => { x.disabled = false; });
+  }
+}
+
 async function loadEvRegelung() {
   try {
     evRegelung = await (await fetch('/api/ev/regelung')).json();

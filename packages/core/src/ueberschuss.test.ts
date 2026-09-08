@@ -515,3 +515,107 @@ describe('Entladespielraum nur bis zum Nachweis', () => {
     assert.equal(Math.round(e.verfuegbarW), 800);
   });
 });
+
+describe('Widersprüchliche Messwerte: Auto gegen Hauszähler', () => {
+  /**
+   * Der Fall aus dem Protokoll vom 8.9., 16:2x Uhr: Das Auto hatte längst
+   * aufgehört, der Hauszähler zeigte 1,5 kW — die Tuya-Cloud meldete aber
+   * weiter 9042 W. Die Rechnung addierte diese 9 kW als "läuft ja schon" und
+   * kam auf 14,4 kW verfügbar, bei 5,7 kW Sonne.
+   */
+  function widerspruch(gemeldetesAutoW: number, hausW: number): Messwerte {
+    return {
+      pvW: 5663,
+      hausMitAutoW: hausW,
+      netzbezugW: 0,
+      netzeinspeisungW: 0,
+      evLeistungW: gemeldetesAutoW,
+      evAngesteckt: true,
+      evStromA: 16,
+      speicher: [
+        { id: GROSS, name: 'Gross', socPercent: 100, ladenW: 4200, entladenW: 0 },
+      ],
+      messalterMs: 1000,
+      wallboxErreichbar: true,
+    };
+  }
+
+  it('deckelt den Ladewert am Hausverbrauch', () => {
+    const e = berechneLadeziel(widerspruch(9042, 1500), parameter());
+    // Ohne Deckel: 9042 + 0 - 0 - 200 + 4200 = 13 042 W und damit 16 A.
+    // Mit Deckel: 1500 statt 9042, also 5500 W und 7 A.
+    assert.ok(
+      e.verfuegbarW < 6000,
+      `${Math.round(e.verfuegbarW)} W verfügbar — der veraltete Ladewert wurde geglaubt`,
+    );
+    assert.equal(e.zielA, 7);
+  });
+
+  it('lässt einen stimmigen Ladewert unangetastet', () => {
+    // Auto 10 200 W, Haus 11 700 W: passt zusammen, es wird nichts gedeckelt.
+    const e = berechneLadeziel(widerspruch(10_200, 11_700), parameter());
+    assert.equal(Math.round(e.verfuegbarW), 10_200 - 200 + 4200);
+    assert.equal(e.hausOhneAutoW, 1500);
+  });
+
+  it('behauptet bei Widerspruch kein leeres Haus', () => {
+    // Vorher stand im Protokoll minutenlang "Haus ohne Auto 0 W" — das war kein
+    // leeres Haus, sondern der Widerspruch zwischen den beiden Zaehlern. Wer
+    // ihn nicht aufloesen kann, soll ihn auch nicht ueberdecken: null wird in
+    // der Anzeige zu einem Strich, 0 zu einer Behauptung.
+    const e = berechneLadeziel(widerspruch(9042, 1500), parameter());
+    assert.equal(e.hausOhneAutoW, null);
+  });
+});
+
+describe('Eingefrorener Leistungswert der Wallbox', () => {
+  /**
+   * Gemessen am 8.9. um 16:50: `charge_cur_set` fiel auf 6 A, `power_total`
+   * meldete minutenlang unverändert 10 084 W. Die Regelung glaubte, sechs
+   * Kilowatt flössen bereits, plante entsprechend gross — und musste jedes Mal
+   * mit der Notbremse zurück.
+   */
+  function eingefroren(gesetztA: number): Messwerte {
+    return {
+      pvW: 5000,
+      hausMitAutoW: 9500,
+      netzbezugW: 0,
+      netzeinspeisungW: 0,
+      evLeistungW: 10_084,
+      evAngesteckt: true,
+      evStromA: gesetztA,
+      speicher: [],
+      messalterMs: 1000,
+      wallboxErreichbar: true,
+    };
+  }
+
+  it('glaubt nicht mehr, als die Strombegrenzung hergibt', () => {
+    const e = berechneLadeziel(eingefroren(6), parameter());
+    // Mit dem eingefrorenen Wert: 10 084 - 200 = 9884 W und damit 14 A.
+    // Mit der Schranke: 6 A sind höchstens 4157 W, also 3957 W und 5 A —
+    // zu wenig für den Mindestladestrom, aber die Wallbox lädt schon, deshalb
+    // bleibt sie beim Minimum stehen statt zu springen.
+    assert.ok(
+      e.zielA <= 6,
+      `Ziel ${e.zielA} A — der eingefrorene Leistungswert wurde geglaubt`,
+    );
+  });
+
+  it('lässt einen stimmigen Wert unangetastet', () => {
+    // 15 A und 10 084 W ergeben 388 V — eine mögliche Netzspannung, also passt
+    // das Paar zusammen und die Messung gilt. Der Hauszähler muss dafür gross
+    // genug sein, sonst greift die andere Schranke.
+    const stimmig: Messwerte = { ...eingefroren(15), hausMitAutoW: 11_500 };
+    const e = berechneLadeziel(stimmig, parameter());
+    assert.equal(Math.round(e.verfuegbarW), 10_084 - 200);
+  });
+
+  it('nimmt die Strombegrenzung auch dann, wenn das Haus grösser ist', () => {
+    // Der Hauszähler allein würde hier nichts merken: 10 084 passen bequem in
+    // 12 000 W hinein. Erst die Strombegrenzung deckt den Widerspruch auf.
+    const gross: Messwerte = { ...eingefroren(6), hausMitAutoW: 12_000 };
+    const e = berechneLadeziel(gross, parameter());
+    assert.ok(e.zielA <= 6, `Ziel ${e.zielA} A`);
+  });
+});

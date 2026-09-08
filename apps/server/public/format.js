@@ -97,27 +97,26 @@ export function formatDuration(seconds) {
   return m === 0 ? `${h} h` : `${h} h ${m} min`;
 }
 
-// ── Wallbox: Ampere und Kilowatt nebeneinander ──────────────────────────────
+// ── Wallbox: Einstellung und Messung auseinanderhalten ─────────────────────
 //
-// Die Wallbox lässt sich zwischen 6 und 16 A einstellen, meldet aber nur die
-// Ampere. Was das an Leistung bedeutet, rechnet der Server (siehe
-// packages/core/src/ladeleistung.ts) und liefert es mit — hier wird es nur noch
-// nebeneinandergestellt.
+// Die beiden Kacheln standen einmal nebeneinander und sagten dasselbe zweimal,
+// mit verschiedenen Zahlen: "Ladeleistung 10,1 kW ~ 15 A" neben "Ladestrom
+// 15 A ~ 10,4 kW". Die eine Zahl war gemessen, die andere aus 400 V gerechnet,
+// und an dieser Anlage liegen dazwischen rund 300 W. Wer beide liest, glaubt
+// zu Recht keiner von beiden.
 //
-// Das „≈“ ist kein Zierrat: Die Ampere sind eine Einstellung, die Kilowatt
-// daraus gerechnet, und das Fahrzeug darf jederzeit weniger ziehen.
+// Jetzt sagt jede Kachel genau eine Sache: die eine, was fliesst; die andere,
+// was eingestellt ist.
 
-/** Eingestellte Strombegrenzung mit ihrer Leistung: „16 A ≈ 11,1 kW“. */
+/** Eingestellte Strombegrenzung, im Verhaeltnis zum Hoechstwert des Geraets. */
 export function formatLadestrom(ev) {
   if (!ev || ev.maxCurrentA == null) return MISSING;
-  const strom = `${ev.maxCurrentA} A`;
-  return ev.maxPowerW == null ? strom : `${strom} ≈ ${formatPower(ev.maxPowerW)}`;
+  const grenze = ev.regelung?.maxA;
+  return grenze ? `${ev.maxCurrentA} A von ${grenze} A` : `${ev.maxCurrentA} A`;
 }
 
-/** Gemessene Ladeleistung mit dem Strom dahinter: „10,4 kW ≈ 15 A“. */
+/** Gemessene Ladeleistung. Eine Messung, keine Rechnung. */
 export function formatLadeleistung(ev) {
   if (!ev || !isNum(ev.powerW)) return MISSING;
-  const leistung = formatPower(ev.powerW);
-  if (!isNum(ev.currentFromPowerA)) return leistung;
-  return `${leistung} ≈ ${Math.round(ev.currentFromPowerA)} A`;
+  return formatPower(ev.powerW);
 }

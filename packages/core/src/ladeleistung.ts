@@ -96,3 +96,45 @@ export function ladestromAusLeistungA(
   if (nenner <= 0) return null;
   return watt / nenner;
 }
+
+/**
+ * Toleranzband der Netzspannung: ±10 % der Nennspannung.
+ *
+ * Aus EN 50160 — die Norm, die zusagt, in welchem Bereich die Versorgung liegen
+ * darf. Hier dient sie als Plausibilitätsprüfung und nicht als Vorschrift: Was
+ * ausserhalb liegt, kann keine Netzspannung sein, also stimmt die zugrunde
+ * liegende Messung nicht.
+ */
+const SPANNUNGSTOLERANZ = 0.1;
+
+/**
+ * Den Anschluss an einer echten Messung nacheichen.
+ *
+ * Die Tabelle im Kopf dieser Datei rechnet mit 400 V. An dieser Anlage stimmt
+ * das nicht ganz: Bei 15 A gesetztem Ladestrom fliessen gemessen 10,1 kW und
+ * nicht die errechneten 10,4 kW — 673 W je Ampere statt 693, also rund 389 V
+ * statt 400. Das ist keine Kleinigkeit, sondern knapp ein ganzer Ampereschritt:
+ * Die Überschussregelung verlangte 11 085 W freie Leistung, bevor sie auf 16 A
+ * ging, obwohl 10 350 W gereicht hätten. An Tagen mit gut zehn Kilowatt
+ * Überschuss blieb das Auto deshalb dauerhaft eine Stufe darunter.
+ *
+ * Übernommen wird die zurückgerechnete Spannung nur, wenn sie im Toleranzband
+ * des Netzes liegt. Damit fallen die Fälle heraus, in denen die Messung gar
+ * nicht zur Einstellung gehört: ein Fahrzeug, das gegen Ende des Ladevorgangs
+ * von sich aus zurücknimmt, oder ein veralteter Wert aus der Cloud. Beides
+ * ergäbe eine unmöglich niedrige Spannung — und würde, ungeprüft übernommen,
+ * die Regelung zu viel einplanen lassen.
+ */
+export function gemessenerAnschluss(
+  leistungW: number | null,
+  ampere: number | null,
+  anschluss: Ladeanschluss = LADEANSCHLUSS_STANDARD,
+): Ladeanschluss {
+  if (leistungW === null || !Number.isFinite(leistungW) || leistungW <= 0) return anschluss;
+  if (ampere === null || !Number.isFinite(ampere) || ampere <= 0) return anschluss;
+  const gemessenV = leistungW / (faktor(anschluss) * ampere * LEISTUNGSFAKTOR);
+  const unten = anschluss.spannungV * (1 - SPANNUNGSTOLERANZ);
+  const oben = anschluss.spannungV * (1 + SPANNUNGSTOLERANZ);
+  if (gemessenV < unten || gemessenV > oben) return anschluss;
+  return { phasen: anschluss.phasen, spannungV: gemessenV };
+}

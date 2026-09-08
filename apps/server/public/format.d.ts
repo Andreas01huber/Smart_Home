@@ -15,6 +15,8 @@ export interface LadeAnzeige {
   maxPowerW?: number | null;
   powerW?: number | null;
   currentFromPowerA?: number | null;
+  /** Zustand der Regelung — daraus kommt die Geraetegrenze fuer die Anzeige. */
+  regelung?: { maxA?: number | null } | null;
 }
 export function formatLadestrom(ev: LadeAnzeige | null | undefined): string;
 export function formatLadeleistung(ev: LadeAnzeige | null | undefined): string;

@@ -10,6 +10,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  gemessenerAnschluss,
   ladeleistungAusStromW,
   ladestromAusLeistungA,
   LADEANSCHLUSS_STANDARD,
@@ -86,5 +87,33 @@ describe('Standardanschluss', () => {
   it('ist dreiphasig an 400 V', () => {
     assert.equal(LADEANSCHLUSS_STANDARD.phasen, 3);
     assert.equal(LADEANSCHLUSS_STANDARD.spannungV, 400);
+  });
+});
+
+describe('Nacheichung an einer echten Messung', () => {
+  it('übernimmt die zurückgerechnete Spannung', () => {
+    // Der gemessene Fall vom 8.9.: 15 A eingestellt, 10 084 W gemessen.
+    const a = gemessenerAnschluss(10_084, 15, LADEANSCHLUSS_STANDARD);
+    assert.ok(Math.abs(a.spannungV - 388) < 1, `${a.spannungV.toFixed(0)} V zurückgerechnet`);
+    // Und damit braucht die Höchststufe rund 700 W weniger Überschuss.
+    const vorher = ladeleistungAusStromW(16, LADEANSCHLUSS_STANDARD) ?? 0;
+    const nachher = ladeleistungAusStromW(16, a) ?? 0;
+    assert.ok(vorher - nachher > 300, `nur ${Math.round(vorher - nachher)} W Unterschied`);
+  });
+
+  it('lehnt eine unmögliche Spannung ab', () => {
+    // Das Fahrzeug nimmt gegen Ende von sich aus zurück: 16 A eingestellt,
+    // nur 3 kW gemessen. Das wären 108 V — keine Netzspannung, also keine
+    // brauchbare Eichung. Ungeprüft übernommen würde die Regelung glauben,
+    // 16 A kosteten 1,7 kW.
+    assert.deepEqual(gemessenerAnschluss(3000, 16), LADEANSCHLUSS_STANDARD);
+    // Ebenso nach oben.
+    assert.deepEqual(gemessenerAnschluss(30_000, 16), LADEANSCHLUSS_STANDARD);
+  });
+
+  it('bleibt beim Nennwert, solange nichts gemessen ist', () => {
+    assert.deepEqual(gemessenerAnschluss(null, 16), LADEANSCHLUSS_STANDARD);
+    assert.deepEqual(gemessenerAnschluss(10_000, null), LADEANSCHLUSS_STANDARD);
+    assert.deepEqual(gemessenerAnschluss(0, 0), LADEANSCHLUSS_STANDARD);
   });
 });

@@ -527,3 +527,117 @@ describe('Abgleich mit der Wirklichkeit, beide Richtungen', () => {
     assert.deepEqual(wallbox.befehle, [], 'hat grundlos nachgefasst');
   });
 });
+
+describe('Betriebsarten: autark, Handbetrieb, Volladung', () => {
+  it('ist beim Start autark — die sichere Vorgabe', async () => {
+    const { engine, zyklus, steuerung } = aufbau();
+    engine.setze({ pv: 0, hausOhneAuto: 500, ev: 4157, stromA: 6 });
+    await zyklus();
+    assert.equal(steuerung.zustand().betriebsart, 'autark');
+    // Und autark heisst: Bei Nacht wird abgeschaltet, nicht geladen.
+    assert.equal(steuerung.zustand().zielA, 0);
+  });
+
+  it('lädt im Handbetrieb mit dem eingestellten Strom, auch ohne Sonne', async () => {
+    const { engine, wallbox, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, stromA: 0 });
+    await zyklus();
+    wallbox.befehle.length = 0;
+
+    steuerung.setzeBetriebsart('manuell', 10);
+    await zyklus();
+
+    assert.deepEqual(
+      wallbox.befehle.filter((b) => b.art === 'strom'),
+      [{ art: 'strom', wert: 10 }],
+      'der eingestellte Ladestrom kam nicht an der Wallbox an',
+    );
+    assert.ok(
+      wallbox.befehle.some((b) => b.art === 'schalter' && b.wert === true),
+      'es wurde nicht eingeschaltet',
+    );
+  });
+
+  it('hält sich auch von Hand an die Grenzen des Geräts', async () => {
+    // 25 A gibt es nicht. Die Regelung darf niemals einen Wert setzen, den
+    // Wallbox oder Fahrzeug nicht zulassen — auch nicht auf Zuruf.
+    const { engine, wallbox, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 0 });
+    steuerung.setzeBetriebsart('manuell', 25);
+    await zyklus();
+    assert.equal(wallbox.befehle.find((b) => b.art === 'strom')?.wert, 16);
+
+    const zweiter = aufbau();
+    zweiter.engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 0 });
+    zweiter.steuerung.setzeBetriebsart('manuell', 2);
+    await zweiter.zyklus();
+    assert.equal(zweiter.wallbox.befehle.find((b) => b.art === 'strom')?.wert, 6);
+  });
+
+  it('geht beim Abstecken von selbst auf autark zurück', async () => {
+    const { engine, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 0 });
+    steuerung.setzeBetriebsart('volladung');
+    await zyklus();
+    assert.equal(steuerung.zustand().betriebsart, 'volladung');
+
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, angesteckt: false });
+    await zyklus();
+    assert.equal(
+      steuerung.zustand().betriebsart,
+      'autark',
+      'die Übersteuerung galt still für den nächsten Ladevorgang weiter',
+    );
+  });
+
+  it('wartet von Hand keine Beobachtungszeit ab', async () => {
+    // Mit den echten Fristen: Nach einer Pause verlangt die Beruhigung zwei
+    // Minuten, bevor sie wieder startet. Das ist gegen Wolken gedacht, nicht
+    // gegen Menschen — wer den Regler bewegt, will es sofort sehen.
+    const { engine, wallbox, steuerung, zyklus } = aufbau({
+      startenNachSekunden: 120,
+      erhoehenNachSekunden: 90,
+      mindestabstandSekunden: 60,
+    });
+    engine.setze({ pv: 0, hausOhneAuto: 500, ev: 4157, stromA: 6 });
+    await zyklus();
+    wallbox.befehle.length = 0;
+
+    steuerung.setzeBetriebsart('manuell', 12);
+    await zyklus();
+    assert.equal(
+      wallbox.befehle.find((b) => b.art === 'strom')?.wert,
+      12,
+      'der Handbefehl wurde von der Beobachtungszeit aufgehalten',
+    );
+  });
+
+  it('sendet nicht bei jedem Zyklus denselben Handbefehl noch einmal', async () => {
+    const { engine, wallbox, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 0, schalterAn: true });
+    steuerung.setzeBetriebsart('manuell', 10);
+    await zyklus();
+    const nachErstem = wallbox.befehle.length;
+
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 6930, stromA: 10, schalterAn: true });
+    await zyklus();
+    await zyklus();
+    assert.equal(wallbox.befehle.length, nachErstem, 'hat unnötig nachgesendet');
+  });
+
+  it('meldet Betriebsart und Ladestrom an die Oberfläche', async () => {
+    const { engine, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 0 });
+    steuerung.setzeBetriebsart('manuell', 11);
+    await zyklus();
+    const z = steuerung.zustand();
+    assert.equal(z.betriebsart, 'manuell');
+    assert.equal(z.manuellA, 11);
+    assert.equal(z.volladung, false);
+    const k = steuerung.kurz();
+    assert.equal(k.betriebsart, 'manuell');
+    assert.equal(k.manuellA, 11);
+    assert.equal(k.minA, 6);
+    assert.equal(k.maxA, 16);
+  });
+});

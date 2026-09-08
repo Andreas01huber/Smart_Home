@@ -41,6 +41,7 @@ import { Kontenspeicher, type Benutzer } from './benutzer.ts';
 import { Sitzungsspeicher } from './sitzungen.ts';
 import { loadConfig, ladeanschlussAus, type AppConfig } from './config.ts';
 import { EnergyEngine, type EngineState } from './engine.ts';
+import { Hausverbrauch } from './hausverbrauch.ts';
 import { EnergyAccumulator, localDate } from './history.ts';
 import { ChargeSessionLog } from './ev-log.ts';
 import { Ladesteuerung } from './ladesteuerung.ts';
@@ -168,7 +169,34 @@ function announcedPlaceholders(
     }));
 }
 
+/**
+ * Aufteilung des Zählerwerts in Haus und Auto.
+ *
+ * Der Zustand lebt hier und nicht in `serializeState`, weil er über Aufrufe
+ * hinweg gebraucht wird — warum, steht in `hausverbrauch.ts`.
+ */
+const hausTeiler = new Hausverbrauch();
+
 /** Aufbereitung für die Oberfläche — hier entstehen keine neuen Zahlen. */
+
+function hausOhneAutoMetrik(snapshot: EnergySnapshot): unknown {
+  const haus = snapshot.houseConsumptionW;
+  const anteil = hausTeiler.teile(
+    haus.valueW,
+    snapshot.evCharger?.chargePowerW ?? null,
+    Date.now(),
+  );
+  return {
+    valueW: anteil.wattW,
+    autoAbgezogenW: anteil.autoW,
+    /** false = aus der gemerkten Grundlast geschaetzt, weil die Werte sich widersprachen. */
+    autoBeruecksichtigt: anteil.frisch,
+    source: haus.provenance.connectorId,
+    quality: haus.provenance.quality,
+    ageMs: Number.isFinite(haus.provenance.ageMs) ? haus.provenance.ageMs : null,
+  };
+}
+
 function serializeState(
   state: EngineState,
   config: AppConfig,
@@ -192,6 +220,10 @@ function serializeState(
     pollDurationMs: state.pollDurationMs,
     solar: metric(snapshot.solarProductionW),
     house: metric(snapshot.houseConsumptionW),
+    // Was das Haus ohne das Auto verbraucht — die Zahl, die man eigentlich
+    // meint, wenn man "Hausverbrauch" sagt. Die Wallbox hängt hinter dem
+    // Hauszähler, ihre Leistung steckt also im Wert darüber mit drin.
+    hausOhneAuto: hausOhneAutoMetrik(snapshot),
     gridImport: metric(snapshot.gridImportW),
     gridExport: metric(snapshot.gridExportW),
     batteries: [
@@ -695,7 +727,31 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Betriebsart wählen: autark, Handbetrieb mit festem Ladestrom, Volladung.
+    // Die beiden letzten kaufen bewusst Netzstrom — auf Wunsch des Menschen.
+    if (url.pathname === '/api/ev/betriebsart' && request.method === 'POST') {
+      void readBody(request, 1_000)
+        .then((body) => {
+          const roh = JSON.parse(body) as { art?: unknown; ampere?: unknown };
+          const art =
+            roh.art === 'manuell' ? 'manuell' : roh.art === 'volladung' ? 'volladung' : 'autark';
+          // Der Ladestrom wird hier NICHT gegen 6-16 A geprüft: Die echten
+          // Grenzen kennt nur das Gerät, und die Steuerung begrenzt selbst.
+          // Eine zweite Prüfung hier wäre eine zweite, womöglich falsche
+          // Wahrheit über die Hardware.
+          const ampere = typeof roh.ampere === 'number' && Number.isFinite(roh.ampere)
+            ? roh.ampere
+            : undefined;
+          ladesteuerung.setzeBetriebsart(art, ampere);
+          sendJson(response, 200, ladesteuerung.kurz());
+        })
+        .catch(() => sendJson(response, 400, { error: 'Ungültige Anfrage' }));
+      return;
+    }
+
     // Volladung erzwingen — bewusster Netzbezug auf Wunsch des Menschen.
+    // Bleibt erhalten, damit eine noch zwischengespeicherte ältere Oberfläche
+    // auf dem Handy nicht ins Leere greift.
     if (url.pathname === '/api/ev/volladung' && request.method === 'POST') {
       void readBody(request, 1_000)
         .then((body) => {

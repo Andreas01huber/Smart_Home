@@ -59,7 +59,11 @@
  * jedes der Szenarien aus dem Betrieb als Test nachstellbar ist.
  */
 
-import { ladeleistungAusStromW, type Ladeanschluss } from './ladeleistung.ts';
+import {
+  gemessenerAnschluss,
+  ladeleistungAusStromW,
+  type Ladeanschluss,
+} from './ladeleistung.ts';
 
 /** Zustände der Fahrzeugladung. Genau einer gilt zu jedem Zeitpunkt. */
 export type Ladezustand =
@@ -337,11 +341,67 @@ export function berechneLadeziel(
   messwerte: Messwerte,
   parameter: Reglerparameter,
 ): Ladeentscheidung {
-  const evLeistung = zahl(messwerte.evLeistungW) ?? 0;
   const haus = zahl(messwerte.hausMitAutoW);
+  const gemeldetesAuto = zahl(messwerte.evLeistungW) ?? 0;
+
+  // Der Ladewert wird am Hausverbrauch gedeckelt — und das ist keine Kosmetik,
+  // sondern die Lehre aus einem Regelkreis, der sich selbst aufgeschaukelt hat.
+  //
+  // Die Wallbox meldet über die Tuya-Cloud, der Rest der Anlage über das
+  // Heimnetz. Hört das Auto auf zu laden, sieht der Hauszähler das sofort, die
+  // Cloud aber noch eine halbe Minute lang nicht. In dieser Lücke stand im
+  // Protokoll: "verfügbar 14435 W" bei 5663 W Sonne — die Rechnung addierte
+  // 9 kW Ladeleistung, die längst nicht mehr flossen. Die Regelung stellte
+  // brav 16 A, das Auto lief wirklich an, und der Netzzähler sprang auf
+  // 2847 W. Drei Mal hintereinander, jedes Mal gefolgt von einer Notbremse.
+  //
+  // Ein Auto kann nicht mehr ziehen als das ganze Haus verbraucht. Das ist eine
+  // physikalische Aussage, keine Annahme, und sie macht aus zwei
+  // widersprüchlichen Messwerten wieder einen brauchbaren: Im Zweifel gilt der
+  // schnellere Zähler. Nach unten deckeln ist dabei die sichere Richtung — zu
+  // wenig eingeplante Ladeleistung heisst zu vorsichtig laden, zu viel heisst
+  // Netzbezug.
+  // Zweite Schranke, und die wichtigere: Mehr als die eingestellte
+  // Strombegrenzung hergibt, kann das Auto nicht ziehen.
+  //
+  // Am 8.9. um 16:50 stand an der Wallbox `charge_cur_set 6`, während
+  // `power_total` seit Minuten unverändert 10 084 W meldete. Der Leistungswert
+  // aus der Tuya-Cloud friert ein; die Strombegrenzung dagegen folgt dem Befehl
+  // sofort. Wer nur den Leistungswert glaubt, rechnet mit sechs Kilowatt, die
+  // es nicht gibt — genau daran hat sich die Regelung aufgeschaukelt: 16 A
+  // gestellt, drei Kilowatt Netzbezug, Notbremse, von vorn.
+  //
+  // Die Eichung weiter unten prüft dabei mit: 10 084 W bei 6 A wären 970 V, das
+  // liegt weit ausserhalb jeder Netzspannung. Solche Paare fallen durch, und es
+  // bleibt bei der Umrechnung mit der Nennspannung.
+  const anschluss = gemessenerAnschluss(
+    gemeldetesAuto,
+    messwerte.evStromA,
+    parameter.anschluss,
+  );
+  // Nur wenn wirklich ein Ladestrom eingestellt ist. Steht dort 0 oder nichts,
+  // gibt es von dieser Seite keine Aussage — und ein Auto, das trotz
+  // abgeschalteter Wallbox zieht, soll sichtbar bleiben und nicht auf null
+  // gerechnet werden. Diesen Fall behandelt der Abgleich im Regeldienst.
+  const gesetztA = zahl(messwerte.evStromA);
+  const ausStrom =
+    gesetztA !== null && gesetztA > 0 ? ladeleistungAusStromW(gesetztA, anschluss) : null;
+
+  const schranken = [gemeldetesAuto];
+  if (ausStrom !== null) schranken.push(ausStrom);
+  if (haus !== null) schranken.push(Math.max(0, haus));
+  const evLeistung = Math.min(...schranken);
+  const widerspruch = evLeistung < gemeldetesAuto;
+
   // Das Auto steckt im Hausverbrauch bereits drin. Genau hier wird die
   // Doppelzählung vermieden, vor der jede Überschussregelung steht.
-  const hausOhneAuto = haus === null ? null : Math.max(0, haus - evLeistung);
+  //
+  // Widersprechen sich die beiden Messwerte, kommt hier `null` heraus und nicht
+  // etwa null Watt. Der Unterschied ist wichtig: Die Anzeige macht aus `null`
+  // ein "—", aus 0 aber ein leeres Haus. Genau das stand vorher minutenlang im
+  // Protokoll — "Haus ohne Auto 0 W", während im Haus 1,5 kW liefen.
+  const hausOhneAuto =
+    haus === null ? null : widerspruch ? null : Math.max(0, haus - evLeistung);
 
   const leer = (zustand: Ladezustand, grund: string): Ladeentscheidung => ({
     zustand,
@@ -380,6 +440,13 @@ export function berechneLadeziel(
     );
   }
 
+  // ── Umrechnung an der Wirklichkeit nacheichen ────────────────────────────
+  // Solange das Auto lädt, sind gesetzter Strom und gemessene Leistung beide
+  // bekannt — daraus folgt, was ein Ampere an DIESER Anlage wirklich bedeutet.
+  // Ohne das rechnet die Regelung mit 693 W je Ampere, während 673 fliessen,
+  // und verlangt für jede Stufe rund 300 W mehr Überschuss als nötig.
+  const geeicht: Reglerparameter = { ...parameter, anschluss };
+
   // ── Verfügbare Leistung ──────────────────────────────────────────────────
   const spielraum = speicherspielraum(messwerte.speicher, parameter);
   const freigabe = spielraum.freigabeW;
@@ -412,9 +479,9 @@ export function berechneLadeziel(
     + spielraum.entladespielraumW
     - spielraum.ueberEntladungW;
 
-  const maxLeistung = ladeleistungAusStromW(parameter.maxA, parameter.anschluss) ?? 0;
+  const maxLeistung = ladeleistungAusStromW(geeicht.maxA, geeicht.anschluss) ?? 0;
   const zielLeistung = Math.max(0, Math.min(verfuegbar, maxLeistung));
-  let zielA = stromAusLeistungA(zielLeistung, parameter);
+  let zielA = stromAusLeistungA(zielLeistung, geeicht);
 
   // Die Reserve ist ein Sicherheitsabstand fürs Wachsen, kein Grund zum
   // Abwürgen. Ohne diese Ausnahme beendet sie das Laden am Minimum von selbst:
@@ -429,7 +496,7 @@ export function berechneLadeziel(
     zielA < parameter.minA &&
     evLeistung > 0 &&
     netzbezug <= parameter.netzTotzoneW &&
-    stromAusLeistungA(Math.max(0, verfuegbar + parameter.reserveW), parameter) >= parameter.minA
+    stromAusLeistungA(Math.max(0, verfuegbar + geeicht.reserveW), geeicht) >= geeicht.minA
   ) {
     zielA = parameter.minA;
   }
@@ -453,7 +520,7 @@ export function berechneLadeziel(
     }
     const fehlt = Math.max(
       0,
-      (ladeleistungAusStromW(parameter.minA, parameter.anschluss) ?? 0) - verfuegbar,
+      (ladeleistungAusStromW(geeicht.minA, geeicht.anschluss) ?? 0) - verfuegbar,
     );
     return {
       ...leer(
@@ -466,7 +533,7 @@ export function berechneLadeziel(
     };
   }
 
-  const gesetzteLeistung = ladeleistungAusStromW(zielA, parameter.anschluss) ?? 0;
+  const gesetzteLeistung = ladeleistungAusStromW(zielA, geeicht.anschluss) ?? 0;
   return {
     zustand: 'laedt',
     zielA,

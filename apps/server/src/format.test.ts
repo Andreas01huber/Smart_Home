@@ -43,30 +43,30 @@ describe('formatPercentage (16)', () => {
   test('89.66 -> "90 %"', () => assert.equal(formatPercentage(89.66), '90 %'));
 });
 
-describe('Wallbox: Ampere und Kilowatt nebeneinander', () => {
-  test('stellt die Strombegrenzung mit ihrer Leistung dar', () => {
-    // Die beiden Werte, die an der Anlage tatsächlich vorkommen.
-    assert.equal(formatLadestrom({ maxCurrentA: 16, maxPowerW: 11085 }), '16 A ≈ 11,1 kW');
-    assert.equal(formatLadestrom({ maxCurrentA: 6, maxPowerW: 4157 }), '6 A ≈ 4,2 kW');
+describe('Wallbox: Einstellung und Messung auseinanderhalten', () => {
+  test('zeigt die Einstellung im Verhaeltnis zur Geraetegrenze', () => {
+    // Frueher stand hier "16 A ~ 11,1 kW" - eine aus 400 V gerechnete Zahl, die
+    // der gemessenen Ladeleistung in der Nachbarkachel widersprach. Was ein
+    // Ampere an dieser Anlage wirklich bedeutet, steht jetzt gemessen daneben.
+    assert.equal(formatLadestrom({ maxCurrentA: 15, regelung: { maxA: 16 } }), '15 A von 16 A');
+    assert.equal(formatLadestrom({ maxCurrentA: 6, regelung: { maxA: 16 } }), '6 A von 16 A');
   });
 
-  test('zeigt die Ampere allein, wenn die Leistung fehlt', () => {
-    assert.equal(formatLadestrom({ maxCurrentA: 10, maxPowerW: null }), '10 A');
+  test('zeigt die Ampere allein, wenn die Geraetegrenze fehlt', () => {
+    assert.equal(formatLadestrom({ maxCurrentA: 10 }), '10 A');
   });
 
   test('erfindet nichts, wenn nichts bekannt ist', () => {
-    assert.equal(formatLadestrom({ maxCurrentA: null, maxPowerW: null }), '—');
+    assert.equal(formatLadestrom({ maxCurrentA: null }), '—');
     assert.equal(formatLadestrom(null), '—');
     assert.equal(formatLadeleistung(null), '—');
     assert.equal(formatLadeleistung({ powerW: null }), '—');
   });
 
-  test('stellt die gemessene Leistung mit dem Strom dahinter dar', () => {
-    // Aus einem echten Ladevorgang: 10351 W entsprechen rund 15 A.
-    assert.equal(formatLadeleistung({ powerW: 10351, currentFromPowerA: 14.94 }), '10,4 kW ≈ 15 A');
-  });
-
-  test('zeigt die Leistung allein, wenn der Strom nicht ableitbar ist', () => {
-    assert.equal(formatLadeleistung({ powerW: 3700, currentFromPowerA: null }), '3,7 kW');
+  test('zeigt bei der Ladeleistung nur die Messung', () => {
+    // Der zurueckgerechnete Ampere-Wert ist hier absichtlich weg: Er stammte
+    // aus derselben 400-V-Annahme und machte aus einer Messung eine Mischung.
+    assert.equal(formatLadeleistung({ powerW: 10_084, currentFromPowerA: 14.6 }), '10,1 kW');
+    assert.equal(formatLadeleistung({ powerW: 3700 }), '3,7 kW');
   });
 });

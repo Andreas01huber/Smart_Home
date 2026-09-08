@@ -37,6 +37,7 @@ import {
   beruhige,
   bewaehrtW,
   gedaechtnisAusMesswerten,
+  ladeleistungAusStromW,
   LEERES_GEDAECHTNIS,
   merkeEntladung,
   nachweisZuruecknehmen,
@@ -55,6 +56,21 @@ import type { TuyaEvseConnector } from '@energy/connectors';
 
 import { ladeanschlussAus, type AppConfig } from './config.ts';
 import type { EnergyEngine, EngineState } from './engine.ts';
+
+/**
+ * Wie geladen wird — die Entscheidung des Menschen, nicht der Regelung.
+ *
+ * `autark`     Nur Sonne und freigegebene Speicherleistung. Die Vorgabe, und
+ *              der einzige Zustand, in dem die Regel "das Auto verursacht
+ *              keinen Netzbezug" gilt.
+ * `manuell`    Ein fester Ladestrom, den ein Mensch eingestellt hat. Reicht
+ *              die Sonne nicht, kommt der Rest aus dem Netz.
+ * `volladung`  Höchster Ladestrom, den Wallbox und Fahrzeug zulassen.
+ *
+ * Die beiden letzten sind keine Schlupflöcher in der Autarkieregel, sondern
+ * ausdrückliche Übersteuerungen — sie werden angezeigt und enden beim Abstecken.
+ */
+export type Betriebsart = 'autark' | 'manuell' | 'volladung';
 
 /** Ein Eintrag im Regelprotokoll. Bewusst flach — das liest ein Mensch. */
 export interface Regelschritt {
@@ -95,7 +111,11 @@ export interface Steuerzustand {
   readonly letzterBefehlAt: string | null;
   readonly letzterFehler: string | null;
   readonly naechsteRegelungInS: number;
-  /** Erzwungene Volladung aus dem Netz — vom Menschen eingeschaltet. */
+  /** Gewaehlte Betriebsart — die Entscheidung des Menschen. */
+  readonly betriebsart: Betriebsart;
+  /** Eingestellter Ladestrom im Handbetrieb, in Ampere. */
+  readonly manuellA: number;
+  /** Erzwungene Volladung aus dem Netz. Abgeleitet aus `betriebsart`. */
   readonly volladung: boolean;
   readonly protokoll: readonly Regelschritt[];
 }
@@ -127,6 +147,29 @@ const LAEDT_AB_W = 200;
 const UNBEKANNT_A = -1;
 
 /**
+ * Ein Befehl ohne Beobachtungszeit — für Vorgaben von Hand.
+ *
+ * Gleiche Form wie das Ergebnis der Beruhigung, damit der Zyklus dahinter
+ * nichts unterscheiden muss. Gesendet wird nur, wenn sich wirklich etwas
+ * ändert; sonst liefe bei jedem Zyklus ein Tuya-Befehl hinaus.
+ */
+function sofort(
+  stromA: number,
+  historie: Reglerhistorie,
+  jetztMs: number,
+): { senden: boolean; stromA: number; grund: string; historie: Reglerhistorie } {
+  const aendert = stromA !== historie.gesetztA;
+  return {
+    senden: aendert,
+    stromA,
+    grund: aendert ? `Von Hand auf ${stromA} A.` : 'Sollwert unverändert.',
+    historie: aendert
+      ? { ...historie, wunschA: stromA, wunschSeitMs: jetztMs }
+      : { ...historie, wunschA: stromA },
+  };
+}
+
+/**
  * Kürzester Abstand zwischen zwei Schnellprüfungen.
  *
  * Die Engine misst alle zwei Sekunden. Jedes Mal einen vollen Zyklus samt
@@ -148,8 +191,10 @@ export class Ladesteuerung {
   private grenzen = { minA: 6, maxA: 16, schrittA: 1 };
   private letzterZustand: Ladezustand | null = null;
   private naechsteRegelungAt = 0;
-  /** Vom Benutzer erzwungene Volladung; Netzbezug ausdrücklich in Kauf genommen. */
-  private volladung = false;
+  /** Gewählte Betriebsart. Vorgabe ist `autark` — siehe `setzeBetriebsart`. */
+  private betriebsart: Betriebsart = 'autark';
+  /** Ladestrom im Handbetrieb. Erst gültig, wenn `betriebsart === 'manuell'`. */
+  private manuellA = 0;
   /** Zuletzt an die Wallbox gesendeter Schalterzustand; null = unbekannt. */
   private ladenAn: boolean | null = null;
   /** Ob der Startwert schon aus dem Gerät übernommen wurde. */
@@ -167,6 +212,14 @@ export class Ladesteuerung {
   private gedaechtnis: Speichergedaechtnis = LEERES_GEDAECHTNIS;
   /** Wurde im letzten Zyklus mit ungenutzter Speicherleistung gerechnet? */
   private mitSpeicherGerechnet = false;
+  /**
+   * Was an der Wallbox zuletzt eingestellt war, laut Geraet.
+   *
+   * Gebraucht beim Wechsel in den Handbetrieb: Die eigene Historie kennt nur,
+   * was DIESE Regelung gesendet hat — im Beobachtungsmodus also nichts. Das
+   * Geraet weiss es besser.
+   */
+  private geraeteStromA: number | null = null;
 
   constructor(
     private readonly engine: EnergyEngine,
@@ -269,28 +322,54 @@ export class Ladesteuerung {
   }
 
   /**
-   * Volladung ein- oder ausschalten.
+   * Betriebsart wählen.
    *
-   * Bewusst ohne Zeitbegrenzung: Wer sie einschaltet, will sein Auto voll haben.
-   * Sie endet, wenn sie ausgeschaltet wird oder das Fahrzeug abgesteckt wird —
-   * so gilt sie nicht versehentlich für den nächsten Ladevorgang mit.
+   * `autark` ist die Vorgabe und der einzige Zustand, in dem die Regel dieser
+   * Anlage gilt. Die beiden anderen sind ausdrückliche Entscheidungen eines
+   * Menschen, Netzstrom zu kaufen — sie werden deshalb auch deutlich angezeigt
+   * und enden von selbst, sobald das Fahrzeug abgesteckt wird. Sonst gälten sie
+   * stillschweigend für den nächsten Ladevorgang mit.
+   *
+   * Ein Neustart führt zurück auf `autark`. Das ist Absicht: Die sichere
+   * Betriebsart ist der Ruhezustand, nicht die zuletzt gewählte.
    */
-  setzeVolladung(an: boolean): void {
-    if (this.volladung === an) return;
-    this.setzeVolladungStill(an);
+  setzeBetriebsart(art: Betriebsart, ampere?: number): void {
+    // Ohne Vorgabe übernimmt der Handbetrieb, was gerade eingestellt ist. Wer
+    // von der Automatik auf Hand umschaltet, während das Auto mit 14 A lädt,
+    // erwartet 14 A und nicht einen Sprung auf den Mindestwert.
+    const anfang =
+      ampere
+      ?? (this.manuellA >= this.grenzen.minA
+        ? this.manuellA
+        : this.historie.gesetztA >= this.grenzen.minA
+          ? this.historie.gesetztA
+          : (this.geraeteStromA ?? this.grenzen.minA));
+    const gewuenschtA =
+      art === 'manuell'
+        ? Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, Math.round(anfang)))
+        : this.manuellA;
+    if (this.betriebsart === art && gewuenschtA === this.manuellA) return;
+    this.setzeBetriebsartStill(art, gewuenschtA);
     // Nicht bis zum nächsten Zyklus warten: Wer den Knopf drückt, will es sehen.
     void this.zyklus();
   }
 
-  /** Wie `setzeVolladung`, aber ohne sofortigen Zyklus — für Aufrufe von innen. */
-  private setzeVolladungStill(an: boolean): void {
-    this.volladung = an;
+  /** Wie `setzeBetriebsart`, aber ohne sofortigen Zyklus — für Aufrufe von innen. */
+  private setzeBetriebsartStill(art: Betriebsart, ampere: number): void {
+    this.betriebsart = art;
+    this.manuellA = ampere;
     console.log(
-      an
-        ? '[Laderegelung] Volladung eingeschaltet — es wird bis zur Obergrenze geladen, '
-            + 'auch aus dem Netz.'
-        : '[Laderegelung] Volladung beendet — zurück zur Überschussregelung.',
+      art === 'autark'
+        ? '[Laderegelung] Autark — es wird nur geladen, was Sonne und Speicher hergeben.'
+        : art === 'volladung'
+          ? '[Laderegelung] Volladung eingeschaltet — bis zur Obergrenze, auch aus dem Netz.'
+          : `[Laderegelung] Handbetrieb mit ${ampere} A — feste Vorgabe, auch aus dem Netz.`,
     );
+  }
+
+  /** Alte Schnittstelle: Volladung als Ein/Aus. */
+  setzeVolladung(an: boolean): void {
+    this.setzeBetriebsart(an ? 'volladung' : 'autark');
   }
 
   stop(): void {
@@ -324,7 +403,9 @@ export class Ladesteuerung {
         0,
         Math.round((this.naechsteRegelungAt - Date.now()) / 1000),
       ),
-      volladung: this.volladung,
+      betriebsart: this.betriebsart,
+      manuellA: this.manuellA,
+      volladung: this.betriebsart === 'volladung',
       // Neueste zuerst — so liest man ein Protokoll.
       protokoll: [...this.protokoll].reverse(),
     };
@@ -346,6 +427,10 @@ export class Ladesteuerung {
     verfuegbarW: number;
     hausOhneAutoW: number | null;
     speicherbeitragW: number;
+    betriebsart: Betriebsart;
+    manuellA: number;
+    minA: number;
+    maxA: number;
     volladung: boolean;
   } {
     const e = this.letzte;
@@ -358,7 +443,11 @@ export class Ladesteuerung {
       verfuegbarW: Math.round(e?.verfuegbarW ?? 0),
       hausOhneAutoW: e?.hausOhneAutoW ?? null,
       speicherbeitragW: Math.round(e?.speicherbeitragW ?? 0),
-      volladung: this.volladung,
+      betriebsart: this.betriebsart,
+      manuellA: this.manuellA,
+      minA: this.grenzen.minA,
+      maxA: this.grenzen.maxA,
+      volladung: this.betriebsart === 'volladung',
     };
   }
 
@@ -462,6 +551,7 @@ export class Ladesteuerung {
       if (state === null || this.wallbox === null) return;
 
       const messwerte = this.messwerte(state);
+      if (messwerte.evStromA !== null) this.geraeteStromA = messwerte.evStromA;
 
       // Merken, ob in diesem Zyklus überhaupt mit ungenutzter Speicherleistung
       // gerechnet wurde. Nur dann darf späterer Netzbezug den Speichern
@@ -532,19 +622,33 @@ export class Ladesteuerung {
 
       let entscheidung = berechneLadeziel(messwerte, this.parameter());
 
-      // Volladung endet, sobald das Fahrzeug weg ist — sonst gälte sie
+      // Handbetrieb endet, sobald das Fahrzeug weg ist — sonst gälte er
       // stillschweigend auch für den nächsten Ladevorgang.
-      if (this.volladung && messwerte.evAngesteckt === false) this.setzeVolladungStill(false);
+      if (this.betriebsart !== 'autark' && messwerte.evAngesteckt === false) {
+        this.setzeBetriebsartStill('autark', this.manuellA);
+      }
 
-      // Übersteuerung durch den Menschen: bis zur Obergrenze laden, Netzbezug
-      // ausdrücklich in Kauf genommen. Die Gerätegrenzen gelten weiterhin.
-      if (this.volladung && messwerte.evAngesteckt === true && messwerte.wallboxErreichbar) {
+      // Übersteuerung durch den Menschen. Die Gerätegrenzen gelten weiterhin:
+      // Was Wallbox und Fahrzeug nicht zulassen, wird auch von Hand nicht
+      // gesetzt.
+      const vonHand =
+        this.betriebsart !== 'autark'
+        && messwerte.evAngesteckt === true
+        && messwerte.wallboxErreichbar;
+      if (vonHand) {
+        const zielA =
+          this.betriebsart === 'volladung'
+            ? this.grenzen.maxA
+            : Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, this.manuellA));
         entscheidung = {
           ...entscheidung,
           zustand: 'laedt',
-          zielA: this.grenzen.maxA,
-          zielLeistungW: 0,
-          grund: `Volladung erzwungen — lädt mit ${this.grenzen.maxA} A, auch aus dem Netz.`,
+          zielA,
+          zielLeistungW: ladeleistungAusStromW(zielA, this.parameter().anschluss) ?? 0,
+          grund:
+            this.betriebsart === 'volladung'
+              ? `Volladung erzwungen — lädt mit ${zielA} A, auch aus dem Netz.`
+              : `Handbetrieb — fest auf ${zielA} A eingestellt, auch aus dem Netz.`,
         };
       }
       this.letzte = entscheidung;
@@ -560,13 +664,20 @@ export class Ladesteuerung {
         return;
       }
 
-      const ergebnis = beruhige({
-        wunschA: entscheidung.zielA,
-        netzbezugW: messwerte.netzbezugW ?? 0,
-        jetztMs: Date.now(),
-        historie: this.historie,
-        zeit: this.zeitparameter(),
-      });
+      // Beruhigung nur im Autarkbetrieb. Sie ist dafür da, nicht auf jede Wolke
+      // zu reagieren — nicht dafür, einen Menschen warten zu lassen. Wer den
+      // Schieberegler bewegt, will die Änderung sehen und nicht neunzig
+      // Sekunden Beobachtungszeit abwarten; nach einer Pause wären es sogar
+      // zwei Minuten.
+      const ergebnis = vonHand
+        ? sofort(entscheidung.zielA, this.historie, Date.now())
+        : beruhige({
+            wunschA: entscheidung.zielA,
+            netzbezugW: messwerte.netzbezugW ?? 0,
+            jetztMs: Date.now(),
+            historie: this.historie,
+            zeit: this.zeitparameter(),
+          });
 
       // Beobachten: rechnen, protokollieren, aber nichts an die Wallbox senden.
       if (this.config.ueberschuss.modus !== 'regeln') {
