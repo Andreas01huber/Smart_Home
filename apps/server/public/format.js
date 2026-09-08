@@ -124,11 +124,11 @@ export function formatLadeleistung(ev) {
 // ── Hinweise rund um die Ladedose ───────────────────────────────────────────
 //
 // Reine Textfunktionen: Sie bekommen den Zustand der Regelung und geben einen
-// Satz zurueck, sonst nichts. Hier statt in app.js, weil sie so geprueft werden
-// koennen, ohne auf das passende Wetter zu warten — der Abendhinweis erscheint
+// Satz zurück, sonst nichts. Hier statt in app.js, weil sie so geprüft werden
+// können, ohne auf das passende Wetter zu warten — der Abendhinweis erscheint
 // sonst nur zwischen Sonnenuntergang und leerem Speicher.
 
-/** Was ein Ampere an der Starkstromdose bedeutet — Nennwert fuer den Vergleich. */
+/** Was ein Ampere an der Starkstromdose bedeutet — Nennwert für den Vergleich. */
 const DREHSTROM_W_PRO_A = 693;
 /** Und an der Haushaltssteckdose. */
 const HAUSHALT_W_PRO_A = 230;
@@ -138,26 +138,26 @@ const HAUSHALT_W_PRO_A = 230;
  *
  * Nur dann kommt ein Satz. Die Starkstromdose ist der Normalfall und braucht
  * keine Meldung; an der Haushaltsdose dagegen bedeutet dieselbe Amperezahl ein
- * Drittel der Leistung, und das erklaert sonst niemand.
+ * Drittel der Leistung, und das erklärt sonst niemand.
  */
 export function dosenText(regelung) {
   const dose = regelung?.anschluss;
   if (!dose || dose.phasen !== 1) return '';
   return `Erkannt: ${dose.name} — hier sind ein Ampere ${formatPower(dose.wattProAmpere)} `
-    + `statt ${formatPower(DREHSTROM_W_PRO_A)}. Laenger mit hohem Strom zu laden belastet `
+    + `statt ${formatPower(DREHSTROM_W_PRO_A)}. Länger mit hohem Strom zu laden belastet `
     + 'eine Haushaltsleitung stark.';
 }
 
 /**
- * Der Hinweis fuer den Abend.
+ * Der Hinweis für den Abend.
  *
- * Ist die Sonne weg und geben die Speicher die gut vier Kilowatt fuer den
+ * Ist die Sonne weg und geben die Speicher die gut vier Kilowatt für den
  * kleinsten dreiphasigen Ladestrom nicht mehr her, bricht die Regelung ab —
- * sonst kaeme der Rest aus dem Netz. An der Haushaltssteckdose reichen dafuer
+ * sonst käme der Rest aus dem Netz. An der Haushaltssteckdose reichen dafür
  * aber schon 1,4 kW. Statt einfach stehen zu bleiben, sagt die App, was dort
  * noch ginge.
  *
- * Im Handbetrieb kommt der Hinweis nicht: Dort ist Netzbezug ausdruecklich
+ * Im Handbetrieb kommt der Hinweis nicht: Dort ist Netzbezug ausdrücklich
  * gewollt, und es wird gar nicht abgebrochen.
  */
 export function umsteckText(regelung) {
@@ -169,7 +169,7 @@ export function umsteckText(regelung) {
   if (!isNum(r.verfuegbarW) || r.verfuegbarW < minA * HAUSHALT_W_PRO_A) return '';
   const maxA = r.maxA || 16;
   const moeglichA = Math.min(maxA, Math.floor(r.verfuegbarW / HAUSHALT_W_PRO_A));
-  return `Fuer die Starkstromdose reicht es gerade nicht — ${formatPower(r.verfuegbarW)} sind `
-    + `weniger als die ${formatPower(minA * DREHSTROM_W_PRO_A)} fuer ${minA} A. An der `
-    + `Haushaltssteckdose waeren es ${moeglichA} A. Zum Weiterladen dort umstecken.`;
+  return `Für die Starkstromdose reicht es gerade nicht — ${formatPower(r.verfuegbarW)} sind `
+    + `weniger als die ${formatPower(minA * DREHSTROM_W_PRO_A)} für ${minA} A. An der `
+    + `Haushaltssteckdose wären es ${moeglichA} A. Zum Weiterladen dort umstecken.`;
 }

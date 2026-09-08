@@ -270,6 +270,16 @@ export interface Speicherspielraum {
   readonly entladespielraumW: number;
   /** Entladung über der Freigabe — die gehört dem Haus und wird abgezogen. */
   readonly ueberEntladungW: number;
+  /**
+   * Laufende Entladung, die dem Auto zugerechnet werden darf.
+   *
+   * Je Speicher gerechnet und nicht als Summe: Ein Speicher unter seiner
+   * Reserve gibt für das Auto nichts her, auch wenn der andere noch Freigabe
+   * hätte. Über die Summe gerechnet käme sonst der Strom, den das Haus gerade
+   * aus dem fast leeren Speicher zieht, dem Auto zugute — und in der Anzeige
+   * stünde ein Speicherbeitrag, den es nicht gibt.
+   */
+  readonly genutzteEntladungW: number;
   /** Summe der konfigurierten Freigaben. Nur zur Anzeige. */
   readonly freigabeW: number;
 }
@@ -295,6 +305,7 @@ export function speicherspielraum(
   let ladungFuerAuto = 0;
   let entladespielraum = 0;
   let ueberEntladung = 0;
+  let genutzteEntladung = 0;
   let freigabe = 0;
 
   for (const s of speicher) {
@@ -310,6 +321,7 @@ export function speicherspielraum(
     const dieseFreigabe = darfEntladen ? Math.max(0, grenzen.entladenMaxW) : 0;
     freigabe += dieseFreigabe;
     ueberEntladung += Math.max(0, entladen - dieseFreigabe);
+    genutzteEntladung += Math.min(entladen, dieseFreigabe);
 
     if (soc === null || soc < grenzen.autoVorrangAbSocPercent) continue;
 
@@ -323,6 +335,7 @@ export function speicherspielraum(
     ladungFuerAutoW: ladungFuerAuto,
     entladespielraumW: entladespielraum,
     ueberEntladungW: ueberEntladung,
+    genutzteEntladungW: genutzteEntladung,
     freigabeW: freigabe,
   };
 }
@@ -466,7 +479,7 @@ export function berechneLadeziel(
   // also eine Zahl aus einer Datei. Die half beim Verstehen nicht: Sie blieb
   // gleich, ob der Speicher voll oder leer war.
   const speicherbeitrag =
-    spielraum.ladungFuerAutoW + spielraum.entladespielraumW + Math.min(entladung, freigabe);
+    spielraum.ladungFuerAutoW + spielraum.entladespielraumW + spielraum.genutzteEntladungW;
 
   // Die vier Summanden hinter dem Netzzähler sind bewusst zweierlei Art:
   //

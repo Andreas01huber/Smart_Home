@@ -619,3 +619,46 @@ describe('Eingefrorener Leistungswert der Wallbox', () => {
     assert.ok(e.zielA <= 6, `Ziel ${e.zielA} A`);
   });
 });
+
+describe('Speicherbeitrag wird je Speicher gerechnet', () => {
+  it('rechnet einen Speicher unter seiner Reserve nicht mit', () => {
+    // Der Abendfall vom 8.9.: Der kleine Speicher steht bei 25 % — unter seinen
+    // 40 % Reserve — und deckt gerade mit 1,2 kW das Haus. Der grosse ist voll
+    // und dürfte 3 kW abgeben. Über die Summe gerechnet zählten die 1,2 kW aus
+    // dem fast leeren Speicher als Beitrag fürs Auto mit, obwohl sie ihm nie
+    // zustehen. In der Anzeige stand deshalb ein Speicherbeitrag, den es nicht
+    // gab.
+    const e = berechneLadeziel(
+      messwerte({
+        pv: 0,
+        hausOhneAuto: 1200,
+        ev: 0,
+        speicher: [
+          { id: GROSS, name: 'Gross', socPercent: 100, ladenW: 0, entladenW: 0 },
+          { id: KLEIN, name: 'Klein', socPercent: 25, ladenW: 0, entladenW: 1200 },
+        ],
+      }),
+      parameter(),
+    );
+    // Der grosse Speicher steht still und hat nichts nachgewiesen, der kleine
+    // ist gesperrt: Es gibt keinen Beitrag.
+    assert.equal(e.speicherbeitragW, 0);
+  });
+
+  it('rechnet eine erlaubte Entladung sehr wohl mit', () => {
+    const e = berechneLadeziel(
+      messwerte({
+        pv: 0,
+        hausOhneAuto: 1200,
+        ev: 0,
+        speicher: [
+          { id: GROSS, name: 'Gross', socPercent: 100, ladenW: 0, entladenW: 1200 },
+          { id: KLEIN, name: 'Klein', socPercent: 25, ladenW: 0, entladenW: 0 },
+        ],
+      }),
+      parameter(),
+    );
+    // Der grosse Speicher darf bis 3000 W, liefert 1200 — die zählen.
+    assert.equal(e.speicherbeitragW, 1200);
+  });
+});
