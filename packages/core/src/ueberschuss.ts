@@ -150,6 +150,16 @@ export interface Messwerte {
   /** Aktuell an der Wallbox eingestellter Ladestrom. */
   readonly evStromA: number | null;
   /**
+   * Gemessene Spannung an der Ladedose und Zahl der liefernden Phasen.
+   *
+   * Beides kommt aus dem Datenpunkt `phase_a` der Wallbox — gemessen, nicht
+   * aus Leistung und eingestelltem Strom zurückgerechnet. Sind sie da, gilt
+   * die Messung; sonst bleibt es bei der Rückrechnung, die auch ohne diesen
+   * Datenpunkt auskommt.
+   */
+  readonly evSpannungV?: number | null;
+  readonly evPhasen?: 1 | 3 | null;
+  /**
    * Hauptschalter der Wallbox laut Gerät. null = meldet keinen.
    *
    * Geht nicht in die Rechnung ein — der Regeldienst braucht ihn, um sein
@@ -404,11 +414,14 @@ export function berechneLadeziel(
   // Die Eichung weiter unten prüft dabei mit: 10 084 W bei 6 A wären 970 V, das
   // liegt weit ausserhalb jeder Netzspannung. Solche Paare fallen durch, und es
   // bleibt bei der Umrechnung mit der Nennspannung.
-  const anschluss = gemessenerAnschluss(
-    gemeldetesAuto,
-    messwerte.evStromA,
-    parameter.anschluss,
-  );
+  const gemessen =
+    typeof messwerte.evSpannungV === 'number'
+    && messwerte.evSpannungV > 0
+    && (messwerte.evPhasen === 1 || messwerte.evPhasen === 3)
+      ? { phasen: messwerte.evPhasen, spannungV: messwerte.evSpannungV }
+      : null;
+  const anschluss =
+    gemessen ?? gemessenerAnschluss(gemeldetesAuto, messwerte.evStromA, parameter.anschluss);
   // Nur wenn wirklich ein Ladestrom eingestellt ist. Steht dort 0 oder nichts,
   // gibt es von dieser Seite keine Aussage — und ein Auto, das trotz
   // abgeschalteter Wallbox zieht, soll sichtbar bleiben und nicht auf null

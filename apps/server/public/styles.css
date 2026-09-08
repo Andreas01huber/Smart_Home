@@ -1562,32 +1562,77 @@ main {
 .ev-stufe.aktiv { background: var(--ev); }
 .ev-stufe.aktiv i { color: var(--text); font-weight: 600; }
 
-/* Der Stopp-Knopf. Volle Breite und unten: Er ist die eine Handlung, die
-   alles ueberstimmt, und soll nicht wie ein weiterer Schalter neben den
-   Betriebsarten aussehen. Zurueckhaltend gefaerbt, solange geladen wird -
-   deutlich, sobald er greift. */
-.ev-stopp {
-  display: block; width: 100%;
-  margin-top: 0.8rem;
-  min-height: 46px;
-  padding: 0.6rem 1rem;
+/* ── Wischschalter zum Beenden ──────────────────────────────────────────────
+   Festhalten und nach rechts ziehen. Ein Knopf wird versehentlich getroffen,
+   ein Wisch nicht - und das Laden mitten im Vorgang abzubrechen ist genau so
+   eine Handlung: selten gewollt, aergerlich wenn ungewollt.
+
+   --wisch ist der Fortschritt von 0 bis 1 und wird beim Ziehen gesetzt. Er
+   steuert, wie stark der Hintergrund einfaerbt und wie sehr der Text
+   zuruecktritt: Man sieht, dass man etwas erreicht, bevor es passiert. */
+.ev-wisch {
+  --wisch: 0;
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  margin-top: 0.85rem;
+  height: 52px;                      /* Fingerhoehe, mit Rand zum Ziehen */
+  padding: 4px;
   border: 1px solid var(--border-strong);
-  border-radius: 11px;
+  border-radius: 999px;
   background: var(--surface);
-  color: var(--text);
-  font: inherit; font-weight: 600;
-  cursor: pointer;
-  transition: background 140ms ease, border-color 140ms ease;
+  cursor: grab;
+  overflow: hidden;
+  touch-action: pan-y;               /* Senkrecht scrollen bleibt moeglich */
+  user-select: none; -webkit-user-select: none;
 }
-.ev-stopp:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
-.ev-stopp:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
-.ev-stopp:disabled { opacity: 0.55; cursor: default; }
-.ev-stopp.an {
-  border-color: var(--accent-strong);
+/* Die einfaerbende Spur waechst mit dem Finger mit. */
+.ev-wisch::before {
+  content: '';
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  background: var(--accent-strong);
+  opacity: calc(var(--wisch) * 0.85);
+  transition: opacity 120ms linear;
+}
+.ev-wisch.zieht { cursor: grabbing; }
+.ev-wisch.zieht::before { transition: none; }
+
+.ev-wisch-text {
+  position: relative;
+  font-size: 0.88rem; font-weight: 600;
+  color: var(--text-dim);
+  /* Tritt zurueck, waehrend die Spur kommt - sonst kaempfen Text und Flaeche. */
+  opacity: calc(1 - var(--wisch) * 0.75);
+  pointer-events: none;
+  padding-left: 2.2rem;              /* Platz fuer den Griff in Ruhelage */
+}
+
+.ev-wisch-griff {
+  position: absolute; left: 4px; top: 4px;
+  display: flex; align-items: center; justify-content: center;
+  width: 42px; height: 42px;
+  border-radius: 50%;
   background: var(--accent-strong);
   color: var(--on-accent);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.28);
+  /* Ohne Uebergang beim Ziehen (sonst haengt der Griff hinter dem Finger),
+     mit Uebergang beim Zurueckgleiten - das uebernimmt die Klasse `zieht`. */
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-.ev-betrieb.gestoppt { border-color: var(--border-strong); background: var(--surface-2); }
+.ev-wisch.zieht .ev-wisch-griff { transition: none; }
+
+/* Im beendeten Zustand zeigt derselbe Schalter zurueck zum Laden. Gruen statt
+   Blau waere hier falsch: Es ist dieselbe Geste, nur die andere Richtung. */
+.ev-wisch.an { border-color: var(--accent-strong); }
+.ev-wisch.an .ev-wisch-text { color: var(--text); }
+
+.ev-wisch[aria-disabled='true'] { opacity: 0.6; cursor: default; }
+.ev-wisch:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+
+/* Wer Bewegung nicht mag, bekommt keine. Die Geste bleibt, nur ohne Gleiten. */
+@media (prefers-reduced-motion: reduce) {
+  .ev-wisch-griff, .ev-wisch::before { transition: none; }
+}
 
 .ev-betrieb-text {
   margin: 0.7rem 0 0;

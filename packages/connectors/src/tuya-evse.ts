@@ -36,6 +36,7 @@ import {
 } from '@energy/core';
 
 import { TuyaCloudClient, type TuyaStatusEntry } from './tuya-cloud.ts';
+import { entschluessblePhase, phasenAusMessung } from './tuya-phase.ts';
 import type { ConnectorDiagnostics, EnergyConnector } from './types.ts';
 
 export interface TuyaEvseOptions {
@@ -110,6 +111,9 @@ export function evSnapshotFromTuyaStatus(
     return raw === null ? null : raw * factor;
   };
 
+  // Der genaue Messwert der Wallbox: Spannung, tatsaechlicher Strom, Leistung.
+  const phase = entschluessblePhase(map.get('phase_a'));
+
   const workState = str('work_state');
   const connectionState = str('connection_state');
   const state: EvChargerState =
@@ -131,10 +135,19 @@ export function evSnapshotFromTuyaStatus(
     displayName: meta.displayName,
     state,
     vehicleConnected,
-    chargePowerW: scaled('power_total', 1), // scale 3 (kW) -> W ist der Rohwert
+    // `power_total` ist die Summe ueber alle Phasen und damit richtig — aber
+    // es erneuert sich unregelmaessig. Einphasig ist die Messung aus `phase_a`
+    // derselbe Wert, nur frisch; deshalb hat sie dort Vorrang.
+    chargePowerW:
+      phase !== null && phasenAusMessung(phase, scaled('power_total', 1)) === 1
+        ? phase.leistungW
+        : scaled('power_total', 1),
     sessionEnergyWh: sessionActive ? scaled('charge_energy_once', 10) : null,
     totalEnergyWh: scaled('forward_energy_total', 10),
     maxCurrentA: num('charge_cur_set'),
+    spannungV: phase?.spannungV ?? null,
+    stromA: phase?.stromA ?? null,
+    phasen: phasenAusMessung(phase ?? null, scaled('power_total', 1)),
     schalterAn: typeof map.get('switch') === 'boolean' ? (map.get('switch') as boolean) : null,
     temperatureC: num('temp_current'),
     // AC-Laden überträgt keinen Ladestand (IEC 61851). Niemals schätzen.
@@ -162,6 +175,9 @@ export class TuyaEvseConnector implements EnergyConnector {
   private errorCount = 0;
   private lastError: string | null = null;
   private missingMetrics: string[] = [];
+  /** Erreichbarkeit laut Cloud; null = noch nicht gefragt. */
+  private online: boolean | null = null;
+  private erreichbarkeitGeprueftAt = 0;
 
   /** Zwischenspeicher, damit der 2-s-Poll der Engine die Cloud nicht überrennt. */
   private cached: EvChargerSnapshot | null = null;
@@ -323,15 +339,38 @@ export class TuyaEvseConnector implements EnergyConnector {
     this.cachedAt = 0;
   }
 
+  /**
+   * Wie oft die Erreichbarkeit gesondert geprüft wird.
+   *
+   * Die Werte kommen aus den Geräteeigenschaften, die Erreichbarkeit aus
+   * `/v1.0/devices/{id}` — zwei Aufrufe. Der erste läuft im Ladetakt, der
+   * zweite selten: Ob die Wallbox am Netz hängt, ändert sich nicht im
+   * Sekundenrhythmus, und jeder Aufruf kostet Cloud-Kontingent.
+   */
+  private static readonly ERREICHBARKEIT_INTERVALL_MS = 30_000;
+
   private async refresh(): Promise<void> {
     const startedAt = Date.now();
     try {
-      const { online, status } = await this.client.deviceSnapshot(this.deviceId);
+      // Die Eigenschaften statt `/status`: Nur hier kommt `phase_a` mit, und
+      // nur hier steht zu jedem Wert, wann das Gerät ihn gemeldet hat.
+      const eigenschaften = await this.client.deviceProperties(this.deviceId);
       this.responseTimeMs = Date.now() - startedAt;
 
-      // Die Cloud ist erreichbar, das GERÄT aber nicht: dann sind die
-      // gelieferten Werte Altbestand und dürfen nicht als aktuell gelten.
-      if (online === false) {
+      // Erreichbarkeit getrennt und seltener. Über die Zeitstempel liesse sie
+      // sich NICHT herleiten: Eine Wallbox, an der gerade nichts lädt, meldet
+      // minutenlang gar nichts — sie ist deshalb nicht weg.
+      if (Date.now() - this.erreichbarkeitGeprueftAt >= TuyaEvseConnector.ERREICHBARKEIT_INTERVALL_MS) {
+        this.erreichbarkeitGeprueftAt = Date.now();
+        try {
+          const { online } = await this.client.deviceSnapshot(this.deviceId);
+          this.online = online;
+        } catch {
+          // Der Wert bleibt, was er war — ein Fehlschlag hier ist kein Beweis.
+        }
+      }
+
+      if (this.online === false) {
         this.lastError = 'Ladegerät ist nicht erreichbar (ausgesteckt?)';
         this.lastSuccessAt = null;
         this.cached = null;
@@ -339,12 +378,23 @@ export class TuyaEvseConnector implements EnergyConnector {
         return;
       }
 
+      const neuesteMs = eigenschaften.reduce(
+        (spaetestes, e) => (Number.isFinite(e.time) ? Math.max(spaetestes, e.time) : spaetestes),
+        0,
+      );
+
       this.lastSuccessAt = new Date();
       this.lastError = null;
-      this.cached = this.toSnapshot(status);
+      // Der Zeitpunkt kommt vom GERÄT, nicht von der Abfrage. Damit stimmt das
+      // Alter, das die Regelung sieht — und ein eingefrorener Wert fällt auf,
+      // statt für frisch gehalten zu werden.
+      this.cached = this.toSnapshot(
+        eigenschaften,
+        neuesteMs > 0 ? new Date(neuesteMs) : new Date(),
+      );
       this.cachedAt = Date.now();
       this.missingMetrics = ALL_METRICS.filter(
-        (key) => !status.some((entry) => entry.code === key),
+        (key) => !eigenschaften.some((entry) => entry.code === key),
       );
     } catch (error) {
       this.errorCount++;
@@ -355,11 +405,15 @@ export class TuyaEvseConnector implements EnergyConnector {
     }
   }
 
-  private toSnapshot(status: readonly TuyaStatusEntry[]): EvChargerSnapshot {
+  private toSnapshot(
+    status: readonly TuyaStatusEntry[],
+    measuredAt: Date,
+  ): EvChargerSnapshot {
     return evSnapshotFromTuyaStatus(status, {
       connectorId: this.id,
       deviceId: this.deviceId,
       displayName: this.displayName,
+      measuredAt,
     });
   }
 
@@ -375,6 +429,9 @@ export class TuyaEvseConnector implements EnergyConnector {
       totalEnergyWh: null,
       maxCurrentA: null,
       schalterAn: null,
+      spannungV: null,
+      stromA: null,
+      phasen: null,
       temperatureC: null,
       vehicleSocPercent: null,
       faultText: null,

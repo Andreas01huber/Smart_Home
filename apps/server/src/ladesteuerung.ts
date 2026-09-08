@@ -58,6 +58,7 @@ import {
 import type { TuyaEvseConnector } from '@energy/connectors';
 
 import { ladeanschlussAus, type AppConfig } from './config.ts';
+import { ladeDose, merkeDose } from './wallbox-speicher.ts';
 import type { EnergyEngine, EngineState } from './engine.ts';
 
 /**
@@ -303,8 +304,19 @@ export class Ladesteuerung {
     private readonly engine: EnergyEngine,
     private readonly wallbox: TuyaEvseConnector | null,
     private readonly config: AppConfig,
+    private readonly datenverzeichnis: string | null = null,
   ) {
-    this.anschluss = ladeanschlussAus(config);
+    // Die zuletzt erkannte Dose gilt weiter — siehe `wallbox-speicher.ts`.
+    const gemerkt = datenverzeichnis === null ? null : ladeDose(datenverzeichnis);
+    this.anschluss = gemerkt === null
+      ? ladeanschlussAus(config)
+      : { phasen: gemerkt.phasen, spannungV: gemerkt.spannungV };
+    if (gemerkt !== null) {
+      console.log(
+        `[Laderegelung] Zuletzt erkannte Dose: ${anschlussName(this.anschluss)} `
+          + `(${Math.round(this.anschluss.spannungV)} V).`,
+      );
+    }
   }
 
   /**
@@ -704,10 +716,17 @@ export class Ladesteuerung {
 
     // Ältester Messwert, der in die Entscheidung eingeht. Der Netzzähler ist
     // das Rückführsignal - ist der alt, ist die ganze Regelung blind.
+    //
+    // Das Alter der Wallbox zählt nur mit, solange sie eingeschaltet ist. Eine
+    // abgeschaltete Wallbox meldet minutenlang nichts, weil sich nichts ändert
+    // — ihr "0 W" ist dann alt und trotzdem richtig. Zählte es mit, könnte die
+    // Regelung nie wieder anfangen zu laden: Sie bräuchte einen frischen Wert,
+    // den es erst gäbe, wenn sie eingeschaltet hätte.
+    const wallboxLaeuft = ev?.schalterAn === true || (ev?.chargePowerW ?? 0) > 0;
     const alter = [
       snap.gridImportW.provenance.ageMs,
       snap.solarProductionW.provenance.ageMs,
-      ev?.provenance.ageMs ?? 0,
+      wallboxLaeuft ? (ev?.provenance.ageMs ?? 0) : 0,
     ].filter((a) => Number.isFinite(a));
     const messalterMs = alter.length > 0 ? Math.max(...alter) : Number.POSITIVE_INFINITY;
 
@@ -720,6 +739,8 @@ export class Ladesteuerung {
       evAngesteckt: ev?.vehicleConnected ?? null,
       evStromA: ev?.maxCurrentA ?? null,
       evSchalterAn: ev?.schalterAn ?? null,
+      evSpannungV: ev?.spannungV ?? null,
+      evPhasen: ev?.phasen ?? null,
       speicher,
       messalterMs,
       wallboxErreichbar: ev !== null && ev.state !== 'offline',
@@ -782,21 +803,41 @@ export class Ladesteuerung {
           this.hoechsteLadeleistungW,
           messwerte.evLeistungW ?? 0,
         );
-        const erkannt = gemessenerAnschluss(
-          messwerte.evLeistungW,
-          messwerte.evStromA,
-          this.anschluss,
-          this.hoechsteLadeleistungW,
-        );
-        if (erkannt.phasen !== this.anschluss.phasen) {
-          console.log(
-            `[Laderegelung] Anschluss erkannt: ${anschlussName(erkannt)} `
-              + `(${Math.round(erkannt.spannungV)} V, ${erkannt.phasen === 3 ? 'dreiphasig' : 'einphasig'}). `
-              + `Ein Ampere sind hier ${Math.round(ladeleistungAusStromW(1, erkannt) ?? 0)} W.`,
-          );
-        }
-        this.anschluss = erkannt;
       }
+
+      // ── An welcher Dose hängt das Auto? ─────────────────────────────────
+      // Erste Wahl ist die Messung: Die Wallbox meldet in `phase_a` Spannung
+      // und tatsächlichen Strom, daraus folgt die Zahl der Phasen ohne jedes
+      // Zurückrechnen. Fehlt der Datenpunkt, greift die alte Herleitung aus
+      // Leistung und eingestelltem Strom.
+      const erkannt =
+        messwerte.evSpannungV != null
+        && messwerte.evSpannungV > 0
+        && (messwerte.evPhasen === 1 || messwerte.evPhasen === 3)
+          ? { phasen: messwerte.evPhasen, spannungV: messwerte.evSpannungV }
+          : laedtWirklich
+            ? gemessenerAnschluss(
+                messwerte.evLeistungW,
+                messwerte.evStromA,
+                this.anschluss,
+                this.hoechsteLadeleistungW,
+              )
+            : this.anschluss;
+      if (erkannt.phasen !== this.anschluss.phasen) {
+        if (this.datenverzeichnis !== null) {
+          merkeDose(this.datenverzeichnis, {
+            phasen: erkannt.phasen,
+            spannungV: erkannt.spannungV,
+            erkanntAm: new Date().toISOString(),
+          });
+        }
+        console.log(
+          `[Laderegelung] Anschluss erkannt: ${anschlussName(erkannt)} `
+            + `(${Math.round(erkannt.spannungV)} V, ${erkannt.phasen === 3 ? 'dreiphasig' : 'einphasig'}). `
+            + `Ein Ampere sind hier ${Math.round(ladeleistungAusStromW(1, erkannt) ?? 0)} W.`,
+        );
+      }
+      this.anschluss = erkannt;
 
       if (laedtWirklich && this.historie.gesetztA === 0) {
         console.warn(

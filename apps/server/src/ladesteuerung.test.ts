@@ -91,6 +91,10 @@ function wallboxZustand(opts: {
   leistungW: number | null;
   stromA?: number | null;
   schalterAn?: boolean | null;
+  alterMs?: number;
+  spannungV?: number | null;
+  gemessenA?: number | null;
+  phasen?: 1 | 3 | null;
   offline?: boolean;
 }): EvChargerSnapshot {
   return {
@@ -103,10 +107,13 @@ function wallboxZustand(opts: {
     totalEnergyWh: null,
     maxCurrentA: opts.stromA ?? 16,
     schalterAn: opts.schalterAn ?? null,
+    spannungV: opts.spannungV ?? null,
+    stromA: opts.gemessenA ?? null,
+    phasen: opts.phasen ?? null,
     temperatureC: null,
     vehicleSocPercent: null,
     faultText: null,
-    provenance: prov,
+    provenance: { ...prov, ageMs: opts.alterMs ?? 0 },
   };
 }
 
@@ -141,6 +148,7 @@ class EngineAttrappe {
     entladen?: number;
     laden?: number;
     schalterAn?: boolean | null;
+    evAlterMs?: number;
     offline?: boolean;
   }): void {
     const entladen = lage.entladen ?? 0;
@@ -159,6 +167,7 @@ class EngineAttrappe {
         leistungW: lage.ev,
         stromA: lage.stromA ?? null,
         schalterAn: lage.schalterAn ?? null,
+        alterMs: lage.evAlterMs ?? 0,
         ...(lage.offline === true ? { offline: true } : {}),
       }),
     };
@@ -900,5 +909,43 @@ describe('Laden von Hand beenden', () => {
       false,
       'der Stopp galt still für den nächsten Ladevorgang weiter',
     );
+  });
+});
+
+describe('Alter des Wallbox-Werts', () => {
+  it('hält eine schlafende, abgeschaltete Wallbox nicht für unbrauchbar', async () => {
+    // Eine Wallbox, an der nichts laedt, meldet minutenlang gar nichts — ihr
+    // Wert ist dann alt und trotzdem richtig. Zaehlte das Alter mit, koennte
+    // die Regelung nie wieder anfangen: Sie braeuchte einen frischen Wert, den
+    // es erst gaebe, wenn sie eingeschaltet haette.
+    const { engine, steuerung, zyklus } = aufbau({ maxMessalterSekunden: 30 });
+    engine.setze({
+      pv: 12_000,
+      hausOhneAuto: 500,
+      ev: 0,
+      stromA: 10,
+      schalterAn: false,
+      evAlterMs: 600_000,
+    });
+    await zyklus();
+    assert.notEqual(steuerung.zustand().zustand, 'pausiert-messwerte');
+    assert.ok(steuerung.zustand().zielA > 0, 'hat trotz Sonne nicht geladen');
+  });
+
+  it('pausiert sehr wohl, wenn die eingeschaltete Wallbox verstummt', async () => {
+    // Jetzt ist sie an, es fliesst Strom — und der Wert ist zehn Minuten alt.
+    // Dann weiss die Regelung nicht mehr, was das Auto zieht, und darf nicht
+    // weiterrechnen.
+    const { engine, steuerung, zyklus } = aufbau({ maxMessalterSekunden: 30 });
+    engine.setze({
+      pv: 12_000,
+      hausOhneAuto: 500,
+      ev: 4000,
+      stromA: 10,
+      schalterAn: true,
+      evAlterMs: 600_000,
+    });
+    await zyklus();
+    assert.equal(steuerung.zustand().zustand, 'pausiert-messwerte');
   });
 });

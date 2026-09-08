@@ -32,8 +32,9 @@
       "deviceId": "bf90221e7d69b1ec315154",
       "displayName": "LEAPMOTOR Charger",
       "region": "eu",
-      "idleIntervalMs": 30000,
-      "activeIntervalMs": 10000,
+      "_hinweis_takt": "Wie oft die Wallbox abgefragt wird. Waehrend des Ladens im selben Takt wie der Rest der Anlage, damit die Anzeige nicht hinterherhinkt - der Datenpunkt phase_a erneuert sich am Geraet alle paar Sekunden.",
+      "idleIntervalMs": 15000,
+      "activeIntervalMs": 2000,
 
       "phases": 3,
       "voltageV": 400,

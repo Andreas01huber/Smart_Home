@@ -1938,9 +1938,35 @@ function betriebsartMarkup(ev) {
       <p class="ev-betrieb-text">${esc(gestoppt ? 'Das Laden ist von Hand beendet. Die eingestellte Betriebsart gilt wieder, sobald du fortsetzt.' : erklaerung)}</p>
       ${dosenHinweis(ev)}
       ${umsteckHinweis(ev)}
-      <button type="button" class="ev-stopp${gestoppt ? ' an' : ''}" id="ev-stopp" data-an="${gestoppt}">
-        ${gestoppt ? 'Laden fortsetzen' : 'Laden beenden'}
-      </button>
+      ${wischMarkup(gestoppt)}
+    </div>`;
+}
+
+/**
+ * Der Wischschalter zum Beenden — festhalten und nach rechts ziehen.
+ *
+ * Ein Knopf wird versehentlich getroffen, ein Wisch nicht. Das Laden mitten im
+ * Vorgang abzubrechen ist genau so eine Handlung: selten gewollt, ärgerlich
+ * wenn ungewollt. Die Geste kostet eine halbe Sekunde und schliesst den
+ * Fehlgriff aus — anders als eine Rückfrage, die man wegklickt, ohne sie
+ * gelesen zu haben.
+ *
+ * Aufbau: eine Schiene, darin ein Griff, der sich mit dem Finger mitbewegt.
+ * Ab neunzig Prozent der Strecke löst er aus, darunter gleitet er zurück. Der
+ * Text dahinter wird beim Ziehen blasser — man sieht, dass man etwas erreicht,
+ * bevor es passiert.
+ */
+function wischMarkup(gestoppt) {
+  return `
+    <div class="ev-wisch${gestoppt ? ' an' : ''}" id="ev-wisch"
+         role="button" tabindex="0" aria-label="${gestoppt ? 'Laden fortsetzen' : 'Laden beenden'}">
+      <span class="ev-wisch-text">${gestoppt ? 'Zum Fortsetzen wischen' : 'Zum Beenden wischen'}</span>
+      <span class="ev-wisch-griff" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+             stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h13M13 6l6 6-6 6" />
+        </svg>
+      </span>
     </div>`;
 }
 
@@ -2360,12 +2386,9 @@ function renderEvDetail() {
     });
   });
 
-  const stopp = body.querySelector('#ev-stopp');
-  if (stopp) {
-    stopp.addEventListener('click', () => {
-      void sendeStopp(stopp.getAttribute('data-an') !== 'true');
-    });
-  }
+  const wisch = body.querySelector('#ev-wisch');
+  if (wisch) verdrahteWisch(wisch);
+
 
   const bestaetigen = body.querySelector('#ev-bestaetigen');
   if (bestaetigen) {
@@ -2452,6 +2475,81 @@ async function loadEvSessions() {
  * Zähler und braucht, bis das Fahrzeug wirklich folgt. Das ist richtig so: An
  * dieser Stelle soll die App nichts behaupten, was noch nicht fliesst.
  */
+/**
+ * Den Wischschalter zum Leben erwecken.
+ *
+ * Zeigergesteuert über Pointer-Events, damit Maus, Finger und Stift denselben
+ * Weg nehmen — mit Touch-Events allein wäre der Schalter am Schreibtisch tot,
+ * mit Maus-Events allein am Telefon.
+ *
+ * `setPointerCapture` ist kein Beiwerk: Ohne es verliert das Element den
+ * Zeiger, sobald der Finger die Schiene nach oben verlässt, und der Griff
+ * bliebe auf halbem Weg stehen. Mit Capture folgt er bis zum Loslassen.
+ *
+ * Die Tastatur kommt auch hin — Leertaste oder Eingabe lösen aus. Ein Wisch,
+ * den nur Zeigegeräte bedienen können, wäre eine Sperre und keine Sicherung.
+ */
+function verdrahteWisch(el) {
+  const griff = el.querySelector('.ev-wisch-griff');
+  if (!griff) return;
+  // Ab hier gilt es als gewollt. Neunzig Prozent, damit man nicht bis an den
+  // Anschlag muss, aber auch nicht mit einem Zucken auslöst.
+  const SCHWELLE = 0.9;
+  let zeiger = null;
+  let startX = 0;
+  let weg = 0;
+
+  const strecke = () => Math.max(1, el.clientWidth - griff.offsetWidth - 8);
+  const setze = (px) => {
+    weg = Math.min(strecke(), Math.max(0, px));
+    griff.style.transform = `translateX(${weg}px)`;
+    el.style.setProperty('--wisch', (weg / strecke()).toFixed(3));
+  };
+  const zurueck = () => {
+    el.classList.remove('zieht');
+    griff.style.transform = '';
+    el.style.removeProperty('--wisch');
+    weg = 0;
+  };
+
+  el.addEventListener('pointerdown', (e) => {
+    if (el.getAttribute('aria-disabled') === 'true') return;
+    zeiger = e.pointerId;
+    startX = e.clientX;
+    el.setPointerCapture(zeiger);
+    el.classList.add('zieht');
+  });
+
+  el.addEventListener('pointermove', (e) => {
+    if (zeiger !== e.pointerId) return;
+    setze(e.clientX - startX);
+  });
+
+  const loslassen = (e) => {
+    if (zeiger !== e.pointerId) return;
+    const geschafft = weg / strecke() >= SCHWELLE;
+    try { el.releasePointerCapture(zeiger); } catch { /* Zeiger schon weg */ }
+    zeiger = null;
+    if (geschafft) {
+      // Auf Anschlag rasten, dann senden: Die Bewegung soll fertig aussehen,
+      // bevor sich die Ansicht ändert.
+      setze(strecke());
+      el.setAttribute('aria-disabled', 'true');
+      void sendeStopp(!el.classList.contains('an'));
+    } else {
+      zurueck();
+    }
+  };
+  el.addEventListener('pointerup', loslassen);
+  el.addEventListener('pointercancel', loslassen);
+
+  el.addEventListener('keydown', (e) => {
+    if (e.key !== ' ' && e.key !== 'Enter') return;
+    e.preventDefault();
+    void sendeStopp(!el.classList.contains('an'));
+  });
+}
+
 async function sendeUndZeige(pfad, koerper, sofort) {
   // Zuerst die Anzeige umstellen, dann erst fragen. Die Antwort des Servers
   // braucht ein paar hundert Millisekunden, und in dieser Zeit soll der Knopf

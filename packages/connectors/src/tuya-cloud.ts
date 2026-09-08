@@ -134,6 +134,46 @@ export class TuyaCloudClient {
     return body.result.functions ?? [];
   }
 
+  /**
+   * Alle Datenpunkte eines Geräts — mit Zeitstempel je Wert.
+   *
+   * Der Unterschied zu `deviceSnapshot` ist entscheidend und war lange
+   * unbekannt: `/status` lässt Datenpunkte vom Typ `raw` weg. Genau dort steckt
+   * bei dieser Wallbox `phase_a` — acht Bytes mit Spannung, Strom und Leistung,
+   * die sich alle paar Sekunden erneuern. Ohne sie blieb nur `power_total`, und
+   * das steht auch minutenlang auf einem alten Wert.
+   *
+   * Der zweite Gewinn ist die Zeit: Jeder Wert bringt mit, wann das Gerät ihn
+   * zuletzt gemeldet hat. Damit lässt sich ein eingefrorener Wert erkennen,
+   * statt ihn für aktuell zu halten.
+   */
+  async deviceProperties(
+    deviceId: string,
+  ): Promise<readonly { code: string; value: unknown; time: number }[]> {
+    const token = await this.ensureToken();
+    const pfad = `/v2.0/cloud/thing/${encodeURIComponent(deviceId)}/shadow/properties`;
+    const body = await this.get<{
+      properties?: { code: string; value: unknown; time: number }[];
+    }>(pfad, token);
+    if (!body.success || !body.result) {
+      if (body.code === 1010 || body.code === 1011) this.token = null;
+      throw new Error(body.msg ?? 'Tuya-Eigenschaften nicht abrufbar');
+    }
+    return body.result.properties ?? [];
+  }
+
+  /**
+   * Roher GET auf einen beliebigen Cloud-Pfad.
+   *
+   * Nur für Diagnosewerkzeuge: Welche Datenpunkte ein Gerät überhaupt kennt,
+   * steht in keinem Datenblatt und lässt sich nur erfragen. Die Adapter selbst
+   * benutzen die benannten Methoden oben — dort ist dokumentiert, warum genau
+   * dieser Pfad und kein anderer.
+   */
+  async rohAbfrage<T>(pfad: string): Promise<TuyaResponse<T>> {
+    return this.get<T>(pfad, await this.ensureToken());
+  }
+
   // --- intern --------------------------------------------------------------
 
   private async ensureToken(): Promise<string> {

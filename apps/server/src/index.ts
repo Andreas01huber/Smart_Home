@@ -396,6 +396,12 @@ function serializeEv(
     state: charger.state,
     vehicleConnected: charger.vehicleConnected,
     powerW: charger.chargePowerW,
+    // Die genauen Messwerte des Geräts: Spannung an der Dose, tatsächlich
+    // fliessender Strom, Zahl der liefernden Phasen. Alles aus `phase_a` und
+    // damit gemessen — nicht aus der Einstellung gerechnet.
+    spannungV: charger.spannungV,
+    stromA: charger.stromA,
+    phasen: charger.phasen,
     sessionEnergyWh: charger.sessionEnergyWh,
     totalEnergyWh: charger.totalEnergyWh,
     maxCurrentA: charger.maxCurrentA,
@@ -580,7 +586,12 @@ async function main(): Promise<void> {
   // Überschussregelung. Stellt den Ladestrom so, dass das Auto nur Sonne und
   // freigegebene Speicherleistung nimmt. Im Modus "beobachten" (Vorgabe)
   // rechnet sie mit, sendet aber nichts.
-  const ladesteuerung = new Ladesteuerung(engine, wallbox, config);
+  const ladesteuerung = new Ladesteuerung(
+    engine,
+    wallbox,
+    config,
+    resolve(process.cwd(), 'data'),
+  );
   // Erst die Erfahrung des Tages übernehmen, dann anfangen zu regeln: Was die
   // Speicher können, steht im aufgezeichneten Verlauf und muss nach einem
   // Neustart nicht neu erarbeitet werden.

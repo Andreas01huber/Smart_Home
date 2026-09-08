@@ -128,6 +128,19 @@ export interface EvChargerSnapshot {
   /** Eingestellte Strombegrenzung (nur Anzeige — wird nie geschrieben). */
   readonly maxCurrentA: number | null;
   /**
+   * Gemessene Spannung an der Ladedose, in Volt.
+   *
+   * Kommt aus dem Datenpunkt `phase_a` der Wallbox und ist eine Messung, keine
+   * Rechnung. Vorher wurde die Spannung aus Leistung und EINGESTELLTEM Strom
+   * zurückgerechnet — und das ging schief, sobald das Fahrzeug weniger nahm als
+   * eingestellt war.
+   */
+  readonly spannungV: number | null;
+  /** Tatsächlich fliessender Ladestrom in Ampere. Nicht der eingestellte. */
+  readonly stromA: number | null;
+  /** Wie viele Phasen gerade Leistung liefern. null = nicht bestimmbar. */
+  readonly phasen: 1 | 3 | null;
+  /**
    * Hauptschalter der Wallbox, so wie das Gerät ihn meldet.
    *
    * Gebraucht, weil 'eingestellter Ladestrom' und 'laedt gerade' beide nicht
