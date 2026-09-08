@@ -641,3 +641,39 @@ describe('Betriebsarten: autark, Handbetrieb, Volladung', () => {
     assert.equal(k.maxA, 16);
   });
 });
+
+describe('Handbetrieb übernimmt den laufenden Ladestrom', () => {
+  it('startet dort, wo die Automatik gerade steht', async () => {
+    // Wer bei 16 A auf Hand umschaltet, erwartet 16 A und keinen Sprung auf
+    // den Mindestwert.
+    const { engine, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 9700, stromA: 14, schalterAn: true });
+    await zyklus();
+    assert.equal(steuerung.zustand().gesetztA, 16, 'Aufbau stimmt nicht');
+
+    steuerung.setzeBetriebsart('manuell');
+    assert.equal(steuerung.zustand().manuellA, 16);
+  });
+
+  it('nimmt den Wert vom Gerät, wenn selbst noch nie gesendet wurde', async () => {
+    // Im Beobachtungsmodus hat diese Regelung nie einen Befehl geschickt und
+    // weiss aus eigener Erinnerung nichts. Das Geraet weiss es.
+    const { engine, steuerung, zyklus } = aufbau({ modus: 'beobachten' });
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 9700, stromA: 14, schalterAn: true });
+    await zyklus();
+
+    steuerung.setzeBetriebsart('manuell');
+    assert.equal(steuerung.zustand().manuellA, 14);
+  });
+
+  it('behält den eingestellten Wert über einen Wechsel zur Volladung', async () => {
+    const { engine, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 6 });
+    await zyklus();
+    steuerung.setzeBetriebsart('manuell', 11);
+    await zyklus();
+    steuerung.setzeBetriebsart('volladung');
+    await zyklus();
+    assert.equal(steuerung.zustand().manuellA, 11, 'der Handwert ging verloren');
+  });
+});

@@ -680,8 +680,13 @@ export class Ladesteuerung {
           });
 
       // Beobachten: rechnen, protokollieren, aber nichts an die Wallbox senden.
+      //
+      // `gesetztA` bleibt dabei unangetastet. Die Beruhigung schreibt es fort,
+      // sobald sie senden WÜRDE — hier wurde aber nichts gesendet, und eine
+      // Regelung, die sich einen nie abgeschickten Sollwert merkt, führt sich
+      // selbst hinters Licht.
       if (this.config.ueberschuss.modus !== 'regeln') {
-        this.historie = ergebnis.historie;
+        this.historie = { ...ergebnis.historie, gesetztA: this.historie.gesetztA };
         this.notiere(
           messwerte,
           entscheidung,
