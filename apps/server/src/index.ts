@@ -505,6 +505,20 @@ async function main(): Promise<void> {
   // freigegebene Speicherleistung nimmt. Im Modus "beobachten" (Vorgabe)
   // rechnet sie mit, sendet aber nichts.
   const ladesteuerung = new Ladesteuerung(engine, wallbox, config);
+  // Erst die Erfahrung des Tages übernehmen, dann anfangen zu regeln: Was die
+  // Speicher können, steht im aufgezeichneten Verlauf und muss nach einem
+  // Neustart nicht neu erarbeitet werden.
+  ladesteuerung.lerneAus(
+    accumulator.todaySeries().flatMap((p) =>
+      Object.entries(p.bat).map(([id, b]) => ({
+        id,
+        // Negative Batterieleistung ist Entladung — dieselbe Vorzeichenregel
+        // wie im Verlauf und in der Engine.
+        entladenW: Math.max(0, -(b.p ?? 0)),
+        tMs: p.t,
+      })),
+    ),
+  );
 
   engine.start();
   ladesteuerung.start();

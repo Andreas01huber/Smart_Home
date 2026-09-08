@@ -31,10 +31,10 @@ function parameter(ueber: Partial<Reglerparameter> = {}): Reglerparameter {
     reserveW: 200,
     netzTotzoneW: 150,
     speicher: {
-      [GROSS]: { minSocPercent: 30, entladenMaxW: 3000 },
-      [KLEIN]: { minSocPercent: 40, entladenMaxW: 2000 },
+      [GROSS]: { minSocPercent: 30, entladenMaxW: 3000, autoVorrangAbSocPercent: 80 },
+      [KLEIN]: { minSocPercent: 40, entladenMaxW: 2000, autoVorrangAbSocPercent: 80 },
     },
-    speicherStandard: { minSocPercent: 50, entladenMaxW: 0 },
+    speicherStandard: { minSocPercent: 50, entladenMaxW: 0, autoVorrangAbSocPercent: 80 },
     speicherEntladenErlaubt: true,
     maxMessalterMs: 30_000,
     ...ueber,
@@ -362,5 +362,156 @@ describe('Netzbezug als Rückführung', () => {
     const e = berechneLadeziel(mitEinspeisung, p);
     // 4000 + 1800 - 200 = 5600 W -> 8 A.
     assert.equal(e.zielA, 8);
+  });
+});
+
+describe('Der Speicher schluckt den Überschuss — der echte Fall vom 8.9.2026', () => {
+  /**
+   * Die Lage, die alles ausgelöst hat, mit den echten Messwerten der Anlage:
+   * 7325 W Sonne, der kleine Speicher lädt bei 96,6 % noch mit 1898 W, der
+   * grosse ist voll. Weil der Speicher alles schluckt, geht nichts ins Netz —
+   * und die alte Rechnung sah deshalb null Überschuss, obwohl über 5 kW frei
+   * waren.
+   */
+  function lage(ueber: Partial<Messwerte> = {}): Messwerte {
+    return {
+      pvW: 7325,
+      hausMitAutoW: 1250,
+      netzbezugW: 61,
+      netzeinspeisungW: 0,
+      evLeistungW: 0,
+      evAngesteckt: true,
+      evStromA: 0,
+      speicher: [
+        {
+          id: GROSS,
+          name: 'Grosser Speicher',
+          socPercent: 100,
+          ladenW: 61,
+          entladenW: 0,
+          bewaehrtEntladenW: 4222,
+        },
+        {
+          id: KLEIN,
+          name: 'Kleiner Speicher',
+          socPercent: 96.6,
+          ladenW: 1898,
+          entladenW: 0,
+          bewaehrtEntladenW: 4602,
+        },
+      ],
+      messalterMs: 1000,
+      wallboxErreichbar: true,
+      ...ueber,
+    };
+  }
+
+  it('lädt, statt bei null Einspeisung stehen zu bleiben', () => {
+    const e = berechneLadeziel(lage(), parameter());
+    assert.equal(e.zustand, 'laedt');
+    // 0 + 0 - 61 - 200 + 1959 (Ladeleistung beider Speicher)
+    // + 3000 + 2000 (Entladefreigabe, gedeckt durch den Nachweis) = 6698 W.
+    assert.ok(e.verfuegbarW > 6000, `nur ${Math.round(e.verfuegbarW)} W erkannt`);
+    assert.equal(e.zielA, 9);
+  });
+
+  it('erkennt ohne die Speicher gar nichts — so war es vorher', () => {
+    // Derselbe Moment, nur mit gesperrten Speichern: Netzzähler auf null,
+    // also aus seiner Sicht kein Überschuss. Genau das stand in der App.
+    const e = berechneLadeziel(lage(), parameter({ speicherEntladenErlaubt: false }));
+    assert.equal(e.zielA, 0);
+    assert.match(e.grund, /Speicher/);
+  });
+
+  it('rechnet den Hausverbrauch ohne Auto heraus', () => {
+    const e = berechneLadeziel(lage({ hausMitAutoW: 5426, evLeistungW: 4176 }), parameter());
+    assert.equal(e.hausOhneAutoW, 1250);
+  });
+});
+
+describe('Ladeleistung der Speicher gehört dem Auto — aber erst ab dem Vorrang', () => {
+  function mitLadung(soc: number, ladenW: number): Messwerte {
+    return {
+      pvW: 6000,
+      hausMitAutoW: 1000,
+      netzbezugW: 0,
+      netzeinspeisungW: 0,
+      evLeistungW: 0,
+      evAngesteckt: true,
+      evStromA: 0,
+      speicher: [
+        { id: GROSS, name: 'Gross', socPercent: soc, ladenW, entladenW: 0 },
+        { id: KLEIN, name: 'Klein', socPercent: 10, ladenW: 0, entladenW: 0 },
+      ],
+      messalterMs: 1000,
+      wallboxErreichbar: true,
+    };
+  }
+
+  it('zählt sie, wenn der Speicher fast voll ist', () => {
+    const e = berechneLadeziel(mitLadung(95, 5000), parameter());
+    // 0 + 0 - 0 - 200 + 5000 = 4800 W. Ohne Nachweis kommt nichts dazu.
+    assert.equal(Math.round(e.verfuegbarW), 4800);
+    assert.equal(e.zielA, 6);
+  });
+
+  it('zählt sie NICHT, solange der Speicher Vorrang hat', () => {
+    // 60 % Ladestand: Was abends fehlt, kommt aus dem Netz. Der Speicher darf
+    // erst voll werden.
+    const e = berechneLadeziel(mitLadung(60, 5000), parameter());
+    assert.equal(e.zielA, 0);
+    assert.equal(Math.round(e.verfuegbarW), -200);
+  });
+});
+
+describe('Entladespielraum nur bis zum Nachweis', () => {
+  function mitNachweis(bewaehrt: number | null, entladen = 0): Messwerte {
+    return {
+      pvW: 2000,
+      hausMitAutoW: 2000,
+      netzbezugW: 0,
+      netzeinspeisungW: 0,
+      evLeistungW: 0,
+      evAngesteckt: true,
+      evStromA: 0,
+      speicher: [
+        {
+          id: GROSS,
+          name: 'Gross',
+          socPercent: 100,
+          ladenW: 0,
+          entladenW: entladen,
+          ...(bewaehrt === null ? {} : { bewaehrtEntladenW: bewaehrt }),
+        },
+      ],
+      messalterMs: 1000,
+      wallboxErreichbar: true,
+    };
+  }
+
+  it('plant nichts ein, solange der Speicher nichts bewiesen hat', () => {
+    // Die Freigabe steht bei 3000 W. Ohne Nachweis ist sie ein Versprechen —
+    // und Versprechen kosteten diese Anlage schon einmal 2 kWh am Tag.
+    const e = berechneLadeziel(mitNachweis(null), parameter());
+    assert.equal(Math.round(e.verfuegbarW), -200);
+    assert.equal(e.zielA, 0);
+  });
+
+  it('plant höchstens den Nachweis ein, nie die volle Freigabe', () => {
+    const e = berechneLadeziel(mitNachweis(1500), parameter());
+    assert.equal(Math.round(e.verfuegbarW), 1300);
+  });
+
+  it('deckelt beim konfigurierten Höchstwert, auch wenn mehr bewiesen ist', () => {
+    // Der Speicher kann 8000 W. Erlaubt sind für das Auto trotzdem nur 3000.
+    const e = berechneLadeziel(mitNachweis(8000), parameter());
+    assert.equal(Math.round(e.verfuegbarW), 2800);
+  });
+
+  it('zählt nur den noch ungenutzten Teil', () => {
+    // Der Speicher liefert bereits 2000 W von 3000 W Freigabe: Es bleiben 1000.
+    // Ohne diese Subtraktion würde dieselbe Leistung zweimal verplant.
+    const e = berechneLadeziel(mitNachweis(3000, 2000), parameter());
+    assert.equal(Math.round(e.verfuegbarW), 800);
   });
 });

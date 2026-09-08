@@ -33,11 +33,27 @@
  *
  * ── Speicher ────────────────────────────────────────────────────────────────
  *
- * Eine laufende Entladung wird NICHT als verfügbar verbucht, sonst würde das
- * Auto den Speicher leersaugen, den das Haus für die Nacht braucht. Stattdessen
- * wird sie herausgerechnet und nur das wieder zugegeben, was die Strategie
- * ausdrücklich freigibt (`entladenMaxW`, oberhalb `minSocPercent`). Ergebnis:
- * Es kommt aus dem Speicher, was gebraucht wird, nicht was er hergäbe.
+ * Der Netzzähler allein sieht einen Teil des Überschusses nicht. Lädt ein
+ * Speicher gerade mit 1,9 kW, dann geht nichts ins Netz — der Zähler steht auf
+ * null und meldet damit "kein Überschuss", obwohl die Sonne 7,3 kW liefert.
+ * Genau das liess das Auto an sonnigen Tagen stehen.
+ *
+ * Deshalb kommen zum Netzzähler zwei Posten aus den Speichern dazu, und beide
+ * sind bewusst KEINE Versprechen aus der Konfiguration:
+ *
+ *   Ladeleistung   Was gerade in einen Speicher fliesst, ist gemessener
+ *                  Überschuss. Nimmt das Auto ihn, lädt der Speicher langsamer
+ *                  — Netzbezug entsteht dabei nicht.
+ *   Entladespielraum  Was ein Speicher noch hergeben könnte, aber höchstens
+ *                  so viel, wie er an dieser Anlage schon einmal wirklich
+ *                  geliefert hat.
+ *
+ * Beides gilt erst ab `autoVorrangAbSocPercent`. Darunter bleibt es bei der
+ * alten Rangfolge: Erst der Speicher, dann das Auto. Ist der Speicher dagegen
+ * fast voll, bringen ihm die letzten Prozent wenig und dem Auto viel.
+ *
+ * Eine Entladung ÜBER der Freigabe wird nach wie vor abgezogen — die braucht
+ * das Haus, nicht das Auto.
  *
  * Alles hier ist eine reine Funktion ohne Uhr, Netzwerk und Zustand — damit
  * jedes der Szenarien aus dem Betrieb als Test nachstellbar ist.
@@ -73,6 +89,14 @@ export interface SpeicherZustand {
   readonly socPercent: number | null;
   readonly ladenW: number | null;
   readonly entladenW: number | null;
+  /**
+   * Höchste Entladeleistung, die dieser Speicher nachweislich geliefert hat.
+   *
+   * Nicht das Datenblatt, nicht die Konfiguration: gemessen, an dieser Anlage,
+   * in den letzten Stunden. Nur bis hierher darf die Regelung mit dem Speicher
+   * rechnen — siehe `speicherspielraum`.
+   */
+  readonly bewaehrtEntladenW?: number | null;
 }
 
 /** Grenzen eines Speichers. Kommt aus der Konfiguration. */
@@ -81,6 +105,16 @@ export interface SpeicherGrenzen {
   readonly minSocPercent: number;
   /** Höchste Leistung, die für das Auto aus diesem Speicher kommen darf. */
   readonly entladenMaxW: number;
+  /**
+   * Ab diesem Ladestand hat das Auto Vorrang vor dem Speicher.
+   *
+   * Darunter gilt die alte Rangfolge: Erst wird der Speicher voll, das Auto
+   * bekommt nur, was übrig bleibt. Darüber dreht sie sich um — ein fast voller
+   * Speicher hat wenig davon, die letzten Prozent noch mitzunehmen, das Auto
+   * dagegen sehr viel. Das ist die Stellschraube für "die Speicher sind voll,
+   * also soll der Rest ins Auto".
+   */
+  readonly autoVorrangAbSocPercent: number;
 }
 
 /** Messwerte eines Regelzyklus. `null` heisst: unbekannt, nicht null Watt. */
@@ -94,6 +128,13 @@ export interface Messwerte {
   readonly evAngesteckt: boolean | null;
   /** Aktuell an der Wallbox eingestellter Ladestrom. */
   readonly evStromA: number | null;
+  /**
+   * Hauptschalter der Wallbox laut Gerät. null = meldet keinen.
+   *
+   * Geht nicht in die Rechnung ein — der Regeldienst braucht ihn, um sein
+   * eigenes Gedächtnis gegen die Wirklichkeit zu prüfen.
+   */
+  readonly evSchalterAn?: boolean | null;
   readonly speicher: readonly SpeicherZustand[];
   /** Alter des ältesten Messwerts, der in die Entscheidung eingeht. */
   readonly messalterMs: number;
@@ -141,7 +182,11 @@ export interface Ladeentscheidung {
   readonly grund: string;
 }
 
-const LEER: SpeicherGrenzen = { minSocPercent: 100, entladenMaxW: 0 };
+const LEER: SpeicherGrenzen = {
+  minSocPercent: 100,
+  entladenMaxW: 0,
+  autoVorrangAbSocPercent: 101,
+};
 
 function zahl(wert: number | null | undefined): number | null {
   return typeof wert === 'number' && Number.isFinite(wert) ? wert : null;
@@ -173,6 +218,100 @@ export function speicherFreigabeW(
 /** Summe der aktuellen Entladeleistung aller Speicher. */
 function entladungJetztW(speicher: readonly SpeicherZustand[]): number {
   return speicher.reduce((summe, s) => summe + Math.max(0, zahl(s.entladenW) ?? 0), 0);
+}
+
+/** Was die Speicher zur verfügbaren Leistung beitragen — in vier Posten. */
+export interface Speicherspielraum {
+  /**
+   * Leistung, die gerade in die Speicher fliesst und die das Auto haben darf.
+   *
+   * Der wichtigste Posten, und lange der fehlende. Ein Speicher, der mit 1,9 kW
+   * lädt, verschluckt genau diese 1,9 kW Überschuss: Es geht nichts ins Netz,
+   * also sieht der Netzzähler nichts, also hielt die Regelung den Überschuss
+   * für null und liess das Auto stehen — bei 7,3 kW Sonne. Dabei ist diese
+   * Leistung der handfesteste Beitrag von allen, weil sie GEMESSEN ist. Nimmt
+   * das Auto sie, lädt der Speicher eben langsamer. Netzbezug entsteht dabei
+   * nicht, und die Rechnung korrigiert sich von selbst: Sinkt die Ladeleistung
+   * des Speichers, schrumpft dieser Posten im nächsten Zyklus mit.
+   */
+  readonly ladungFuerAutoW: number;
+  /**
+   * Noch ungenutzte Entladeleistung — begrenzt auf das, was der Speicher
+   * nachweislich schafft.
+   *
+   * Hier wäre der bequeme Fehler, die konfigurierte Freigabe einzusetzen. Das
+   * stand einmal so da und kostete rund 2 kWh Netzbezug am Tag: Eine Freigabe
+   * ist ein Versprechen, und ein Speicher an seiner Reserve oder mit
+   * begrenztem Wechselrichter hält es nicht. Das Auto zieht trotzdem, die
+   * Differenz kommt aus dem Netz — und weil das Versprechen fest in der Formel
+   * stand, pendelte sich die Regelung genau auf diesen Netzbezug ein, statt auf
+   * null.
+   *
+   * Deshalb zählt hier nur, was der Speicher an dieser Anlage schon einmal
+   * wirklich geliefert hat (`bewaehrtEntladenW`). Ein Speicher, der nie mehr
+   * als 2 kW hergab, wird auch nur mit 2 kW eingeplant, egal was in der
+   * Konfiguration steht. Damit kann die Regelung nicht dauerhaft zu viel
+   * verlangen, und ein Sägezahn aus "erhöhen, Netzbezug, senken" entsteht gar
+   * nicht erst.
+   */
+  readonly entladespielraumW: number;
+  /** Entladung über der Freigabe — die gehört dem Haus und wird abgezogen. */
+  readonly ueberEntladungW: number;
+  /** Summe der konfigurierten Freigaben. Nur zur Anzeige. */
+  readonly freigabeW: number;
+}
+
+/**
+ * Was dürfen die Speicher zum Laden des Autos beitragen?
+ *
+ * Drei Stufen, von unten nach oben:
+ *
+ *   SoC ≤ minSocPercent      Der Speicher ist tabu. Was er entlädt, braucht das
+ *                            Haus; es wird voll abgezogen.
+ *   bis autoVorrangAbSoc     Alte Rangfolge: Eine laufende Entladung bis zur
+ *                            Freigabe wird dem Auto nicht angelastet, aber es
+ *                            wird nichts eingeplant. Der Speicher hat Vorrang.
+ *   darüber                  Das Auto hat Vorrang: Die Ladeleistung des
+ *                            Speichers darf es haben, und der noch ungenutzte
+ *                            — bewährte — Entladespielraum kommt dazu.
+ */
+export function speicherspielraum(
+  speicher: readonly SpeicherZustand[],
+  parameter: Reglerparameter,
+): Speicherspielraum {
+  let ladungFuerAuto = 0;
+  let entladespielraum = 0;
+  let ueberEntladung = 0;
+  let freigabe = 0;
+
+  for (const s of speicher) {
+    const grenzen = parameter.speicher[s.id] ?? parameter.speicherStandard ?? LEER;
+    const soc = zahl(s.socPercent);
+    const laden = Math.max(0, zahl(s.ladenW) ?? 0);
+    const entladen = Math.max(0, zahl(s.entladenW) ?? 0);
+
+    // Ein Speicher ohne bekannten Ladestand zählt wie einer an seiner Reserve.
+    // Im Zweifel lieber zu wenig — das ist hier die ganze Haltung.
+    const darfEntladen =
+      parameter.speicherEntladenErlaubt && soc !== null && soc > grenzen.minSocPercent;
+    const dieseFreigabe = darfEntladen ? Math.max(0, grenzen.entladenMaxW) : 0;
+    freigabe += dieseFreigabe;
+    ueberEntladung += Math.max(0, entladen - dieseFreigabe);
+
+    if (soc === null || soc < grenzen.autoVorrangAbSocPercent) continue;
+
+    ladungFuerAuto += laden;
+    if (!darfEntladen) continue;
+    const bewaehrt = Math.max(0, zahl(s.bewaehrtEntladenW ?? null) ?? 0);
+    entladespielraum += Math.max(0, Math.min(dieseFreigabe, bewaehrt) - entladen);
+  }
+
+  return {
+    ladungFuerAutoW: ladungFuerAuto,
+    entladespielraumW: entladespielraum,
+    ueberEntladungW: ueberEntladung,
+    freigabeW: freigabe,
+  };
 }
 
 /** Auf die Schrittweite abgerundeter Ladestrom. Abrunden, niemals aufrunden. */
@@ -242,29 +381,36 @@ export function berechneLadeziel(
   }
 
   // ── Verfügbare Leistung ──────────────────────────────────────────────────
-  const freigabe = speicherFreigabeW(messwerte.speicher, parameter);
+  const spielraum = speicherspielraum(messwerte.speicher, parameter);
+  const freigabe = spielraum.freigabeW;
   const entladung = entladungJetztW(messwerte.speicher);
 
-  // Die Speicherfreigabe wird NICHT als verfügbare Leistung dazugerechnet.
-  //
-  // Das war der erste Entwurf und er war falsch. Die Freigabe ist ein
-  // Versprechen — "bis zu 3 kW dürften aus dem Speicher kommen" —, und ein
-  // Versprechen ist keine Messung. Steht der Speicher genau an seiner Reserve,
-  // ist seine eigene Regelung anderer Meinung oder begrenzt der Wechselrichter,
-  // dann liefert er die versprochene Leistung nicht. Das Auto zieht sie
-  // trotzdem, und die Differenz kommt aus dem Netz. Im Tagesdurchlauf waren das
-  // rund 2 kWh — genau das, was nie passieren darf.
-  //
-  // Die Freigabe entscheidet deshalb nur noch, wie viel einer LAUFENDEN
-  // Entladung dem Auto zugerechnet werden darf. Was darüber hinausgeht, gehört
-  // dem Haus und wird abgezogen. Wächst der Ladestrom, dann nur gegen echte
-  // Einspeisung — und wenn der Speicher dabei freiwillig mithilft, bleibt der
-  // Netzzähler auf null und alles ist gut. Was er nicht hergibt, wird auch nicht
-  // eingeplant.
-  const ueberEntladung = Math.max(0, entladung - freigabe);
+  // Was die Speicher zum Laden beitragen — das, was sie gerade liefern, plus
+  // das, was sie noch könnten. Früher stand hier die konfigurierte Freigabe,
+  // also eine Zahl aus einer Datei. Die half beim Verstehen nicht: Sie blieb
+  // gleich, ob der Speicher voll oder leer war.
+  const speicherbeitrag =
+    spielraum.ladungFuerAutoW + spielraum.entladespielraumW + Math.min(entladung, freigabe);
 
+  // Die vier Summanden hinter dem Netzzähler sind bewusst zweierlei Art:
+  //
+  //   evLeistung + einspeisung - netzbezug   gemessen, am Übergabepunkt
+  //   + ladungFuerAuto                       gemessen, an den Speichern
+  //   + entladespielraum                     bewährt, nicht versprochen
+  //   - ueberEntladung                       gemessen, gehört dem Haus
+  //
+  // Alles davon korrigiert sich im nächsten Zyklus selbst: Nimmt das Auto die
+  // Ladeleistung des Speichers, sinkt `ladungFuerAuto`; entlädt der Speicher
+  // wirklich, schrumpft `entladespielraum`. Es steht keine feste Zahl in der
+  // Formel, auf die sich die Regelung mit Netzbezug einpendeln könnte.
   const verfuegbar =
-    evLeistung + einspeisung - netzbezug - parameter.reserveW - ueberEntladung;
+    evLeistung
+    + einspeisung
+    - netzbezug
+    - parameter.reserveW
+    + spielraum.ladungFuerAutoW
+    + spielraum.entladespielraumW
+    - spielraum.ueberEntladungW;
 
   const maxLeistung = ladeleistungAusStromW(parameter.maxA, parameter.anschluss) ?? 0;
   const zielLeistung = Math.max(0, Math.min(verfuegbar, maxLeistung));
@@ -302,7 +448,7 @@ export function berechneLadeziel(
             + 'Sonne allein reicht gerade nicht.',
         ),
         verfuegbarW: verfuegbar,
-        speicherbeitragW: freigabe,
+        speicherbeitragW: speicherbeitrag,
       };
     }
     const fehlt = Math.max(
@@ -316,7 +462,7 @@ export function berechneLadeziel(
           + `Mindestladestrom von ${parameter.minA} A. Netzbezug würde entstehen.`,
       ),
       verfuegbarW: verfuegbar,
-      speicherbeitragW: freigabe,
+      speicherbeitragW: speicherbeitrag,
     };
   }
 
@@ -327,10 +473,10 @@ export function berechneLadeziel(
     zielLeistungW: gesetzteLeistung,
     verfuegbarW: verfuegbar,
     hausOhneAutoW: hausOhneAuto,
-    speicherbeitragW: freigabe,
+    speicherbeitragW: speicherbeitrag,
     grund:
-      freigabe > 0 && entladung > 0
-        ? `Lädt aus Überschuss und freigegebener Speicherleistung mit ${zielA} A.`
+      speicherbeitrag > 0
+        ? `Lädt mit ${zielA} A — Sonne plus ${Math.round(speicherbeitrag)} W aus den Speichern.`
         : `Lädt mit Überschuss, ${zielA} A.`,
   };
 }

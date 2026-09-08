@@ -93,12 +93,36 @@ export interface UeberschussConfig {
   readonly mindestabstandSekunden: number;
   readonly erhoehenNachSekunden: number;
   readonly senkenNachSekunden: number;
+  /** Verkuerzte Frist fuers Senken, wenn Strom aus dem Netz kommt. */
+  readonly senkenBeiBezugSekunden: number;
   readonly pausierenNachSekunden: number;
   readonly startenNachSekunden: number;
   readonly speicherEntladenErlaubt: boolean;
-  readonly speicher: Readonly<Record<string, { minSocPercent: number; entladenMaxW: number }>>;
-  readonly speicherStandard: { readonly minSocPercent: number; readonly entladenMaxW: number };
+  readonly speicher: Readonly<Record<string, Speichergrenzwerte>>;
+  readonly speicherStandard: Speichergrenzwerte;
 }
+
+/**
+ * Was ein einzelner Speicher für das Auto tun darf.
+ *
+ * Identisch zu `SpeicherGrenzen` aus `@energy/core` — hier eigens benannt, weil
+ * die Konfiguration ihre Form selbst beschreiben soll und nicht erst über einen
+ * Import verständlich werden darf.
+ */
+export interface Speichergrenzwerte {
+  readonly minSocPercent: number;
+  readonly entladenMaxW: number;
+  readonly autoVorrangAbSocPercent: number;
+}
+
+/**
+ * Ab wann das Auto Vorrang bekommt, wenn nichts anderes konfiguriert ist.
+ *
+ * 80 % ist bewusst hoch. Darunter ist der Speicher für das Haus wertvoller als
+ * für das Auto: Was abends fehlt, kommt aus dem Netz. Ab 80 % kehrt sich das
+ * um, weil die restlichen Prozent bei Sonne ohnehin wieder zusammenkommen.
+ */
+const AUTO_VORRANG_STANDARD_SOC = 80;
 
 const UEBERSCHUSS_STANDARD: UeberschussConfig = {
   // Vorsicht als Vorgabe: Wer die Wallbox zum ersten Mal stellen lässt, will
@@ -117,11 +141,16 @@ const UEBERSCHUSS_STANDARD: UeberschussConfig = {
   mindestabstandSekunden: 60,
   erhoehenNachSekunden: 90,
   senkenNachSekunden: 20,
+  senkenBeiBezugSekunden: 4,
   pausierenNachSekunden: 30,
   startenNachSekunden: 120,
   speicherEntladenErlaubt: true,
   speicher: {},
-  speicherStandard: { minSocPercent: 50, entladenMaxW: 0 },
+  speicherStandard: {
+    minSocPercent: 50,
+    entladenMaxW: 0,
+    autoVorrangAbSocPercent: AUTO_VORRANG_STANDARD_SOC,
+  },
 };
 
 export interface AppConfig {
@@ -285,7 +314,7 @@ function leseUeberschuss(roh: unknown): UeberschussConfig {
   const modus =
     r['modus'] === 'regeln' ? 'regeln' : r['modus'] === 'aus' ? 'aus' : 'beobachten';
 
-  const speicher: Record<string, { minSocPercent: number; entladenMaxW: number }> = {};
+  const speicher: Record<string, Speichergrenzwerte> = {};
   const rohSpeicher = r['speicher'];
   if (typeof rohSpeicher === 'object' && rohSpeicher !== null) {
     for (const [id, wert] of Object.entries(rohSpeicher as Record<string, unknown>)) {
@@ -295,6 +324,10 @@ function leseUeberschuss(roh: unknown): UeberschussConfig {
         minSocPercent:
           typeof w['minSocPercent'] === 'number' ? w['minSocPercent'] : 50,
         entladenMaxW: typeof w['entladenMaxW'] === 'number' ? w['entladenMaxW'] : 0,
+        autoVorrangAbSocPercent:
+          typeof w['autoVorrangAbSocPercent'] === 'number'
+            ? w['autoVorrangAbSocPercent']
+            : AUTO_VORRANG_STANDARD_SOC,
       };
     }
   }
@@ -311,6 +344,13 @@ function leseUeberschuss(roh: unknown): UeberschussConfig {
             typeof (rohStandard as Record<string, unknown>)['entladenMaxW'] === 'number'
               ? ((rohStandard as Record<string, unknown>)['entladenMaxW'] as number)
               : UEBERSCHUSS_STANDARD.speicherStandard.entladenMaxW,
+          autoVorrangAbSocPercent:
+            typeof (rohStandard as Record<string, unknown>)['autoVorrangAbSocPercent']
+            === 'number'
+              ? ((rohStandard as Record<string, unknown>)[
+                  'autoVorrangAbSocPercent'
+                ] as number)
+              : UEBERSCHUSS_STANDARD.speicherStandard.autoVorrangAbSocPercent,
         }
       : UEBERSCHUSS_STANDARD.speicherStandard;
 
@@ -327,6 +367,10 @@ function leseUeberschuss(roh: unknown): UeberschussConfig {
     mindestabstandSekunden: zahl('mindestabstandSekunden', UEBERSCHUSS_STANDARD.mindestabstandSekunden),
     erhoehenNachSekunden: zahl('erhoehenNachSekunden', UEBERSCHUSS_STANDARD.erhoehenNachSekunden),
     senkenNachSekunden: zahl('senkenNachSekunden', UEBERSCHUSS_STANDARD.senkenNachSekunden),
+    senkenBeiBezugSekunden: zahl(
+      'senkenBeiBezugSekunden',
+      UEBERSCHUSS_STANDARD.senkenBeiBezugSekunden,
+    ),
     pausierenNachSekunden: zahl('pausierenNachSekunden', UEBERSCHUSS_STANDARD.pausierenNachSekunden),
     startenNachSekunden: zahl('startenNachSekunden', UEBERSCHUSS_STANDARD.startenNachSekunden),
     speicherEntladenErlaubt: r['speicherEntladenErlaubt'] !== false,

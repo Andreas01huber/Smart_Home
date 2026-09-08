@@ -73,6 +73,7 @@ function charger(opts: {
     sessionEnergyWh: null,
     totalEnergyWh: null,
     maxCurrentA: 16,
+    schalterAn: null,
     temperatureC: 40,
     vehicleSocPercent: null,
     faultText: null,

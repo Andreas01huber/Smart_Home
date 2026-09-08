@@ -27,10 +27,18 @@ import assert from 'node:assert/strict';
 import { LADEANSCHLUSS_STANDARD, ladeleistungAusStromW } from './ladeleistung.ts';
 import {
   berechneLadeziel,
+  speicherspielraum,
   type Messwerte,
   type Reglerparameter,
 } from './ueberschuss.ts';
 import { beruhige, neueHistorie, type Zeitparameter } from './laderegler.ts';
+import {
+  bewaehrtW,
+  LEERES_GEDAECHTNIS,
+  merkeEntladung,
+  nachweisZuruecknehmen,
+  type Speichergedaechtnis,
+} from './speichergedaechtnis.ts';
 
 const SCHRITT_MS = 2000;
 const SCHRITTE_PRO_STUNDE = 3600_000 / SCHRITT_MS;
@@ -42,8 +50,8 @@ const PARAMETER: Reglerparameter = {
   schrittA: 1,
   reserveW: 200,
   netzTotzoneW: 150,
-  speicher: { gross: { minSocPercent: 40, entladenMaxW: 3000 } },
-  speicherStandard: { minSocPercent: 50, entladenMaxW: 0 },
+  speicher: { gross: { minSocPercent: 40, entladenMaxW: 3000, autoVorrangAbSocPercent: 80 } },
+  speicherStandard: { minSocPercent: 50, entladenMaxW: 0, autoVorrangAbSocPercent: 80 },
   speicherEntladenErlaubt: true,
   maxMessalterMs: 30_000,
 };
@@ -52,6 +60,7 @@ const ZEIT: Zeitparameter = {
   mindestabstandMs: 60_000,
   erhoehenNachMs: 90_000,
   senkenNachMs: 20_000,
+  senkenBeiBezugNachMs: 4000,
   pausierenNachMs: 30_000,
   startenNachMs: 120_000,
   notbremseAbW: 300,
@@ -105,11 +114,31 @@ function fahreTag(optionen: {
   speicherSoc: number;
   speicherErlaubt?: boolean;
   angesteckt?: (schritt: number) => boolean;
+  /**
+   * Was der Speicher WIRKLICH hergibt — unabhängig davon, was konfiguriert ist.
+   *
+   * Vorgabe 3000 W, also genau die Freigabe. Kleiner gesetzt entsteht der
+   * gefährliche Fall: Die Konfiguration verspricht mehr, als das Gerät liefert.
+   * Genau daran ist eine frühere Fassung gescheitert.
+   */
+  speicherKannW?: number;
+  /** Ab welchem Ladestand das Auto Vorrang hat; 101 schaltet den Vorrang ab. */
+  vorrangAbSoc?: number;
 }): Ergebnis {
   const parameter: Reglerparameter = {
     ...PARAMETER,
     speicherEntladenErlaubt: optionen.speicherErlaubt ?? true,
+    speicher: {
+      gross: {
+        ...PARAMETER.speicher['gross']!,
+        autoVorrangAbSocPercent:
+          optionen.vorrangAbSoc ?? PARAMETER.speicher['gross']!.autoVorrangAbSocPercent,
+      },
+    },
   };
+  const speicherKannW = optionen.speicherKannW ?? 3000;
+  let gedaechtnis: Speichergedaechtnis = LEERES_GEDAECHTNIS;
+  let mitSpeicherGerechnet = false;
   let historie = neueHistorie(-1, 0);
   let evLeistungW = 0;
   let sollA = 0;
@@ -135,8 +164,12 @@ function fahreTag(optionen: {
     // ── Physik: was der Speicher deckt und was ans Netz geht ───────────────
     const darfEntladen = parameter.speicherEntladenErlaubt && soc > 40;
     const bedarfMit = haus + evLeistungW;
-    const entladungMit = darfEntladen ? Math.min(3000, Math.max(0, bedarfMit - pv)) : 0;
-    const entladungOhne = darfEntladen ? Math.min(3000, Math.max(0, haus - pv)) : 0;
+    const entladungMit = darfEntladen
+      ? Math.min(speicherKannW, Math.max(0, bedarfMit - pv))
+      : 0;
+    const entladungOhne = darfEntladen
+      ? Math.min(speicherKannW, Math.max(0, haus - pv))
+      : 0;
 
     const netzMit = Math.max(0, bedarfMit - pv - entladungMit);
     const netzOhne = Math.max(0, haus - pv - entladungOhne);
@@ -166,6 +199,23 @@ function fahreTag(optionen: {
     soc = Math.max(0, Math.min(100, soc));
 
     // ── Regelung sieht nur Messwerte ───────────────────────────────────────
+    // Genau die Reihenfolge des echten Dienstes: erst mitschreiben, was der
+    // Speicher liefert, dann bei Netzbezug trotz eingeplanter Speicherleistung
+    // den Nachweis zurücknehmen, dann rechnen.
+    const speicherJetzt = [
+      {
+        id: 'gross',
+        name: 'Grosser Speicher',
+        socPercent: soc,
+        ladenW: Math.min(ladung, 3000),
+        entladenW: entladungMit,
+      },
+    ];
+    gedaechtnis = merkeEntladung(gedaechtnis, speicherJetzt, jetztMs);
+    if (mitSpeicherGerechnet && netzMit > ZEIT.notbremseAbW) {
+      gedaechtnis = nachweisZuruecknehmen(gedaechtnis, speicherJetzt, jetztMs);
+    }
+
     const messwerte: Messwerte = {
       pvW: pv,
       // Der Hausverbrauch der Anlage ENTHÄLT das Auto — wie im Echtbetrieb.
@@ -175,20 +225,17 @@ function fahreTag(optionen: {
       evLeistungW,
       evAngesteckt: angesteckt,
       evStromA: sollA,
-      speicher: [
-        {
-          id: 'gross',
-          name: 'Grosser Speicher',
-          socPercent: soc,
-          ladenW: Math.min(ladung, 3000),
-          entladenW: entladungMit,
-        },
-      ],
+      speicher: speicherJetzt.map((s) => ({
+        ...s,
+        bewaehrtEntladenW: bewaehrtW(gedaechtnis, s.id),
+      })),
       messalterMs: 2000,
       wallboxErreichbar: true,
     };
 
     const ziel = berechneLadeziel(messwerte, parameter);
+    mitSpeicherGerechnet =
+      speicherspielraum(messwerte.speicher, parameter).entladespielraumW > 0;
     const ergebnis = beruhige({
       wunschA: ziel.zielA,
       netzbezugW: netzMit,
@@ -241,12 +288,72 @@ describe('Ein ganzer Tag: das Auto verursacht keinen Netzbezug', () => {
     // Ein Tag mit sechsunddreissig Wolkendurchgaengen. Jede kostet die zwei
     // Sekunden bis zum naechsten Messwert - in Summe ein paar Dutzend
     // Wattstunden, also im Cent-Bereich.
+    //
+    // Achtzig statt der frueheren sechzig Wattstunden, und der Grund gehoert
+    // hierher: Seit das Auto auch die Speicher anzapfen darf, laedt es an
+    // solchen Tagen kraeftiger — und ein kraeftiger ladendes Auto reisst bei
+    // jeder Wolke eine groessere Luecke, bis die Regelung zwei Sekunden spaeter
+    // nachzieht. Der Handel dahinter steht im Test "der Handel stimmt": rund
+    // 1,9 kWh mehr aus Sonne und Speicher gegen knapp 10 Wh mehr aus dem Netz.
+    // Bei 28 ct Bezug und 8 ct Einspeisung ist das kein knapper Fall.
     assert.ok(
-      r.energieDurchAutoWh < 60,
+      r.energieDurchAutoWh < 80,
       `Auto hat ${r.energieDurchAutoWh.toFixed(1)} Wh aus dem Netz gezogen `
         + `(Spitze ${Math.round(r.maxUeberschussW)} W in ${r.schritteMitBezug} Schritten)`,
     );
     assert.ok(r.geladenWh > 5000, `nur ${(r.geladenWh / 1000).toFixed(1)} kWh geladen`);
+  });
+
+  it('der Handel stimmt: deutlich mehr geladen, kaum mehr Netzbezug', () => {
+    // Die eigentliche Rechtfertigung der Speicherfreigabe, als Zahl.
+    // `autoVorrangAbSocPercent: 101` schaltet sie ab — kein Ladestand erreicht
+    // 101 %. Damit laesst sich derselbe Tag mit und ohne fahren.
+    const ohne = fahreTag({
+      wolken: true,
+      speicherSoc: 70,
+      vorrangAbSoc: 101,
+    });
+    const mit = fahreTag({ wolken: true, speicherSoc: 70 });
+
+    const mehrGeladen = mit.geladenWh - ohne.geladenWh;
+    const mehrNetz = mit.energieDurchAutoWh - ohne.energieDurchAutoWh;
+    assert.ok(
+      mehrGeladen > 1000,
+      `nur ${mehrGeladen.toFixed(0)} Wh mehr geladen — die Speicherfreigabe bringt zu wenig`,
+    );
+    // Der Preis dafuer muss klein bleiben. Zwanzig Wattstunden sind gut ein
+    // halber Cent am Tag; jede Wattstunde davon ist eine Wolke, die kein
+    // Regler vorhersehen kann.
+    assert.ok(
+      mehrNetz < 20,
+      `${mehrNetz.toFixed(1)} Wh mehr aus dem Netz — zu teuer erkauft`,
+    );
+  });
+
+  it('ein Speicher, der weniger kann als versprochen, kostet keinen Netzbezug', () => {
+    // Der Fall, an dem eine fruehere Fassung gescheitert ist: Die Konfiguration
+    // gibt 3000 W frei, das Geraet liefert nur 1200 W. Frueher stand die
+    // Freigabe fest in der Formel, die Regelung pendelte sich auf 1800 W
+    // Netzbezug ein und blieb dort. Jetzt zaehlt nur, was der Speicher
+    // nachweislich liefert — nach dem ersten Fehlversuch also 1200 W.
+    const r = fahreTag({ wolken: true, speicherSoc: 70, speicherKannW: 1200 });
+    // 130 Wh ist keine willkuerliche Schranke, sondern der Unterschied zwischen
+    // Uebergang und Dauerzustand. Der alte Fehler war ein fester Versatz von
+    // 1800 W: ueber einen Ladetag waeren das rund 14 000 Wh, also das
+    // Hundertfache. Was hier uebrig bleibt, sind Wolken — dieselbe Groessen-
+    // ordnung wie beim Tag ganz ohne Speicher, der 150 Wh zugestanden bekommt.
+    assert.ok(
+      r.energieDurchAutoWh < 130,
+      `Auto hat ${r.energieDurchAutoWh.toFixed(1)} Wh aus dem Netz gezogen `
+        + `(Spitze ${Math.round(r.maxUeberschussW)} W)`,
+    );
+    // Und vor allem: kein Dauerzustand. Ein Saegezahn aus "erhoehen,
+    // Netzbezug, senken" wuerde hier sofort auffallen.
+    assert.ok(
+      r.laengsteDauerS <= 10,
+      `Netzbezug stand ${r.laengsteDauerS} s an — die Regelung sitzt ihn aus`,
+    );
+    assert.ok(r.befehle < 100, `${r.befehle} Befehle — das ist ein Saegezahn`);
   });
 
   it('leerer Speicher, Entladen für das Auto gesperrt', () => {

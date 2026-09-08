@@ -35,12 +35,19 @@
 import {
   berechneLadeziel,
   beruhige,
+  bewaehrtW,
+  gedaechtnisAusMesswerten,
+  LEERES_GEDAECHTNIS,
+  merkeEntladung,
+  nachweisZuruecknehmen,
   neueHistorie,
+  speicherspielraum,
   type Ladeentscheidung,
   type Ladezustand,
   type Messwerte,
   type Reglerhistorie,
   type Reglerparameter,
+  type Speichergedaechtnis,
   type SpeicherZustand,
   type Zeitparameter,
 } from '@energy/core';
@@ -149,12 +156,46 @@ export class Ladesteuerung {
   private initialisiert = false;
   private letzteSchnellpruefungAt = 0;
   private abmelden: (() => void) | null = null;
+  /**
+   * Was die Speicher nachweislich liefern.
+   *
+   * Wächst bei jedem Messtakt mit dem, was wirklich fliesst, und schrumpft,
+   * sobald trotz eingeplanter Speicherleistung Netzbezug auftritt. Ohne dieses
+   * Gedächtnis müsste die Regelung der Konfiguration glauben — und die kann
+   * keine Anlage kennen.
+   */
+  private gedaechtnis: Speichergedaechtnis = LEERES_GEDAECHTNIS;
+  /** Wurde im letzten Zyklus mit ungenutzter Speicherleistung gerechnet? */
+  private mitSpeicherGerechnet = false;
 
   constructor(
     private readonly engine: EnergyEngine,
     private readonly wallbox: TuyaEvseConnector | null,
     private readonly config: AppConfig,
   ) {}
+
+  /**
+   * Erfahrung aus aufgezeichneten Messwerten übernehmen.
+   *
+   * Vor `start()` aufzurufen. Ohne diesen Schritt fängt die Regelung nach jedem
+   * Neustart bei null Wissen an: Sie wüsste nicht, dass der grosse Speicher
+   * 4,2 kW und der kleine 4,6 kW liefern kann, würde beide nicht einplanen und
+   * einen halben Sonnentag zu wenig laden — bis das Haus zufällig genug Last
+   * macht, dass die Speicher es von selbst beweisen.
+   */
+  lerneAus(
+    punkte: readonly { readonly id: string; readonly entladenW: number; readonly tMs: number }[],
+  ): void {
+    this.gedaechtnis = gedaechtnisAusMesswerten(punkte, Date.now());
+    const zeilen = Object.entries(this.gedaechtnis)
+      .map(([id, n]) => `${id} ${Math.round(n.bewaehrtW)} W`)
+      .join(', ');
+    console.log(
+      zeilen === ''
+        ? '[Laderegelung] Keine Speichererfahrung im Verlauf — wird im Betrieb gelernt.'
+        : `[Laderegelung] Nachgewiesene Entladeleistung: ${zeilen}.`,
+    );
+  }
 
   start(): void {
     if (this.timer !== null) return;
@@ -199,16 +240,30 @@ export class Ladesteuerung {
     // und greift sofort ein, sobald wirklich Strom aus dem Netz fliesst,
     // während das Auto lädt. Aus einem halben Minutchen werden zwei Sekunden.
     this.abmelden = this.engine.subscribe((state) => {
-      if (this.config.ueberschuss.modus !== 'regeln' || this.laeuft) return;
-      if (Date.now() - this.letzteSchnellpruefungAt < SCHNELLPRUEFUNG_ABSTAND_MS) return;
-
       const snap = state.resolution.snapshot;
+      const speicher = this.speicherzustand(state);
       const netzbezug = snap.gridImportW.valueW ?? 0;
       const evLeistung = snap.evCharger?.chargePowerW ?? 0;
+      const jetzt = Date.now();
+
+      // Zusehen und lernen, in jeder Betriebsart. Auch wer nur beobachtet, soll
+      // wissen, was seine Speicher können — sonst startet die Regelung beim
+      // Umschalten auf "regeln" ohne jede Erfahrung.
+      this.gedaechtnis = merkeEntladung(this.gedaechtnis, speicher, jetzt);
+
+      if (this.config.ueberschuss.modus !== 'regeln' || this.laeuft) return;
       if (evLeistung <= LAEDT_AB_W) return;
       if (netzbezug <= this.config.ueberschuss.notbremseAbW) return;
+      if (jetzt - this.letzteSchnellpruefungAt < SCHNELLPRUEFUNG_ABSTAND_MS) return;
 
-      this.letzteSchnellpruefungAt = Date.now();
+      // Netzbezug, obwohl mit Speicherleistung gerechnet wurde: Die Annahme war
+      // zu gross. Vor dem Nachregeln den Nachweis zurücknehmen, sonst rechnet
+      // der gleich folgende Zyklus mit derselben zu hohen Zahl noch einmal.
+      if (this.mitSpeicherGerechnet) {
+        this.gedaechtnis = nachweisZuruecknehmen(this.gedaechtnis, speicher, jetzt);
+      }
+
+      this.letzteSchnellpruefungAt = jetzt;
       void this.zyklus();
     });
   }
@@ -331,12 +386,30 @@ export class Ladesteuerung {
       mindestabstandMs: u.mindestabstandSekunden * 1000,
       erhoehenNachMs: u.erhoehenNachSekunden * 1000,
       senkenNachMs: u.senkenNachSekunden * 1000,
+      senkenBeiBezugNachMs: u.senkenBeiBezugSekunden * 1000,
       pausierenNachMs: u.pausierenNachSekunden * 1000,
       startenNachMs: u.startenNachSekunden * 1000,
       notbremseAbW: u.notbremseAbW,
       netzTotzoneW: u.netzTotzoneW,
       netzImportTotzoneW: u.netzImportTotzoneW,
     };
+  }
+
+  /**
+   * Die Speicher, wie die Regelung sie sieht — samt Nachweis.
+   *
+   * Eigene Methode, weil der Schnellpfad sie im Zwei-Sekunden-Takt braucht,
+   * ohne den ganzen Messwertsatz aufzubauen.
+   */
+  private speicherzustand(state: EngineState): SpeicherZustand[] {
+    return state.resolution.snapshot.batteries.map((b) => ({
+      id: b.deviceId,
+      name: b.displayName,
+      socPercent: b.socPercent,
+      ladenW: b.chargeW,
+      entladenW: b.dischargeW,
+      bewaehrtEntladenW: bewaehrtW(this.gedaechtnis, b.deviceId),
+    }));
   }
 
   /**
@@ -350,13 +423,7 @@ export class Ladesteuerung {
     const snap = state.resolution.snapshot;
     const ev = snap.evCharger;
 
-    const speicher: SpeicherZustand[] = snap.batteries.map((b) => ({
-      id: b.deviceId,
-      name: b.displayName,
-      socPercent: b.socPercent,
-      ladenW: b.chargeW,
-      entladenW: b.dischargeW,
-    }));
+    const speicher = this.speicherzustand(state);
 
     // Ältester Messwert, der in die Entscheidung eingeht. Der Netzzähler ist
     // das Rückführsignal - ist der alt, ist die ganze Regelung blind.
@@ -375,6 +442,7 @@ export class Ladesteuerung {
       evLeistungW: ev?.chargePowerW ?? null,
       evAngesteckt: ev?.vehicleConnected ?? null,
       evStromA: ev?.maxCurrentA ?? null,
+      evSchalterAn: ev?.schalterAn ?? null,
       speicher,
       messalterMs,
       wallboxErreichbar: ev !== null && ev.state !== 'offline',
@@ -394,6 +462,13 @@ export class Ladesteuerung {
       if (state === null || this.wallbox === null) return;
 
       const messwerte = this.messwerte(state);
+
+      // Merken, ob in diesem Zyklus überhaupt mit ungenutzter Speicherleistung
+      // gerechnet wurde. Nur dann darf späterer Netzbezug den Speichern
+      // angelastet werden — sonst wäre jede Wolke ein Grund, den Nachweis zu
+      // kürzen, den die Speicher sich redlich verdient haben.
+      this.mitSpeicherGerechnet =
+        speicherspielraum(messwerte.speicher, this.parameter()).entladespielraumW > 0;
 
       // Beim ersten Zyklus weiss die Regelung nicht, was an der Wallbox
       // eingestellt ist — und sie darf es auch nicht annehmen. Tat sie bisher:
@@ -424,6 +499,35 @@ export class Ladesteuerung {
         );
         this.historie = { ...this.historie, gesetztA: messwerte.evStromA ?? UNBEKANNT_A };
         this.ladenAn = null;
+      }
+
+      // Und derselbe Griff in die andere Richtung — die Lücke, die am 8.9. an
+      // der Anlage auffiel. Das Gerät stand auf `charge_cur_set 16` bei
+      // `switch false`: eingestellt, aber abgeschaltet. Für die Regelung sah
+      // das aus wie "16 A sind gesetzt, es gibt nichts zu tun", die Beruhigung
+      // meldete brav "Sollwert unverändert" — und weil kein Befehl mehr
+      // hinausging, blieb die Wallbox aus, obwohl 11 kW Überschuss dastanden.
+      //
+      // Ein Ladestrom OHNE Schalter ist kein gesetzter Ladestrom. Deshalb gilt
+      // hier wieder der Messwert und nicht die Erinnerung: Ist das Gerät aus,
+      // wird das Gedächtnis auf "pausiert" gestellt, und der reguläre Startweg
+      // samt seiner Beobachtungszeit läuft von vorn.
+      //
+      // Der Abstand zum letzten Befehl muss sein: Direkt nach dem Einschalten
+      // meldet die Tuya-Cloud den alten Schalterzustand noch eine Weile weiter,
+      // und ohne diese Bedingung würde sich die Regelung selbst zurücksetzen.
+      const schalterAusMs = Date.now() - (this.letzterBefehlAt ?? 0);
+      if (
+        messwerte.evSchalterAn === false
+        && this.historie.gesetztA > 0
+        && schalterAusMs > this.config.ueberschuss.intervallSekunden * 1000
+      ) {
+        console.warn(
+          `[Laderegelung] Wallbox ist abgeschaltet, obwohl ${this.historie.gesetztA} A `
+            + 'gesetzt sein sollten — wird neu gestartet.',
+        );
+        this.historie = { ...this.historie, gesetztA: 0 };
+        this.ladenAn = false;
       }
 
       let entscheidung = berechneLadeziel(messwerte, this.parameter());

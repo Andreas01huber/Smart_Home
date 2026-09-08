@@ -135,6 +135,7 @@ export function evSnapshotFromTuyaStatus(
     sessionEnergyWh: sessionActive ? scaled('charge_energy_once', 10) : null,
     totalEnergyWh: scaled('forward_energy_total', 10),
     maxCurrentA: num('charge_cur_set'),
+    schalterAn: typeof map.get('switch') === 'boolean' ? (map.get('switch') as boolean) : null,
     temperatureC: num('temp_current'),
     // AC-Laden überträgt keinen Ladestand (IEC 61851). Niemals schätzen.
     vehicleSocPercent: null,
@@ -373,6 +374,7 @@ export class TuyaEvseConnector implements EnergyConnector {
       sessionEnergyWh: null,
       totalEnergyWh: null,
       maxCurrentA: null,
+      schalterAn: null,
       temperatureC: null,
       vehicleSocPercent: null,
       faultText: null,

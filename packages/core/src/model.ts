@@ -127,6 +127,16 @@ export interface EvChargerSnapshot {
   readonly totalEnergyWh: number | null;
   /** Eingestellte Strombegrenzung (nur Anzeige — wird nie geschrieben). */
   readonly maxCurrentA: number | null;
+  /**
+   * Hauptschalter der Wallbox, so wie das Gerät ihn meldet.
+   *
+   * Gebraucht, weil 'eingestellter Ladestrom' und 'laedt gerade' beide nicht
+   * verraten, ob die Wallbox ueberhaupt eingeschaltet ist: 16 A bei
+   * ausgeschaltetem Schalter sehen in jedem anderen Datenpunkt aus wie 16 A bei
+   * einem Fahrzeug, das gerade nicht laden will. null = Geraet meldet keinen
+   * Schalter.
+   */
+  readonly schalterAn: boolean | null;
   readonly temperatureC: number | null;
   /** Nur befüllbar, wenn eine Fahrzeugquelle existiert. Sonst null. */
   readonly vehicleSocPercent: number | null;

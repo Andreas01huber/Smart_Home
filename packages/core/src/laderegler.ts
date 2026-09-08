@@ -46,6 +46,22 @@ export interface Zeitparameter {
   readonly erhoehenNachMs: number;
   /** So lange muss ein niedrigerer Wunsch anhalten, bevor gesenkt wird. */
   readonly senkenNachMs: number;
+  /**
+   * Verkürzte Haltezeit fürs Senken, wenn wirklich Strom aus dem Netz kommt.
+   *
+   * Die zwanzig Sekunden oben sind für den harmlosen Fall gedacht: Die
+   * Einspeisung ist geschrumpft, das Auto könnte etwas weniger nehmen, und es
+   * eilt nicht. Fliesst dagegen Strom aus dem Netz, eilt es sehr wohl — dann
+   * kostet jede Sekunde Beobachtung Geld.
+   *
+   * Die Notbremse (`notbremseAbW`, 300 W) fängt nur den groben Fall ab. Genau
+   * dazwischen entstand der Fehler, den dieser Wert behebt: 60 W Netzbezug,
+   * unter der Notbremse und über der Totzone, wurden volle zwanzig Sekunden
+   * lang ausgesessen. Sechs Sekunden sind drei Messtakte — genug, um ein
+   * einzelnes Zappeln des Zählers nicht ernst zu nehmen, und kurz genug, dass
+   * kein nennenswerter Netzbezug entsteht.
+   */
+  readonly senkenBeiBezugNachMs: number;
   /** So lange muss "es reicht nicht" anhalten, bevor pausiert wird. */
   readonly pausierenNachMs: number;
   /** So lange muss "es reicht wieder" anhalten, bevor neu gestartet wird. */
@@ -167,7 +183,10 @@ export function beruhige(eingang: BeruhigungsEingang): BeruhigungsErgebnis {
     noetigMs = zeit.startenNachMs;
     was = `Start mit ${wunschA} A`;
   } else if (runter) {
-    noetigMs = zeit.senkenNachMs;
+    // Kommt Strom aus dem Netz, gilt die kurze Frist. Sonst die lange: Dann
+    // ist nur die Einspeisung geschrumpft, und das kostet nichts.
+    noetigMs =
+      netzbezugW > zeit.netzImportTotzoneW ? zeit.senkenBeiBezugNachMs : zeit.senkenNachMs;
     was = `Senken auf ${wunschA} A`;
   } else {
     noetigMs = zeit.erhoehenNachMs;

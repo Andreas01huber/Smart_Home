@@ -21,6 +21,7 @@ const ZEIT: Zeitparameter = {
   mindestabstandMs: 60_000,
   erhoehenNachMs: 90_000,
   senkenNachMs: 20_000,
+  senkenBeiBezugNachMs: 4000,
   pausierenNachMs: 30_000,
   startenNachMs: 120_000,
   notbremseAbW: 300,

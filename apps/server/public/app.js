@@ -1830,7 +1830,7 @@ function evLiveMarkup(ev) {
         ${tile('Verfügbare Leistung', r ? formatPower(r.verfuegbarW) : '—', !r)}
         ${tile('PV-Produktion', live.solar?.valueW == null ? '—' : formatPower(live.solar.valueW), true)}
         ${tile('Haus ohne Auto', r?.hausOhneAutoW == null ? '—' : formatPower(r.hausOhneAutoW), true)}
-        ${tile('Speicher freigegeben', r ? formatPower(r.speicherbeitragW) : '—', true)}
+        ${tile('Aus den Speichern', r ? formatPower(r.speicherbeitragW) : '—', true)}
         ${tile('Netz', netzW >= 0 ? `${formatPower(netzW)} Bezug` : `${formatPower(-netzW)} Einspeisung`, true, netzW > 100 ? 'bad' : 'ok')}
         ${tile('Fahrzeug', ev.vehicleConnected === true ? 'Angesteckt' : ev.vehicleConnected === false ? 'Nicht angesteckt' : '—', ev.vehicleConnected !== true, ev.vehicleConnected === true ? 'ok' : '')}
       </div>
