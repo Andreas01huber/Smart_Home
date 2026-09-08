@@ -1823,19 +1823,33 @@ function regelKopfMarkup(ev) {
   // Im Handbetrieb ist "Lädt mit Überschuss" schlicht falsch — da wird
   // notfalls Netzstrom gekauft. Und die Farbe darf dann nicht Grün sein:
   // Grün heisst in dieser App "alles aus eigener Erzeugung".
-  const titel = laedt && art === 'volladung'
-    ? 'Volladung läuft'
-    : laedt && art === 'manuell'
-      ? 'Lädt mit festem Ladestrom'
-      : (REGEL_KOPF[r.zustand] ?? 'Zustand unbekannt');
-  const klasse = laedt && art !== 'autark' ? 'warn'
+  // Die Regelung sagt "lädt", wenn sie freigegeben HAT. Ob das Fahrzeug die
+  // Freigabe auch annimmt, ist eine andere Frage — und die beantwortet nur die
+  // Wallbox. Steht dort Control-Pilot 9 V (angesteckt, fordert nicht) und
+  // fliesst nichts, dann lädt eben nichts, egal was die Rechnung freigibt.
+  // Das kommt vor: gegen Ende eines Ladevorgangs, bei Abfahrtszeit im Auto,
+  // oder wenn das Fahrzeug selbst eine Pause macht.
+  const fordertNicht = laedt && ev.state === 'connected' && (ev.powerW ?? 0) < 100;
+  const titel = fordertNicht
+    ? 'Freigegeben — Fahrzeug lädt gerade nicht'
+    : laedt && art === 'volladung'
+      ? 'Volladung läuft'
+      : laedt && art === 'manuell'
+        ? 'Lädt mit festem Ladestrom'
+        : (REGEL_KOPF[r.zustand] ?? 'Zustand unbekannt');
+  const klasse = fordertNicht ? ''
+    : laedt && art !== 'autark' ? 'warn'
     : laedt ? 'ok'
     : pausiert || r.zustand === 'gestoert' ? 'warn' : '';
   const nurBeobachtet = r.modus === 'beobachten';
   return `
     <div class="ev-kopf ${esc(klasse)}">
       <span class="ev-kopf-titel">${esc(titel)}</span>
-      <span class="ev-kopf-grund">${esc(r.grund ?? '')}</span>
+      <span class="ev-kopf-grund">${esc(
+        fordertNicht
+          ? `Die Wallbox ist auf ${r.gesetztA > 0 ? `${r.gesetztA} A` : 'Laden'} freigegeben, das Fahrzeug fordert gerade keinen Strom. Sobald es wieder will, läuft es von selbst an.`
+          : (r.grund ?? ''),
+      )}</span>
       ${nurBeobachtet ? `<span class="ev-kopf-hinweis">Beobachtungsmodus — die Wallbox wird noch nicht gestellt. Umschalten in config.json unter <code>ueberschussladen.modus</code>.</span>` : ''}
       ${r.modus === 'aus' ? `<span class="ev-kopf-hinweis">Die Regelung ist abgeschaltet. Die Wallbox lädt mit ihrer eigenen Einstellung.</span>` : ''}
     </div>`;

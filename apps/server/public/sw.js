@@ -6,7 +6,7 @@
  * veraltete Messwerte dürfen nicht als aktuell erscheinen (Anforderung 4P/53).
  */
 
-const CACHE = 'energie-shell-v62';
+const CACHE = 'energie-shell-v63';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/format.js', '/scene.js', '/favicon-64.png?v=20260827', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
