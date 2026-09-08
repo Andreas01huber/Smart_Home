@@ -97,6 +97,13 @@ export interface UeberschussConfig {
   readonly senkenBeiBezugSekunden: number;
   readonly pausierenNachSekunden: number;
   readonly startenNachSekunden: number;
+  /**
+   * Höchster Ladestrom an einer erkannten Haushaltssteckdose.
+   *
+   * Eine Schuko-Dose trägt 16 A kurzzeitig, aber nicht stundenlang. Zehn
+   * Ampere sind der Wert, auf den auch die mitgelieferten Ladeziegel begrenzen.
+   */
+  readonly haushaltMaxA: number;
   readonly speicherEntladenErlaubt: boolean;
   readonly speicher: Readonly<Record<string, Speichergrenzwerte>>;
   readonly speicherStandard: Speichergrenzwerte;
@@ -144,6 +151,7 @@ const UEBERSCHUSS_STANDARD: UeberschussConfig = {
   senkenBeiBezugSekunden: 4,
   pausierenNachSekunden: 30,
   startenNachSekunden: 120,
+  haushaltMaxA: 10,
   speicherEntladenErlaubt: true,
   speicher: {},
   speicherStandard: {
@@ -373,6 +381,7 @@ function leseUeberschuss(roh: unknown): UeberschussConfig {
     ),
     pausierenNachSekunden: zahl('pausierenNachSekunden', UEBERSCHUSS_STANDARD.pausierenNachSekunden),
     startenNachSekunden: zahl('startenNachSekunden', UEBERSCHUSS_STANDARD.startenNachSekunden),
+    haushaltMaxA: Math.max(6, zahl('haushaltMaxA', UEBERSCHUSS_STANDARD.haushaltMaxA)),
     speicherEntladenErlaubt: r['speicherEntladenErlaubt'] !== false,
     speicher,
     speicherStandard: standard,

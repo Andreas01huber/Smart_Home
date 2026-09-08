@@ -67,10 +67,13 @@
 
     "_hinweis_speicher": "Was die Speicher fuer das AUTO beisteuern duerfen - nicht was sie koennen. Unterhalb von minSocPercent gibt ein Speicher nichts mehr her, darueber hoechstens entladenMaxW. Eine laufende Entladung wird nie automatisch als Ueberschuss verbucht: sonst wuerde das Auto den Speicher leersaugen, den das Haus fuer die Nacht braucht.",
     "_hinweis_vorrang": "autoVorrangAbSocPercent ist die Umkehr der Rangfolge. Darunter hat der Speicher Vorrang und bekommt den Ueberschuss zuerst. Darueber hat das Auto Vorrang: Die Ladeleistung des Speichers zaehlt dann als verfuegbar, und der noch ungenutzte Entladespielraum kommt dazu. entladenMaxW sind 4000 W je Speicher, weil an dieser Anlage gemessen wurde: grosser Speicher 4222 W, kleiner Speicher 4602 W, gleichzeitig 7837 W bei 0 W Netzbezug (08.09.2026). Eingeplant wird trotzdem nur, was der Speicher zuletzt wirklich geliefert hat.",
+    "_hinweis_haushalt": "Hoechster Ladestrom, wenn die App eine Haushaltssteckdose erkennt. Eine Schuko-Dose traegt 16 A kurzzeitig, aber nicht stundenlang - genau darauf begrenzen auch die mitgelieferten Ladeziegel. Gilt auch im Handbetrieb.",
+    "haushaltMaxA": 10,
+
     "speicherEntladenErlaubt": true,
     "speicher": {
       "victron-modbus:system": { "minSocPercent": 40, "entladenMaxW": 4000, "autoVorrangAbSocPercent": 80 },
-      "fronius-gen24:0": { "minSocPercent": 50, "entladenMaxW": 4000, "autoVorrangAbSocPercent": 80 }
+      "fronius-gen24:0": { "minSocPercent": 10, "entladenMaxW": 4000, "autoVorrangAbSocPercent": 80 }
     },
     "speicherStandard": { "minSocPercent": 50, "entladenMaxW": 0, "autoVorrangAbSocPercent": 80 }
   },

@@ -1798,6 +1798,7 @@ const REGEL_KOPF = {
   wartet: 'Wartet auf Freigabe',
   'nicht-verbunden': 'Kein Fahrzeug angesteckt',
   laedt: 'Lädt aus Sonne und Speicher',
+  gestoppt: 'Laden beendet',
   'pausiert-leistung': 'Laden pausiert – zu wenig Überschuss',
   'pausiert-speicher': 'Laden pausiert – Speicherreserve',
   'pausiert-messwerte': 'Laden pausiert – Messwerte unsicher',
@@ -1896,6 +1897,7 @@ function betriebsartMarkup(ev) {
   const maxA = r.maxA || 16;
   const schieber = evSchieberA ?? (r.manuellA >= minA ? r.manuellA : Math.round((minA + maxA) / 2));
   const dose = r.anschluss;
+  const gestoppt = r.gestoppt === true;
 
   const knoepfe = EV_ARTEN.map((a) => `
     <button type="button" class="ev-art${a.id === art ? ' aktiv' : ''}" data-art="${a.id}"
@@ -1916,20 +1918,29 @@ function betriebsartMarkup(ev) {
       </div>
     </div>` : '';
 
-  const regler = art !== 'manuell' || evNachfrage ? '' : reglerMarkup(schieber, minA, maxA, dose);
+  // An der Haushaltsdose ist bei der dort zulaessigen Dauerstrom-Grenze Schluss.
+  // Einen Regler bis 16 A anzubieten und dann still auf 10 zu kappen waere ein
+  // Versprechen, das die App nicht haelt.
+  const reglerMaxA = Math.min(maxA, r.haushaltMaxA ?? maxA);
+  const regler = art !== 'manuell' || evNachfrage || gestoppt
+    ? ''
+    : reglerMarkup(Math.min(schieber, reglerMaxA), minA, reglerMaxA, dose);
 
   const erklaerung = art === 'intelligent'
     ? 'Es wird nur geladen, was Sonne und Speicher hergeben. Das Auto verursacht keinen Netzbezug.'
     : `Fest auf ${schieber} A. Reicht die eigene Erzeugung nicht, kommt der Rest aus dem Netz.`;
 
   return `
-    <div class="ev-betrieb ${art === 'manuell' ? 'netzstrom' : ''}">
+    <div class="ev-betrieb ${art === 'manuell' && !gestoppt ? 'netzstrom' : ''}${gestoppt ? ' gestoppt' : ''}">
       <div class="ev-arten" role="group" aria-label="Betriebsart">${knoepfe}</div>
       ${nachfrage}
       ${regler}
-      <p class="ev-betrieb-text">${esc(erklaerung)}</p>
+      <p class="ev-betrieb-text">${esc(gestoppt ? 'Das Laden ist von Hand beendet. Die eingestellte Betriebsart gilt wieder, sobald du fortsetzt.' : erklaerung)}</p>
       ${dosenHinweis(ev)}
       ${umsteckHinweis(ev)}
+      <button type="button" class="ev-stopp${gestoppt ? ' an' : ''}" id="ev-stopp" data-an="${gestoppt}">
+        ${gestoppt ? 'Laden fortsetzen' : 'Laden beenden'}
+      </button>
     </div>`;
 }
 
@@ -2349,6 +2360,13 @@ function renderEvDetail() {
     });
   });
 
+  const stopp = body.querySelector('#ev-stopp');
+  if (stopp) {
+    stopp.addEventListener('click', () => {
+      void sendeStopp(stopp.getAttribute('data-an') !== 'true');
+    });
+  }
+
   const bestaetigen = body.querySelector('#ev-bestaetigen');
   if (bestaetigen) {
     bestaetigen.addEventListener('click', () => {
@@ -2419,22 +2437,62 @@ async function loadEvSessions() {
  * hin neu und schickt seinen Tuya-Befehl hinaus. Ohne sie zeigte die Seite noch
  * den Zustand von davor, und es sähe aus, als hätte der Knopf nichts getan.
  */
-async function sendeBetriebsart(art, ampere) {
-  const bedienung = document.querySelectorAll('.ev-art, #ev-schieber');
+/**
+ * Einen Befehl absetzen und die Ansicht SOFORT nachziehen.
+ *
+ * Die Endpunkte antworten mit dem neuen Zustand der Regelung — genau dem
+ * Objekt, das auch im Live-Strom steckt. Das wird hier direkt in `lastLive`
+ * gesetzt und neu gezeichnet.
+ *
+ * Vorher stand hier eine Wartezeit von 800 ms und ein Nachladen des Protokolls.
+ * Das war zweimal falsch: Es dauerte fast eine Sekunde, bis der gedrückte Knopf
+ * reagierte, und die Antwort des Servers lag die ganze Zeit ungenutzt herum.
+ *
+ * Was NICHT sofort umspringt, ist die gemessene Ladeleistung — die kommt vom
+ * Zähler und braucht, bis das Fahrzeug wirklich folgt. Das ist richtig so: An
+ * dieser Stelle soll die App nichts behaupten, was noch nicht fliesst.
+ */
+async function sendeUndZeige(pfad, koerper, sofort) {
+  // Zuerst die Anzeige umstellen, dann erst fragen. Die Antwort des Servers
+  // braucht ein paar hundert Millisekunden, und in dieser Zeit soll der Knopf
+  // nicht aussehen, als haette man ihn nicht getroffen. Widerspricht der Server
+  // spaeter, gewinnt seine Antwort — sie wird unten drueber geschrieben.
+  if (sofort && lastLive?.ev?.regelung) {
+    lastLive.ev.regelung = { ...lastLive.ev.regelung, ...sofort };
+    renderEvDetail();
+  }
+  const bedienung = document.querySelectorAll('.ev-art, #ev-schieber, #ev-stopp');
   bedienung.forEach((x) => { x.disabled = true; });
   try {
-    await fetch('/api/ev/betriebsart', {
+    const antwort = await fetch(pfad, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(ampere === null || ampere === undefined ? { art } : { art, ampere }),
+      body: JSON.stringify(koerper),
     });
-    await new Promise((f) => setTimeout(f, 800));
-    await loadEvRegelung();
+    const kurz = await antwort.json();
+    if (kurz && typeof kurz === 'object' && lastLive?.ev) {
+      lastLive.ev.regelung = kurz;
+      evRegelung = { ...(evRegelung ?? {}), ...kurz };
+    }
     renderEvDetail();
+    // Das Protokoll im Hintergrund nachziehen, ohne die Anzeige aufzuhalten.
+    void loadEvRegelung();
   } catch (err) {
     console.error(err);
     bedienung.forEach((x) => { x.disabled = false; });
   }
+}
+
+function sendeBetriebsart(art, ampere) {
+  const koerper = ampere === null || ampere === undefined ? { art } : { art, ampere };
+  return sendeUndZeige('/api/ev/betriebsart', koerper, {
+    betriebsart: art,
+    ...(typeof ampere === 'number' ? { manuellA: ampere } : {}),
+  });
+}
+
+function sendeStopp(an) {
+  return sendeUndZeige('/api/ev/stopp', { an }, { gestoppt: an });
 }
 
 async function loadEvRegelung() {

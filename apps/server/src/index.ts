@@ -771,6 +771,17 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Laden anhalten oder fortsetzen — überstimmt jede Betriebsart.
+    if (url.pathname === '/api/ev/stopp' && request.method === 'POST') {
+      void readBody(request, 1_000)
+        .then((body) => {
+          ladesteuerung.setzeGestoppt((JSON.parse(body) as { an?: unknown }).an === true);
+          sendJson(response, 200, ladesteuerung.kurz());
+        })
+        .catch(() => sendJson(response, 400, { error: 'Ungültige Anfrage' }));
+      return;
+    }
+
     // Betriebsart wählen: autark, Handbetrieb mit festem Ladestrom, Volladung.
     // Die beiden letzten kaufen bewusst Netzstrom — auf Wunsch des Menschen.
     if (url.pathname === '/api/ev/betriebsart' && request.method === 'POST') {

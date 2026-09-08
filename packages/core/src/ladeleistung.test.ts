@@ -94,37 +94,51 @@ describe('Standardanschluss', () => {
 
 describe('An welcher Dose hängt das Auto?', () => {
   it('erkennt die Starkstromdose und die genaue Spannung', () => {
-    // Gemessen am 8.9.: 15 A eingestellt, 10 084 W geflossen.
     const a = gemessenerAnschluss(10_084, 15, LADEANSCHLUSS_STANDARD);
     assert.equal(a.phasen, 3);
     assert.ok(Math.abs(a.spannungV - 388) < 1, `${a.spannungV.toFixed(0)} V zurückgerechnet`);
-    // Und damit braucht die Höchststufe merklich weniger Überschuss.
-    const nenn = ladeleistungAusStromW(16, LADEANSCHLUSS_STANDARD) ?? 0;
-    assert.ok(nenn - (ladeleistungAusStromW(16, a) ?? 0) > 300);
   });
 
-  it('erkennt die Haushaltssteckdose', () => {
-    // 10 A an 230 V sind 2300 W. Dreiphasig gerechnet wären das 133 V — die
-    // gibt es nicht, also kann es nur einphasig sein.
-    const a = gemessenerAnschluss(2300, 10, LADEANSCHLUSS_STANDARD);
-    assert.equal(a.phasen, 1);
-    assert.ok(Math.abs(a.spannungV - 230) < 1);
-    assert.equal(anschlussName(a), 'Haushaltssteckdose');
+  it('erkennt die Haushaltssteckdose auch bei gedrückter Spannung', () => {
+    // Der echte Messwert vom 8.9.: 10 A eingestellt, 2073 W geflossen. Das sind
+    // 207 V — genau auf der Zehn-Prozent-Kante, und eine Messung später mit
+    // 2007 W sogar darunter. Mit dem alten engen Band kippte die Erkennung bei
+    // jedem Messwert hin und her.
+    for (const w of [2073, 2007, 2200]) {
+      const a = gemessenerAnschluss(w, 10, LADEANSCHLUSS_STANDARD);
+      assert.equal(a.phasen, 1, `${w} W bei 10 A nicht als Haushaltsdose erkannt`);
+      assert.equal(anschlussName(a), 'Haushaltssteckdose');
+    }
   });
 
   it('verwechselt die beiden Dosen nicht', () => {
-    // Dreiphasig gemessen, einphasig gerechnet ergäbe 693 V. Auch anders herum
-    // gibt es keine Überschneidung — die Bänder liegen weit auseinander.
     assert.equal(gemessenerAnschluss(11_085, 16).phasen, 3);
     assert.equal(gemessenerAnschluss(3680, 16).phasen, 1);
-    assert.equal(anschlussName(gemessenerAnschluss(11_085, 16)), 'Starkstromdose');
   });
 
-  it('bleibt beim Bekannten, wenn das Fahrzeug zurücknimmt', () => {
-    // 16 A eingestellt, nur 3 kW gemessen: dreiphasig 108 V, einphasig 187 V.
-    // Beides unmöglich, also gehört die Messung nicht zur Einstellung.
-    assert.deepEqual(gemessenerAnschluss(3000, 16), LADEANSCHLUSS_STANDARD);
-    assert.deepEqual(gemessenerAnschluss(3000, 16, LADEANSCHLUSS_HAUSHALT), LADEANSCHLUSS_HAUSHALT);
+  it('lässt sich von einem zurücknehmenden Fahrzeug nicht täuschen', () => {
+    // 16 A gesetzt, nur 3200 W gemessen: einphasig gerechnet wären das 200 V —
+    // durchaus möglich. Aber an diesem Anschluss sind schon 11 kW geflossen,
+    // und die gibt keine Haushaltsdose her. Also bleibt es dreiphasig.
+    //
+    // Der Irrtum wäre teuer: Die Regelung hielte 16 A für 3,7 kW statt für
+    // 11 kW und würde das Dreifache einplanen.
+    const a = gemessenerAnschluss(3200, 16, LADEANSCHLUSS_STANDARD, 11_085);
+    assert.equal(a.phasen, 3);
+    assert.deepEqual(a, LADEANSCHLUSS_STANDARD);
+  });
+
+  it('erlaubt die Haushaltsdose, solange nie mehr floss als sie hergibt', () => {
+    // Dieselbe Momentaufnahme, aber an diesem Anschluss war nie mehr als
+    // 2,3 kW — dann ist die Haushaltsdose die richtige Erklärung.
+    const a = gemessenerAnschluss(2300, 10, LADEANSCHLUSS_STANDARD, 2300);
+    assert.equal(a.phasen, 1);
+  });
+
+  it('bleibt beim Bekannten, wenn beides unmöglich wäre', () => {
+    // 16 A gesetzt, 800 W gemessen: 46 V dreiphasig, 50 V einphasig.
+    assert.deepEqual(gemessenerAnschluss(800, 16), LADEANSCHLUSS_STANDARD);
+    assert.deepEqual(gemessenerAnschluss(800, 16, LADEANSCHLUSS_HAUSHALT), LADEANSCHLUSS_HAUSHALT);
   });
 
   it('bleibt beim Bekannten, solange nichts gemessen ist', () => {
@@ -134,8 +148,8 @@ describe('An welcher Dose hängt das Auto?', () => {
   });
 
   it('rechnet an der Haushaltsdose ganz andere Kilowatt', () => {
-    // Der Punkt der ganzen Übung: Dieselben 16 A.
     assert.equal(Math.round(ladeleistungAusStromW(16, LADEANSCHLUSS_STANDARD) ?? 0), 11_085);
     assert.equal(Math.round(ladeleistungAusStromW(16, LADEANSCHLUSS_HAUSHALT) ?? 0), 3680);
+    assert.equal(Math.round(ladeleistungAusStromW(10, LADEANSCHLUSS_HAUSHALT) ?? 0), 2300);
   });
 });

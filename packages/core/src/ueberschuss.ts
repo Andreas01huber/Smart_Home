@@ -93,7 +93,15 @@ export type Ladezustand =
    * Ladestrom steht —, nur fliesst nichts. Ohne eigenen Zustand böte die
    * Regelung endlos weiter an.
    */
-  | 'fordert-nicht';
+  | 'fordert-nicht'
+  /**
+   * Vom Menschen angehalten.
+   *
+   * Kein Fehler und kein Mangel an Sonne, sondern eine Entscheidung — und die
+   * muss man in der Anzeige von einer Pause aus Leistungsmangel unterscheiden
+   * können, sonst sucht man nach einem Problem, das keines ist.
+   */
+  | 'gestoppt';
 
 /** Ein Speicher, so wie ihn die Regelung braucht. */
 export interface SpeicherZustand {

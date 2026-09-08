@@ -203,6 +203,7 @@ function konfiguration(ueber: Partial<AppConfig['ueberschuss']> = {}): AppConfig
       senkenBeiBezugSekunden: 0,
       pausierenNachSekunden: 0,
       startenNachSekunden: 0,
+      haushaltMaxA: 10,
       speicherEntladenErlaubt: false,
       speicher: {},
       speicherStandard: { minSocPercent: 50, entladenMaxW: 0, autoVorrangAbSocPercent: 80 },
@@ -784,5 +785,120 @@ describe('An welcher Dose steckt das Auto?', () => {
     engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 10, schalterAn: false });
     await zyklus();
     assert.equal(steuerung.zustand().anschluss.phasen, 1);
+  });
+});
+
+describe('Haushaltssteckdose begrenzt den Ladestrom', () => {
+  /** Bringt den Dienst dazu, die Haushaltsdose zu erkennen. */
+  async function anHaushaltsdose(
+    ueber: Partial<AppConfig['ueberschuss']> = {},
+  ): Promise<ReturnType<typeof aufbau>> {
+    const a = aufbau({ haushaltMaxA: 10, ...ueber });
+    // 10 A eingestellt, 2300 W gemessen — das kann nur einphasig sein.
+    a.engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 2300, stromA: 10, schalterAn: true });
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().anschluss.phasen, 1, 'Dose nicht erkannt');
+    return a;
+  }
+
+  it('geht auch bei viel Überschuss nicht über die Dauergrenze', async () => {
+    // Zwölf Kilowatt Sonne — dreiphasig wären das 16 A. An einer Schuko-Dose
+    // sind 16 A im Dauerbetrieb die klassische Ursache für geschmolzene
+    // Kontakte, deshalb ist bei zehn Schluss.
+    const a = await anHaushaltsdose();
+    a.wallbox.befehle.length = 0;
+    a.engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 2300, stromA: 10, schalterAn: true });
+    await a.zyklus();
+    assert.ok(a.steuerung.zustand().zielA <= 10, `${a.steuerung.zustand().zielA} A gesetzt`);
+  });
+
+  it('begrenzt auch den Handbetrieb', async () => {
+    // Von Hand 16 A einzustellen ist ein Wunsch, keine Erlaubnis: Die Regel
+    // dieser Anlage lautet, dass die Software nie über das hinausgeht, was die
+    // Elektroinstallation zulässt.
+    const a = await anHaushaltsdose();
+    a.wallbox.befehle.length = 0;
+    a.steuerung.setzeBetriebsart('manuell', 16);
+    await a.zyklus();
+    // Gesetzt wird nur, was sich aendert — geprueft wird deshalb das Ziel, nicht
+    // der Befehl: Steht die Wallbox schon auf 10 A, geht zu Recht nichts hinaus.
+    assert.equal(a.steuerung.zustand().zielA, 10);
+    assert.match(a.steuerung.zustand().grund, /Haushaltssteckdose/);
+  });
+
+  it('lässt an der Starkstromdose alles zu', async () => {
+    const a = aufbau({ haushaltMaxA: 10 });
+    a.engine.setze({ pv: 14_000, hausOhneAuto: 500, ev: 10_084, stromA: 15, schalterAn: true });
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().anschluss.phasen, 3);
+    a.steuerung.setzeBetriebsart('manuell', 16);
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().zielA, 16);
+    assert.doesNotMatch(a.steuerung.zustand().grund, /Haushaltssteckdose/);
+  });
+});
+
+describe('Laden von Hand beenden', () => {
+  it('schaltet ab, auch wenn die Sonne scheint', async () => {
+    const { engine, wallbox, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 11_085, stromA: 16, schalterAn: true });
+    await zyklus();
+    wallbox.befehle.length = 0;
+
+    steuerung.setzeGestoppt(true);
+    await zyklus();
+
+    assert.equal(steuerung.zustand().gestoppt, true);
+    assert.equal(steuerung.zustand().zustand, 'gestoppt');
+    assert.deepEqual(wallbox.befehle, [{ art: 'schalter', wert: false }]);
+  });
+
+  it('überstimmt auch den Handbetrieb', async () => {
+    const { engine, wallbox, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, stromA: 6 });
+    steuerung.setzeBetriebsart('manuell', 12);
+    await zyklus();
+    wallbox.befehle.length = 0;
+
+    steuerung.setzeGestoppt(true);
+    await zyklus();
+    assert.equal(steuerung.zustand().zielA, 0);
+    assert.equal(
+      wallbox.befehle.some((b) => b.art === 'strom'),
+      false,
+      'hat trotz Stopp einen Ladestrom gesetzt',
+    );
+  });
+
+  it('nimmt beim Fortsetzen die eingestellte Betriebsart zurück', async () => {
+    const { engine, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 6 });
+    steuerung.setzeBetriebsart('manuell', 12);
+    await zyklus();
+    steuerung.setzeGestoppt(true);
+    await zyklus();
+
+    steuerung.setzeGestoppt(false);
+    await zyklus();
+    assert.equal(steuerung.zustand().gestoppt, false);
+    assert.equal(steuerung.zustand().betriebsart, 'manuell');
+    assert.equal(steuerung.zustand().zielA, 12);
+  });
+
+  it('endet beim Abstecken', async () => {
+    const { engine, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 11_085, stromA: 16 });
+    await zyklus();
+    steuerung.setzeGestoppt(true);
+    await zyklus();
+    assert.equal(steuerung.zustand().gestoppt, true);
+
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, angesteckt: false });
+    await zyklus();
+    assert.equal(
+      steuerung.zustand().gestoppt,
+      false,
+      'der Stopp galt still für den nächsten Ladevorgang weiter',
+    );
   });
 });

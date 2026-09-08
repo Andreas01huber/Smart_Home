@@ -133,6 +133,10 @@ export interface Steuerzustand {
   readonly anschluss: Anschlussinfo;
   /** Angesteckt, fordert aber keinen Strom mehr (voll oder eigene Grenze). */
   readonly fordertNicht: boolean;
+  /** Vom Menschen angehalten. */
+  readonly gestoppt: boolean;
+  /** Höchster Ladestrom an einer Haushaltssteckdose. */
+  readonly haushaltMaxA: number;
   readonly protokoll: readonly Regelschritt[];
 }
 
@@ -251,6 +255,22 @@ export class Ladesteuerung {
   private fordertNicht = false;
   /** Wie oft hintereinander eingeschaltet wurde, ohne dass Strom floss. */
   private angeboteOhneLadung = 0;
+  /**
+   * Höchste je gemessene Ladeleistung an diesem Anschluss.
+   *
+   * Der Beweis gegen eine Fehlerkennung: Was einmal geflossen ist, kann eine
+   * Haushaltssteckdose nicht hergeben, wenn es über ihrer Grenze lag. Wird beim
+   * Abstecken zurückgesetzt — danach kann eine andere Dose dran sein.
+   */
+  private hoechsteLadeleistungW = 0;
+  /**
+   * Vom Menschen angehaltenes Laden.
+   *
+   * Eigener Zustand und keine Betriebsart: Wer "Laden beenden" drückt, will
+   * genau das — und beim Fortsetzen dieselbe Betriebsart zurück, nicht die
+   * Vorgabe. Endet beim Abstecken.
+   */
+  private gestoppt = false;
   /** Wann der nächste Versuch frühestens erlaubt ist, nachdem aufgegeben wurde. */
   private naechsterVersuchAt = 0;
   /** Zuletzt an die Wallbox gesendeter Schalterzustand; null = unbekannt. */
@@ -305,7 +325,34 @@ export class Ladesteuerung {
       this.angeboteOhneLadung = 0;
       this.fordertNicht = false;
       this.naechsterVersuchAt = 0;
+      // Beim nächsten Mal kann eine andere Dose dran sein — und ein von Hand
+      // beendetes Laden soll nicht stillschweigend weitergelten.
+      this.hoechsteLadeleistungW = 0;
+      this.gestoppt = false;
     }
+  }
+
+  /**
+   * Den Ladestrom auf das begrenzen, was die erkannte Dose verträgt.
+   *
+   * An der Starkstromdose sind es die Grenzen des Geräts, sonst nichts. An der
+   * Haushaltssteckdose kommt eine dazu, und die ist kein Software-Detail: Eine
+   * Schuko-Steckdose ist zwar mit 16 A gekennzeichnet, aber für 16 A im
+   * DAUERBETRIEB nicht gebaut. Stundenlang 3,7 kW über Kontakte, die dafür
+   * nicht ausgelegt sind, ist die klassische Ursache für geschmolzene Dosen —
+   * Ladeziegel, die einer Haushaltsdose beiliegen, begrenzen aus genau diesem
+   * Grund auf 8 bis 10 A.
+   *
+   * Deshalb gilt hier eine eigene Obergrenze, und zwar auch im Handbetrieb: Die
+   * Regel dieser Anlage lautet, dass die Software nie über das hinausgeht, was
+   * die Elektroinstallation zulässt. Wer es anders will, ändert
+   * `haushaltMaxA` in config.json — bewusst und an einer Stelle, nicht mit
+   * einem Fingertipp auf dem Handy.
+   */
+  private begrenzeAufDose(ampere: number): number {
+    const geraet = Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, Math.round(ampere)));
+    if (this.anschluss.phasen !== 1) return geraet;
+    return Math.min(geraet, this.config.ueberschuss.haushaltMaxA);
   }
 
   /** Der erkannte Anschluss, aufbereitet für die Oberfläche. */
@@ -469,6 +516,29 @@ export class Ladesteuerung {
   }
 
   /**
+   * Laden anhalten oder fortsetzen — der Knopf, der alles überstimmt.
+   *
+   * Anhalten wirkt in jeder Betriebsart: Auch wenn die Sonne scheint und der
+   * Handbetrieb 16 A vorgibt, bleibt die Wallbox aus. Beim Fortsetzen gilt
+   * wieder die eingestellte Betriebsart — nicht die Vorgabe, denn wer von Hand
+   * geladen hat, will nach der Pause wieder von Hand laden.
+   *
+   * Endet beim Abstecken: Der nächste Ladevorgang soll nicht stillschweigend
+   * angehalten sein.
+   */
+  setzeGestoppt(an: boolean): void {
+    if (this.gestoppt === an) return;
+    this.gestoppt = an;
+    console.log(
+      an
+        ? '[Laderegelung] Laden von Hand beendet.'
+        : '[Laderegelung] Laden von Hand fortgesetzt.',
+    );
+    // Wer den Knopf drückt, will es sehen und nicht dreissig Sekunden warten.
+    void this.zyklus();
+  }
+
+  /**
    * Alte Schnittstelle, damit eine noch zwischengespeicherte Oberfläche auf
    * dem Handy nicht ins Leere greift. "Volladung" heisst jetzt Handbetrieb auf
    * dem Höchstwert — gleiches Verhalten, ein Knopf weniger.
@@ -514,6 +584,8 @@ export class Ladesteuerung {
       volladung: this.betriebsart === 'manuell' && this.manuellA >= this.grenzen.maxA,
       anschluss: this.anschlussInfo(),
       fordertNicht: this.fordertNicht,
+      gestoppt: this.gestoppt,
+      haushaltMaxA: this.config.ueberschuss.haushaltMaxA,
       // Neueste zuerst — so liest man ein Protokoll.
       protokoll: [...this.protokoll].reverse(),
     };
@@ -542,6 +614,8 @@ export class Ladesteuerung {
     volladung: boolean;
     anschluss: Anschlussinfo;
     fordertNicht: boolean;
+    gestoppt: boolean;
+    haushaltMaxA: number;
   } {
     const e = this.letzte;
     return {
@@ -560,6 +634,8 @@ export class Ladesteuerung {
       volladung: this.betriebsart === 'manuell' && this.manuellA >= this.grenzen.maxA,
       anschluss: this.anschlussInfo(),
       fordertNicht: this.fordertNicht,
+      gestoppt: this.gestoppt,
+      haushaltMaxA: this.config.ueberschuss.haushaltMaxA,
     };
   }
 
@@ -702,10 +778,15 @@ export class Ladesteuerung {
       // fliesst — ohne Messung gibt es nichts zu erkennen, und der zuletzt
       // erkannte Anschluss bleibt die richtige Auskunft.
       if (laedtWirklich) {
+        this.hoechsteLadeleistungW = Math.max(
+          this.hoechsteLadeleistungW,
+          messwerte.evLeistungW ?? 0,
+        );
         const erkannt = gemessenerAnschluss(
           messwerte.evLeistungW,
           messwerte.evStromA,
           this.anschluss,
+          this.hoechsteLadeleistungW,
         );
         if (erkannt.phasen !== this.anschluss.phasen) {
           console.log(
@@ -800,17 +881,51 @@ export class Ladesteuerung {
       // gesetzt.
       const vonHand =
         this.betriebsart === 'manuell'
+        && !this.gestoppt
         && messwerte.evAngesteckt === true
         && messwerte.wallboxErreichbar;
       if (vonHand) {
-        const zielA = Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, this.manuellA));
+        const zielA = this.begrenzeAufDose(this.manuellA);
+        // Wurde der Wunsch gekappt, muss das dastehen. Sonst steht dort 10 A,
+        // wo 16 eingestellt wurden, und niemand weiss warum.
+        const gekappt = zielA < Math.round(this.manuellA);
         entscheidung = {
           ...entscheidung,
           zustand: 'laedt',
           zielA,
           zielLeistungW: ladeleistungAusStromW(zielA, this.anschluss) ?? 0,
-          grund: `Handbetrieb — fest auf ${zielA} A eingestellt, auch aus dem Netz.`,
+          grund: gekappt
+            ? `Handbetrieb — ${Math.round(this.manuellA)} A gewünscht, an der `
+              + `Haushaltssteckdose sind ${zielA} A die Dauergrenze.`
+            : `Handbetrieb — fest auf ${zielA} A eingestellt, auch aus dem Netz.`,
         };
+      }
+
+      // Der Stopp-Knopf überstimmt alles, auch den Handbetrieb und die
+      // schönste Sonne. Er steht deshalb ganz am Ende der Kette.
+      if (this.gestoppt && messwerte.evAngesteckt === true) {
+        entscheidung = {
+          ...entscheidung,
+          zustand: 'gestoppt',
+          zielA: 0,
+          zielLeistungW: 0,
+          grund: 'Laden von Hand beendet. Zum Weiterladen "Laden fortsetzen" drücken.',
+        };
+      }
+
+      // Und die Dose setzt die letzte Grenze — auch im intelligenten Betrieb.
+      if (entscheidung.zielA > 0) {
+        const begrenzt = this.begrenzeAufDose(entscheidung.zielA);
+        if (begrenzt !== entscheidung.zielA) {
+          entscheidung = {
+            ...entscheidung,
+            zielA: begrenzt,
+            zielLeistungW: ladeleistungAusStromW(begrenzt, this.anschluss) ?? 0,
+            grund:
+              `${entscheidung.grund} An der Haushaltssteckdose höchstens `
+              + `${begrenzt} A — mehr hält die Leitung im Dauerbetrieb nicht aus.`,
+          };
+        }
       }
       this.letzte = entscheidung;
 
@@ -825,6 +940,7 @@ export class Ladesteuerung {
       const regelbar =
         entscheidung.zustand === 'laedt'
         || entscheidung.zustand === 'fordert-nicht'
+        || entscheidung.zustand === 'gestoppt'
         || entscheidung.zustand.startsWith('pausiert');
       if (!regelbar) {
         this.notiere(messwerte, entscheidung, netzW, false, entscheidung.grund, null);

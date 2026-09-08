@@ -99,17 +99,31 @@ export function ladestromAusLeistungA(
 
 
 /**
- * Toleranzband der Netzspannung: ±10 % der Nennspannung.
+ * Wie weit die zurückgerechnete Spannung vom Nennwert abweichen darf.
  *
- * Aus EN 50160 — die Norm, die zusagt, in welchem Bereich die Versorgung liegen
- * darf. Hier dient sie als Plausibilitätsprüfung, nicht als Vorschrift: Was
- * ausserhalb liegt, kann keine Netzspannung sein, also stimmt die zugrunde
- * liegende Messung nicht.
+ * Das Versorgungsnetz selbst hält nach EN 50160 ±10 % ein. Gemessen wird hier
+ * aber nicht am Übergabepunkt, sondern hinter der Elektronik der Wallbox, ihrer
+ * Zuleitung und dem Kontakt der Steckdose. An dieser Anlage kommen bei 10 A an
+ * der Haushaltsdose 2073 W an — zurückgerechnet 207 V, also genau auf der
+ * Zehn-Prozent-Kante. Eine Messung später sind es 2007 W und damit 201 V, und
+ * die Erkennung kippte bei jedem Messwert hin und her.
+ *
+ * Fünfzehn Prozent decken diesen Spannungsfall ab und lassen die beiden
+ * Möglichkeiten immer noch weit auseinander: 196–265 V gegen 340–460 V.
  */
-const SPANNUNGSTOLERANZ = 0.1;
+const SPANNUNGSTOLERANZ = 0.15;
 
 /** Nennspannung je Anschlussart. Verkettet bei drei Phasen, gegen N bei einer. */
 const NENNSPANNUNG: Record<1 | 3, number> = { 1: 230, 3: 400 };
+
+/**
+ * Was eine Haushaltssteckdose überhaupt hergeben kann.
+ *
+ * 16 A an 230 V sind 3,7 kW, mehr geht dort physikalisch nicht. Wer je mehr
+ * gemessen hat, hängt an der Starkstromdose — und zwar unabhängig davon, was
+ * das Fahrzeug in diesem Moment gerade zieht.
+ */
+export const HAUSHALT_HOECHSTLEISTUNG_W = 3700;
 
 /** Einphasig an der Haushaltssteckdose — 16 A wären hier nur 3,7 kW. */
 export const LADEANSCHLUSS_HAUSHALT: Ladeanschluss = { phasen: 1, spannungV: 230 };
@@ -125,41 +139,49 @@ export const LADEANSCHLUSS_HAUSHALT: Ladeanschluss = { phasen: 1, spannungV: 230
  *     10 A an der Haushaltsdose    =  2,3 kW    (230 V × 10 A)
  *
  * Umgekehrt gerechnet ergibt die gemessene Leistung nur bei EINER der beiden
- * Annahmen eine mögliche Netzspannung. Bei 2,3 kW und 10 A wären es dreiphasig
- * 133 V — die gibt es nicht; einphasig 230 V — die gibt es. Die beiden Bänder
- * (207–253 V und 360–440 V) überschneiden sich nicht, die Zuordnung ist also
- * eindeutig und nicht geraten.
+ * Annahmen eine mögliche Netzspannung. Bei 2,1 kW und 10 A wären es dreiphasig
+ * 120 V — die gibt es nicht; einphasig 207 V — die gibt es. Genommen wird die
+ * Annahme, deren Spannung näher an ihrem Nennwert liegt, und auch die nur, wenn
+ * sie im Toleranzband bleibt.
  *
- * Nebenbei fällt die genaue Spannung mit ab. An dieser Anlage sind es 388 V und
- * nicht 400: 15 A ergeben gemessen 10 084 W statt der errechneten 10 395. Das
- * ist knapp ein ganzer Ampereschritt und entscheidet darüber, ob die Regelung
- * die Höchststufe je erreicht.
+ * ── Warum das allein nicht reicht ───────────────────────────────────────────
  *
- * Passt keine der beiden Annahmen, bleibt es beim bisher bekannten Anschluss.
- * Das ist der Normalfall bei einem Fahrzeug, das gegen Ende von sich aus
- * zurücknimmt, und bei einem veralteten Wert aus der Tuya-Cloud — beides ergäbe
- * eine unmöglich niedrige Spannung.
+ * Ein Fahrzeug, das gegen Ende von sich aus zurücknimmt, sieht aus wie eine
+ * schwächere Dose: 3200 W bei gesetzten 16 A ergeben einphasig 200 V, und das
+ * liegt im Band. Die Regelung hielte dreiphasige 16 A für 3,7 kW statt für
+ * 11 kW — und würde massiv zu viel einplanen. Deshalb der zweite Parameter:
+ *
+ * `hoechsteGemesseneW` ist die höchste Leistung, die an diesem Anschluss je
+ * geflossen ist. Lag sie über dem, was eine Haushaltssteckdose überhaupt
+ * hergibt, kann es keine sein — dann bleibt es dreiphasig, egal was die
+ * Momentaufnahme nahelegt. Die Richtung ist bewusst unsymmetrisch: Sich
+ * dreiphasig zu irren heisst zu vorsichtig laden, einphasig zu irren heisst
+ * Netzbezug.
  */
 export function gemessenerAnschluss(
   leistungW: number | null,
   ampere: number | null,
   anschluss: Ladeanschluss = LADEANSCHLUSS_STANDARD,
+  hoechsteGemesseneW = 0,
 ): Ladeanschluss {
   if (leistungW === null || !Number.isFinite(leistungW) || leistungW <= 0) return anschluss;
   if (ampere === null || !Number.isFinite(ampere) || ampere <= 0) return anschluss;
 
-  for (const phasen of [3, 1] as const) {
-    const teiler = (phasen === 3 ? Math.sqrt(3) : 1) * ampere * LEISTUNGSFAKTOR;
-    const gemessenV = leistungW / teiler;
-    const nenn = NENNSPANNUNG[phasen];
-    if (
-      gemessenV >= nenn * (1 - SPANNUNGSTOLERANZ)
-      && gemessenV <= nenn * (1 + SPANNUNGSTOLERANZ)
-    ) {
-      return { phasen, spannungV: gemessenV };
-    }
-  }
-  return anschluss;
+  const kandidaten = ([3, 1] as const)
+    .map((phasen) => {
+      const spannungV = leistungW / ((phasen === 3 ? Math.sqrt(3) : 1) * ampere * LEISTUNGSFAKTOR);
+      const abweichung = Math.abs(spannungV - NENNSPANNUNG[phasen]) / NENNSPANNUNG[phasen];
+      return { phasen, spannungV, abweichung };
+    })
+    .filter((k) => k.abweichung <= SPANNUNGSTOLERANZ)
+    // Eine Haushaltsdose kann nicht liefern, was hier schon einmal geflossen ist.
+    .filter((k) => k.phasen === 3 || hoechsteGemesseneW <= HAUSHALT_HOECHSTLEISTUNG_W)
+    .sort((a, b) => a.abweichung - b.abweichung);
+
+  const beste = kandidaten[0];
+  return beste === undefined
+    ? anschluss
+    : { phasen: beste.phasen, spannungV: beste.spannungV };
 }
 
 /** Klartext für die Oberfläche: an welcher Dose hängt das Auto? */

@@ -1562,6 +1562,33 @@ main {
 .ev-stufe.aktiv { background: var(--ev); }
 .ev-stufe.aktiv i { color: var(--text); font-weight: 600; }
 
+/* Der Stopp-Knopf. Volle Breite und unten: Er ist die eine Handlung, die
+   alles ueberstimmt, und soll nicht wie ein weiterer Schalter neben den
+   Betriebsarten aussehen. Zurueckhaltend gefaerbt, solange geladen wird -
+   deutlich, sobald er greift. */
+.ev-stopp {
+  display: block; width: 100%;
+  margin-top: 0.8rem;
+  min-height: 46px;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit; font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.ev-stopp:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.ev-stopp:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+.ev-stopp:disabled { opacity: 0.55; cursor: default; }
+.ev-stopp.an {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+  color: var(--on-accent);
+}
+.ev-betrieb.gestoppt { border-color: var(--border-strong); background: var(--surface-2); }
+
 .ev-betrieb-text {
   margin: 0.7rem 0 0;
   font-size: 0.82rem; line-height: 1.5; color: var(--text-dim);

@@ -108,11 +108,22 @@ export function formatDuration(seconds) {
 // Jetzt sagt jede Kachel genau eine Sache: die eine, was fliesst; die andere,
 // was eingestellt ist.
 
-/** Eingestellte Strombegrenzung, im Verhaeltnis zum Hoechstwert des Geraets. */
+/**
+ * Eingestellte Strombegrenzung, im Verhaeltnis zum hoechsten hier moeglichen.
+ *
+ * "Hoechst" ist dabei nicht einfach die Geraetegrenze: An einer erkannten
+ * Haushaltssteckdose ist frueher Schluss, weil die Leitung 16 A im Dauerbetrieb
+ * nicht traegt. Dort "10 A von 16 A" zu schreiben waere ein Versprechen auf
+ * sechs Ampere, die es nie geben wird.
+ */
 export function formatLadestrom(ev) {
   if (!ev || ev.maxCurrentA == null) return MISSING;
-  const grenze = ev.regelung?.maxA;
-  return grenze ? `${ev.maxCurrentA} A von ${grenze} A` : `${ev.maxCurrentA} A`;
+  const r = ev.regelung;
+  if (!r?.maxA) return `${ev.maxCurrentA} A`;
+  const grenze = r.anschluss?.phasen === 1 && r.haushaltMaxA
+    ? Math.min(r.maxA, r.haushaltMaxA)
+    : r.maxA;
+  return `${ev.maxCurrentA} A von ${grenze} A`;
 }
 
 /** Gemessene Ladeleistung. Eine Messung, keine Rechnung. */
