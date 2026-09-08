@@ -10,6 +10,8 @@ import {
   formatCurrency,
   formatLadestrom,
   formatLadeleistung,
+  dosenText,
+  umsteckText,
 } from '../public/format.js';
 
 describe('formatSoc — SOC ohne unnötige Nachkommastellen (13/14)', () => {
@@ -68,5 +70,92 @@ describe('Wallbox: Einstellung und Messung auseinanderhalten', () => {
     // aus derselben 400-V-Annahme und machte aus einer Messung eine Mischung.
     assert.equal(formatLadeleistung({ powerW: 10_084, currentFromPowerA: 14.6 }), '10,1 kW');
     assert.equal(formatLadeleistung({ powerW: 3700 }), '3,7 kW');
+  });
+});
+
+describe('Hinweise rund um die Ladedose', () => {
+  const starkstrom = { phasen: 3, name: 'Starkstromdose', wattProAmpere: 672 };
+  const haushalt = { phasen: 1, name: 'Haushaltssteckdose', wattProAmpere: 230 };
+
+  test('meldet die Haushaltssteckdose, die Starkstromdose nicht', () => {
+    // An der Haushaltsdose bedeuten dieselben Ampere ein Drittel der Leistung.
+    // Ohne diesen Satz wundert man sich, warum "10 A" plötzlich 2,3 statt
+    // 6,9 kW sind.
+    assert.match(dosenText({ anschluss: haushalt }), /Haushaltssteckdose/);
+    assert.match(dosenText({ anschluss: haushalt }), /230 W/);
+    assert.equal(dosenText({ anschluss: starkstrom }), '');
+    assert.equal(dosenText(null), '');
+  });
+
+  test('rät abends zum Umstecken, wenn es dort noch reichen würde', () => {
+    // Der Abendfall: Sonne weg, Speicher geben keine 4,2 kW mehr her. Für
+    // 6 A dreiphasig zu wenig — an der Haushaltsdose wären es 10 A.
+    const text = umsteckText({
+      betriebsart: 'intelligent',
+      zustand: 'pausiert-leistung',
+      verfuegbarW: 2400,
+      minA: 6,
+      maxA: 16,
+      anschluss: starkstrom,
+    });
+    assert.match(text, /Haushaltssteckdose/);
+    assert.match(text, /10 A/);
+    assert.match(text, /umstecken/);
+  });
+
+  test('schweigt, wenn auch die Haushaltsdose nicht reichen würde', () => {
+    // Unter 1380 W (6 A an 230 V) hilft auch das Umstecken nichts. Dann wäre
+    // der Rat schlicht falsch.
+    assert.equal(
+      umsteckText({
+        betriebsart: 'intelligent',
+        zustand: 'pausiert-leistung',
+        verfuegbarW: 900,
+        minA: 6,
+        anschluss: starkstrom,
+      }),
+      '',
+    );
+  });
+
+  test('schweigt im Handbetrieb', () => {
+    // Dort ist Netzbezug gewollt, und es wird gar nicht abgebrochen.
+    assert.equal(
+      umsteckText({
+        betriebsart: 'manuell',
+        zustand: 'pausiert-leistung',
+        verfuegbarW: 2400,
+        minA: 6,
+        anschluss: starkstrom,
+      }),
+      '',
+    );
+  });
+
+  test('schweigt, solange geladen wird', () => {
+    assert.equal(
+      umsteckText({
+        betriebsart: 'intelligent',
+        zustand: 'laedt',
+        verfuegbarW: 2400,
+        minA: 6,
+        anschluss: starkstrom,
+      }),
+      '',
+    );
+  });
+
+  test('schweigt, wenn ohnehin schon einphasig geladen wird', () => {
+    // Dann steckt es bereits dort, wo der Rat hinführen würde.
+    assert.equal(
+      umsteckText({
+        betriebsart: 'intelligent',
+        zustand: 'pausiert-leistung',
+        verfuegbarW: 2400,
+        minA: 6,
+        anschluss: haushalt,
+      }),
+      '',
+    );
   });
 });

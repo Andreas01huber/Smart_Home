@@ -120,3 +120,56 @@ export function formatLadeleistung(ev) {
   if (!ev || !isNum(ev.powerW)) return MISSING;
   return formatPower(ev.powerW);
 }
+
+// ── Hinweise rund um die Ladedose ───────────────────────────────────────────
+//
+// Reine Textfunktionen: Sie bekommen den Zustand der Regelung und geben einen
+// Satz zurueck, sonst nichts. Hier statt in app.js, weil sie so geprueft werden
+// koennen, ohne auf das passende Wetter zu warten — der Abendhinweis erscheint
+// sonst nur zwischen Sonnenuntergang und leerem Speicher.
+
+/** Was ein Ampere an der Starkstromdose bedeutet — Nennwert fuer den Vergleich. */
+const DREHSTROM_W_PRO_A = 693;
+/** Und an der Haushaltssteckdose. */
+const HAUSHALT_W_PRO_A = 230;
+
+/**
+ * Steckt das Auto an der Haushaltssteckdose?
+ *
+ * Nur dann kommt ein Satz. Die Starkstromdose ist der Normalfall und braucht
+ * keine Meldung; an der Haushaltsdose dagegen bedeutet dieselbe Amperezahl ein
+ * Drittel der Leistung, und das erklaert sonst niemand.
+ */
+export function dosenText(regelung) {
+  const dose = regelung?.anschluss;
+  if (!dose || dose.phasen !== 1) return '';
+  return `Erkannt: ${dose.name} — hier sind ein Ampere ${formatPower(dose.wattProAmpere)} `
+    + `statt ${formatPower(DREHSTROM_W_PRO_A)}. Laenger mit hohem Strom zu laden belastet `
+    + 'eine Haushaltsleitung stark.';
+}
+
+/**
+ * Der Hinweis fuer den Abend.
+ *
+ * Ist die Sonne weg und geben die Speicher die gut vier Kilowatt fuer den
+ * kleinsten dreiphasigen Ladestrom nicht mehr her, bricht die Regelung ab —
+ * sonst kaeme der Rest aus dem Netz. An der Haushaltssteckdose reichen dafuer
+ * aber schon 1,4 kW. Statt einfach stehen zu bleiben, sagt die App, was dort
+ * noch ginge.
+ *
+ * Im Handbetrieb kommt der Hinweis nicht: Dort ist Netzbezug ausdruecklich
+ * gewollt, und es wird gar nicht abgebrochen.
+ */
+export function umsteckText(regelung) {
+  const r = regelung;
+  if (!r || r.betriebsart === 'manuell') return '';
+  if (!String(r.zustand ?? '').startsWith('pausiert')) return '';
+  if (r.anschluss?.phasen !== 3) return '';
+  const minA = r.minA || 6;
+  if (!isNum(r.verfuegbarW) || r.verfuegbarW < minA * HAUSHALT_W_PRO_A) return '';
+  const maxA = r.maxA || 16;
+  const moeglichA = Math.min(maxA, Math.floor(r.verfuegbarW / HAUSHALT_W_PRO_A));
+  return `Fuer die Starkstromdose reicht es gerade nicht — ${formatPower(r.verfuegbarW)} sind `
+    + `weniger als die ${formatPower(minA * DREHSTROM_W_PRO_A)} fuer ${minA} A. An der `
+    + `Haushaltssteckdose waeren es ${moeglichA} A. Zum Weiterladen dort umstecken.`;
+}

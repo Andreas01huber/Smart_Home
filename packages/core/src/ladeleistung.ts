@@ -97,33 +97,48 @@ export function ladestromAusLeistungA(
   return watt / nenner;
 }
 
+
 /**
  * Toleranzband der Netzspannung: ±10 % der Nennspannung.
  *
  * Aus EN 50160 — die Norm, die zusagt, in welchem Bereich die Versorgung liegen
- * darf. Hier dient sie als Plausibilitätsprüfung und nicht als Vorschrift: Was
+ * darf. Hier dient sie als Plausibilitätsprüfung, nicht als Vorschrift: Was
  * ausserhalb liegt, kann keine Netzspannung sein, also stimmt die zugrunde
  * liegende Messung nicht.
  */
 const SPANNUNGSTOLERANZ = 0.1;
 
+/** Nennspannung je Anschlussart. Verkettet bei drei Phasen, gegen N bei einer. */
+const NENNSPANNUNG: Record<1 | 3, number> = { 1: 230, 3: 400 };
+
+/** Einphasig an der Haushaltssteckdose — 16 A wären hier nur 3,7 kW. */
+export const LADEANSCHLUSS_HAUSHALT: Ladeanschluss = { phasen: 1, spannungV: 230 };
+
 /**
- * Den Anschluss an einer echten Messung nacheichen.
+ * Aus einer echten Messung ableiten, WIE das Auto angesteckt ist.
  *
- * Die Tabelle im Kopf dieser Datei rechnet mit 400 V. An dieser Anlage stimmt
- * das nicht ganz: Bei 15 A gesetztem Ladestrom fliessen gemessen 10,1 kW und
- * nicht die errechneten 10,4 kW — 673 W je Ampere statt 693, also rund 389 V
- * statt 400. Das ist keine Kleinigkeit, sondern knapp ein ganzer Ampereschritt:
- * Die Überschussregelung verlangte 11 085 W freie Leistung, bevor sie auf 16 A
- * ging, obwohl 10 350 W gereicht hätten. An Tagen mit gut zehn Kilowatt
- * Überschuss blieb das Auto deshalb dauerhaft eine Stufe darunter.
+ * Die Wallbox meldet den eingestellten Ladestrom und die fliessende Leistung,
+ * aber nirgends, an welcher Dose der Stecker steckt. Das lässt sich ausrechnen,
+ * denn dieselben Ampere bedeuten an den beiden Dosen etwas völlig anderes:
  *
- * Übernommen wird die zurückgerechnete Spannung nur, wenn sie im Toleranzband
- * des Netzes liegt. Damit fallen die Fälle heraus, in denen die Messung gar
- * nicht zur Einstellung gehört: ein Fahrzeug, das gegen Ende des Ladevorgangs
- * von sich aus zurücknimmt, oder ein veralteter Wert aus der Cloud. Beides
- * ergäbe eine unmöglich niedrige Spannung — und würde, ungeprüft übernommen,
- * die Regelung zu viel einplanen lassen.
+ *     10 A an der Starkstromdose   =  6,9 kW    (√3 × 400 V × 10 A)
+ *     10 A an der Haushaltsdose    =  2,3 kW    (230 V × 10 A)
+ *
+ * Umgekehrt gerechnet ergibt die gemessene Leistung nur bei EINER der beiden
+ * Annahmen eine mögliche Netzspannung. Bei 2,3 kW und 10 A wären es dreiphasig
+ * 133 V — die gibt es nicht; einphasig 230 V — die gibt es. Die beiden Bänder
+ * (207–253 V und 360–440 V) überschneiden sich nicht, die Zuordnung ist also
+ * eindeutig und nicht geraten.
+ *
+ * Nebenbei fällt die genaue Spannung mit ab. An dieser Anlage sind es 388 V und
+ * nicht 400: 15 A ergeben gemessen 10 084 W statt der errechneten 10 395. Das
+ * ist knapp ein ganzer Ampereschritt und entscheidet darüber, ob die Regelung
+ * die Höchststufe je erreicht.
+ *
+ * Passt keine der beiden Annahmen, bleibt es beim bisher bekannten Anschluss.
+ * Das ist der Normalfall bei einem Fahrzeug, das gegen Ende von sich aus
+ * zurücknimmt, und bei einem veralteten Wert aus der Tuya-Cloud — beides ergäbe
+ * eine unmöglich niedrige Spannung.
  */
 export function gemessenerAnschluss(
   leistungW: number | null,
@@ -132,9 +147,22 @@ export function gemessenerAnschluss(
 ): Ladeanschluss {
   if (leistungW === null || !Number.isFinite(leistungW) || leistungW <= 0) return anschluss;
   if (ampere === null || !Number.isFinite(ampere) || ampere <= 0) return anschluss;
-  const gemessenV = leistungW / (faktor(anschluss) * ampere * LEISTUNGSFAKTOR);
-  const unten = anschluss.spannungV * (1 - SPANNUNGSTOLERANZ);
-  const oben = anschluss.spannungV * (1 + SPANNUNGSTOLERANZ);
-  if (gemessenV < unten || gemessenV > oben) return anschluss;
-  return { phasen: anschluss.phasen, spannungV: gemessenV };
+
+  for (const phasen of [3, 1] as const) {
+    const teiler = (phasen === 3 ? Math.sqrt(3) : 1) * ampere * LEISTUNGSFAKTOR;
+    const gemessenV = leistungW / teiler;
+    const nenn = NENNSPANNUNG[phasen];
+    if (
+      gemessenV >= nenn * (1 - SPANNUNGSTOLERANZ)
+      && gemessenV <= nenn * (1 + SPANNUNGSTOLERANZ)
+    ) {
+      return { phasen, spannungV: gemessenV };
+    }
+  }
+  return anschluss;
+}
+
+/** Klartext für die Oberfläche: an welcher Dose hängt das Auto? */
+export function anschlussName(anschluss: Ladeanschluss): string {
+  return anschluss.phasen === 3 ? 'Starkstromdose' : 'Haushaltssteckdose';
 }

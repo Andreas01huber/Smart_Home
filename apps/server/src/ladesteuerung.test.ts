@@ -119,6 +119,11 @@ class EngineAttrappe {
     return this.state;
   }
 
+  /** Den Messtakt auslösen — der Dienst hängt daran und lernt daraus. */
+  melde(): void {
+    if (this.state) for (const h of this.hoerer) h(this.state);
+  }
+
   subscribe(h: (s: EngineState) => void): () => void {
     this.hoerer.push(h);
     return () => {
@@ -227,6 +232,9 @@ function aufbau(ueber: Partial<AppConfig['ueberschuss']> = {}): {
   return { engine, wallbox, steuerung, zyklus };
 }
 
+/** So viele Freigaben ohne Ladung, bis die Regelung aufgibt (siehe Dienst). */
+const VERSUCHE = 3;
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('Pausieren heisst abschalten', () => {
@@ -271,7 +279,7 @@ describe('Pausieren heisst abschalten', () => {
   });
 });
 
-describe('Volladung erzwingen', () => {
+describe('Handbetrieb auf dem Höchstwert (früher "Volladung")', () => {
   it('lädt bis zur Obergrenze, obwohl die Rechnung Pause sagt', async () => {
     const { engine, wallbox, steuerung, zyklus } = aufbau();
     // Nacht, kein Überschuss — normal wäre das eine Pause.
@@ -291,7 +299,8 @@ describe('Volladung erzwingen', () => {
       'Ladung wurde nicht eingeschaltet',
     );
     assert.equal(steuerung.zustand().volladung, true);
-    assert.match(steuerung.zustand().grund, /Volladung/);
+    assert.equal(steuerung.zustand().betriebsart, 'manuell');
+    assert.match(steuerung.zustand().grund, /Handbetrieb/);
   });
 
   it('endet und regelt wieder, sobald sie ausgeschaltet wird', async () => {
@@ -533,7 +542,7 @@ describe('Betriebsarten: autark, Handbetrieb, Volladung', () => {
     const { engine, zyklus, steuerung } = aufbau();
     engine.setze({ pv: 0, hausOhneAuto: 500, ev: 4157, stromA: 6 });
     await zyklus();
-    assert.equal(steuerung.zustand().betriebsart, 'autark');
+    assert.equal(steuerung.zustand().betriebsart, 'intelligent');
     // Und autark heisst: Bei Nacht wird abgeschaltet, nicht geladen.
     assert.equal(steuerung.zustand().zielA, 0);
   });
@@ -577,15 +586,15 @@ describe('Betriebsarten: autark, Handbetrieb, Volladung', () => {
   it('geht beim Abstecken von selbst auf autark zurück', async () => {
     const { engine, steuerung, zyklus } = aufbau();
     engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 0 });
-    steuerung.setzeBetriebsart('volladung');
+    steuerung.setzeBetriebsart('manuell', 16);
     await zyklus();
-    assert.equal(steuerung.zustand().betriebsart, 'volladung');
+    assert.equal(steuerung.zustand().betriebsart, 'manuell');
 
     engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, angesteckt: false });
     await zyklus();
     assert.equal(
       steuerung.zustand().betriebsart,
-      'autark',
+      'intelligent',
       'die Übersteuerung galt still für den nächsten Ladevorgang weiter',
     );
   });
@@ -666,14 +675,114 @@ describe('Handbetrieb übernimmt den laufenden Ladestrom', () => {
     assert.equal(steuerung.zustand().manuellA, 14);
   });
 
-  it('behält den eingestellten Wert über einen Wechsel zur Volladung', async () => {
+  it('behält den Handwert über einen Wechsel und zurück', async () => {
     const { engine, steuerung, zyklus } = aufbau();
     engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 6 });
     await zyklus();
     steuerung.setzeBetriebsart('manuell', 11);
     await zyklus();
-    steuerung.setzeBetriebsart('volladung');
+    steuerung.setzeBetriebsart('intelligent');
     await zyklus();
     assert.equal(steuerung.zustand().manuellA, 11, 'der Handwert ging verloren');
+  });
+});
+
+describe('Fahrzeug nimmt die Freigabe nicht an', () => {
+  /**
+   * Spielt nach, was an der Anlage wirklich passiert: Die Regelung gibt frei,
+   * das Fahrzeug nimmt nichts ab, und die Wallbox lässt den Schütz nach einer
+   * Minute von selbst wieder fallen. Beim nächsten Zyklus beginnt das von vorn.
+   */
+  async function biete(a: ReturnType<typeof aufbau>, male: number): Promise<void> {
+    for (let i = 0; i < male; i++) {
+      a.engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 16, schalterAn: false });
+      // Der Abgleich mit der Wirklichkeit wartet einen Regelabstand ab, bevor
+      // er dem gemeldeten Schalterzustand glaubt — hier auf null gesetzt.
+      await new Promise((f) => setTimeout(f, 5));
+      await a.zyklus();
+    }
+  }
+
+  it('gibt nach drei erfolglosen Freigaben auf und schaltet ab', async () => {
+    const a = aufbau({ intervallSekunden: 0 });
+    await biete(a, VERSUCHE + 1);
+
+    assert.equal(a.steuerung.zustand().fordertNicht, true);
+    assert.equal(a.steuerung.zustand().zustand, 'fordert-nicht');
+    assert.match(a.steuerung.zustand().grund, /nimmt keinen Strom/);
+
+    // Und vor allem: Es geht keine weitere Freigabe mehr hinaus. Genau das war
+    // der Zustand an der Anlage — alle paar Minuten ein Schuetz, das gleich
+    // wieder abfaellt, und in der App stand die ganze Zeit "laedt".
+    a.wallbox.befehle.length = 0;
+    await biete(a, 3);
+    assert.deepEqual(a.wallbox.befehle, [], 'hat weiter angeboten');
+  });
+
+  it('gibt nicht auf, solange das Auto zugreift', async () => {
+    const a = aufbau();
+    for (let i = 0; i < 5; i++) {
+      a.engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 11_085, stromA: 16, schalterAn: true });
+      // Sobald Strom fliesst, sind alle Zweifel erledigt.
+      await a.zyklus();
+    }
+    assert.equal(a.steuerung.zustand().fordertNicht, false);
+  });
+
+  it('fängt nach dem Abstecken von vorn an', async () => {
+    const a = aufbau({ intervallSekunden: 0 });
+    await biete(a, VERSUCHE + 1);
+    assert.equal(a.steuerung.zustand().fordertNicht, true);
+
+    a.engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, angesteckt: false });
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().fordertNicht, false);
+  });
+
+  it('versucht es sofort wieder, wenn der Mensch umschaltet', async () => {
+    const a = aufbau({ intervallSekunden: 0 });
+    await biete(a, VERSUCHE + 1);
+    assert.equal(a.steuerung.zustand().fordertNicht, true);
+
+    a.steuerung.setzeBetriebsart('manuell', 10);
+    assert.equal(a.steuerung.zustand().fordertNicht, false);
+  });
+});
+
+describe('An welcher Dose steckt das Auto?', () => {
+  it('erkennt die Haushaltssteckdose an der Leistung', async () => {
+    const { engine, steuerung, zyklus } = aufbau();
+    // 10 A eingestellt, 2300 W gemessen — das kann nur einphasig sein.
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 2300, stromA: 10, schalterAn: true });
+    await zyklus();
+
+    const a = steuerung.zustand().anschluss;
+    assert.equal(a.phasen, 1);
+    assert.equal(a.name, 'Haushaltssteckdose');
+    assert.equal(a.wattProAmpere, 230);
+  });
+
+  it('erkennt die Starkstromdose und ihre echte Spannung', async () => {
+    const { engine, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 14_000, hausOhneAuto: 500, ev: 10_084, stromA: 15, schalterAn: true });
+    await zyklus();
+
+    const a = steuerung.zustand().anschluss;
+    assert.equal(a.phasen, 3);
+    assert.equal(a.name, 'Starkstromdose');
+    assert.equal(a.spannungV, 388);
+  });
+
+  it('bleibt beim Bekannten, solange nichts fliesst', async () => {
+    const { engine, steuerung, zyklus } = aufbau();
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 2300, stromA: 10, schalterAn: true });
+    await zyklus();
+    assert.equal(steuerung.zustand().anschluss.phasen, 1);
+
+    // Auto steht: keine Messung, also keine neue Erkenntnis — und die alte
+    // Auskunft bleibt richtig.
+    engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 10, schalterAn: false });
+    await zyklus();
+    assert.equal(steuerung.zustand().anschluss.phasen, 1);
   });
 });

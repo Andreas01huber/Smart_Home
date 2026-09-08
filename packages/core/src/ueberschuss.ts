@@ -84,7 +84,16 @@ export type Ladezustand =
   /** Die Wallbox ist über Tuya gerade nicht erreichbar. */
   | 'gestoert'
   /** Fahrzeug meldet den Ladevorgang als beendet. */
-  | 'beendet';
+  | 'beendet'
+  /**
+   * Angesteckt und freigegeben, aber das Fahrzeug nimmt nichts ab.
+   *
+   * Der Akku ist voll oder die im Auto eingestellte Ladegrenze ist erreicht.
+   * Von aussen sieht das aus wie "lädt" — die Wallbox ist eingeschaltet, ein
+   * Ladestrom steht —, nur fliesst nichts. Ohne eigenen Zustand böte die
+   * Regelung endlos weiter an.
+   */
+  | 'fordert-nicht';
 
 /** Ein Speicher, so wie ihn die Regelung braucht. */
 export interface SpeicherZustand {

@@ -41,7 +41,7 @@ import { Kontenspeicher, type Benutzer } from './benutzer.ts';
 import { Sitzungsspeicher } from './sitzungen.ts';
 import { loadConfig, ladeanschlussAus, type AppConfig } from './config.ts';
 import { EnergyEngine, type EngineState } from './engine.ts';
-import { Hausverbrauch } from './hausverbrauch.ts';
+import { Hausverbrauch, type HausAnteil } from './hausverbrauch.ts';
 import { EnergyAccumulator, localDate } from './history.ts';
 import { ChargeSessionLog } from './ev-log.ts';
 import { Ladesteuerung } from './ladesteuerung.ts';
@@ -179,13 +179,16 @@ const hausTeiler = new Hausverbrauch();
 
 /** Aufbereitung für die Oberfläche — hier entstehen keine neuen Zahlen. */
 
-function hausOhneAutoMetrik(snapshot: EnergySnapshot): unknown {
-  const haus = snapshot.houseConsumptionW;
-  const anteil = hausTeiler.teile(
-    haus.valueW,
+function hausUndAuto(snapshot: EnergySnapshot): HausAnteil {
+  return hausTeiler.teile(
+    snapshot.houseConsumptionW.valueW,
     snapshot.evCharger?.chargePowerW ?? null,
     Date.now(),
   );
+}
+
+function hausOhneAutoMetrik(snapshot: EnergySnapshot, anteil: HausAnteil): unknown {
+  const haus = snapshot.houseConsumptionW;
   return {
     valueW: anteil.wattW,
     autoAbgezogenW: anteil.autoW,
@@ -197,6 +200,42 @@ function hausOhneAutoMetrik(snapshot: EnergySnapshot): unknown {
   };
 }
 
+/**
+ * Ladeleistung und Ladezustand aus dem Hauszähler statt aus der Wallbox.
+ *
+ * Die Wallbox meldet `power_total` über die Tuya-Cloud, und dieser Wert friert
+ * ein. Gemessen am 8.9. um 20:50: Der Hauptschalter der Wallbox stand auf aus,
+ * der Hauszähler zeigte 1203 W für das ganze Haus — und die Wallbox meldete
+ * unverändert 2007 W Ladeleistung und "lädt". In der Hausansicht stand dann ein
+ * Auto, das mehr zieht als das ganze Haus verbraucht. Das kann nicht sein, und
+ * es sieht auch für jeden sofort falsch aus.
+ *
+ * Der Hauszähler misst alle zwei Sekunden und lügt nicht. Was das Auto zieht,
+ * ist deshalb der Anteil, den die Aufteilung ihm zurechnet — und "lädt" heisst
+ * nur noch, dass dieser Anteil auch wirklich fliesst.
+ *
+ * Übrig bleibt der Fall, dass beide Werte zusammenpassen: Dann ist der Anteil
+ * identisch mit dem gemeldeten, und es ändert sich nichts.
+ */
+function evAusZaehler(snapshot: EnergySnapshot, anteil: HausAnteil): Record<string, unknown> {
+  const charger = snapshot.evCharger;
+  if (charger === null) return {};
+  const gemeldet = charger.chargePowerW;
+  // Ohne brauchbare Aufteilung bleibt es beim Wert der Wallbox — lieber der
+  // unsichere Messwert als eine erfundene Null.
+  if (anteil.wattW === null) return {};
+  const laedt = anteil.autoW > 200;
+  return {
+    powerW: anteil.autoW,
+    ...(gemeldet !== null && Math.abs(gemeldet - anteil.autoW) > 200
+      ? { gemeldeteLeistungW: gemeldet }
+      : {}),
+    // "charging" wird zurückgenommen, wenn nichts fliesst. Umgekehrt wird
+    // nichts behauptet: Ob ein Fahrzeug angesteckt ist, weiss nur die Wallbox.
+    ...(charger.state === 'charging' && !laedt ? { state: 'connected' } : {}),
+  };
+}
+
 function serializeState(
   state: EngineState,
   config: AppConfig,
@@ -204,6 +243,8 @@ function serializeState(
 ): unknown {
   const { snapshot, unavailable, disagreements, derivedConsumptionNegative } =
     state.resolution;
+
+  const anteil = hausUndAuto(snapshot);
 
   const metric = (value: (typeof snapshot)['solarProductionW']) => ({
     valueW: value.valueW,
@@ -223,7 +264,7 @@ function serializeState(
     // Was das Haus ohne das Auto verbraucht — die Zahl, die man eigentlich
     // meint, wenn man "Hausverbrauch" sagt. Die Wallbox hängt hinter dem
     // Hauszähler, ihre Leistung steckt also im Wert darüber mit drin.
-    hausOhneAuto: hausOhneAutoMetrik(snapshot),
+    hausOhneAuto: hausOhneAutoMetrik(snapshot, anteil),
     gridImport: metric(snapshot.gridImportW),
     gridExport: metric(snapshot.gridExportW),
     batteries: [
@@ -275,6 +316,9 @@ function serializeState(
     // bisherigen Platzhalter-Zustand (Anforderung 38).
     ev: {
       ...(serializeEv(snapshot.evCharger, ladeanschlussAus(config)) as object),
+      // Ladeleistung und Ladezustand kommen aus dem Hauszähler, nicht aus der
+      // Wallbox — begründet in `evAusZaehler`.
+      ...evAusZaehler(snapshot, anteil),
       // Was die Überschussregelung gerade denkt. Echte Werte aus dem Dienst -
       // die Oberfläche erfindet hier nichts.
       regelung,
@@ -733,8 +777,10 @@ async function main(): Promise<void> {
       void readBody(request, 1_000)
         .then((body) => {
           const roh = JSON.parse(body) as { art?: unknown; ampere?: unknown };
-          const art =
-            roh.art === 'manuell' ? 'manuell' : roh.art === 'volladung' ? 'volladung' : 'autark';
+          // "volladung" gab es einmal als eigene Art. Eine noch
+          // zwischengespeicherte Oberfläche darf davon nichts merken: Sie
+          // landet im Handbetrieb, und der Ladestrom kommt vom Gerät.
+          const art = roh.art === 'manuell' || roh.art === 'volladung' ? 'manuell' : 'intelligent';
           // Der Ladestrom wird hier NICHT gegen 6-16 A geprüft: Die echten
           // Grenzen kennt nur das Gerät, und die Steuerung begrenzt selbst.
           // Eine zweite Prüfung hier wäre eine zweite, womöglich falsche

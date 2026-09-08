@@ -10,7 +10,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  anschlussName,
   gemessenerAnschluss,
+  LADEANSCHLUSS_HAUSHALT,
   ladeleistungAusStromW,
   ladestromAusLeistungA,
   LADEANSCHLUSS_STANDARD,
@@ -90,30 +92,50 @@ describe('Standardanschluss', () => {
   });
 });
 
-describe('Nacheichung an einer echten Messung', () => {
-  it('übernimmt die zurückgerechnete Spannung', () => {
-    // Der gemessene Fall vom 8.9.: 15 A eingestellt, 10 084 W gemessen.
+describe('An welcher Dose hängt das Auto?', () => {
+  it('erkennt die Starkstromdose und die genaue Spannung', () => {
+    // Gemessen am 8.9.: 15 A eingestellt, 10 084 W geflossen.
     const a = gemessenerAnschluss(10_084, 15, LADEANSCHLUSS_STANDARD);
+    assert.equal(a.phasen, 3);
     assert.ok(Math.abs(a.spannungV - 388) < 1, `${a.spannungV.toFixed(0)} V zurückgerechnet`);
-    // Und damit braucht die Höchststufe rund 700 W weniger Überschuss.
-    const vorher = ladeleistungAusStromW(16, LADEANSCHLUSS_STANDARD) ?? 0;
-    const nachher = ladeleistungAusStromW(16, a) ?? 0;
-    assert.ok(vorher - nachher > 300, `nur ${Math.round(vorher - nachher)} W Unterschied`);
+    // Und damit braucht die Höchststufe merklich weniger Überschuss.
+    const nenn = ladeleistungAusStromW(16, LADEANSCHLUSS_STANDARD) ?? 0;
+    assert.ok(nenn - (ladeleistungAusStromW(16, a) ?? 0) > 300);
   });
 
-  it('lehnt eine unmögliche Spannung ab', () => {
-    // Das Fahrzeug nimmt gegen Ende von sich aus zurück: 16 A eingestellt,
-    // nur 3 kW gemessen. Das wären 108 V — keine Netzspannung, also keine
-    // brauchbare Eichung. Ungeprüft übernommen würde die Regelung glauben,
-    // 16 A kosteten 1,7 kW.
+  it('erkennt die Haushaltssteckdose', () => {
+    // 10 A an 230 V sind 2300 W. Dreiphasig gerechnet wären das 133 V — die
+    // gibt es nicht, also kann es nur einphasig sein.
+    const a = gemessenerAnschluss(2300, 10, LADEANSCHLUSS_STANDARD);
+    assert.equal(a.phasen, 1);
+    assert.ok(Math.abs(a.spannungV - 230) < 1);
+    assert.equal(anschlussName(a), 'Haushaltssteckdose');
+  });
+
+  it('verwechselt die beiden Dosen nicht', () => {
+    // Dreiphasig gemessen, einphasig gerechnet ergäbe 693 V. Auch anders herum
+    // gibt es keine Überschneidung — die Bänder liegen weit auseinander.
+    assert.equal(gemessenerAnschluss(11_085, 16).phasen, 3);
+    assert.equal(gemessenerAnschluss(3680, 16).phasen, 1);
+    assert.equal(anschlussName(gemessenerAnschluss(11_085, 16)), 'Starkstromdose');
+  });
+
+  it('bleibt beim Bekannten, wenn das Fahrzeug zurücknimmt', () => {
+    // 16 A eingestellt, nur 3 kW gemessen: dreiphasig 108 V, einphasig 187 V.
+    // Beides unmöglich, also gehört die Messung nicht zur Einstellung.
     assert.deepEqual(gemessenerAnschluss(3000, 16), LADEANSCHLUSS_STANDARD);
-    // Ebenso nach oben.
-    assert.deepEqual(gemessenerAnschluss(30_000, 16), LADEANSCHLUSS_STANDARD);
+    assert.deepEqual(gemessenerAnschluss(3000, 16, LADEANSCHLUSS_HAUSHALT), LADEANSCHLUSS_HAUSHALT);
   });
 
-  it('bleibt beim Nennwert, solange nichts gemessen ist', () => {
+  it('bleibt beim Bekannten, solange nichts gemessen ist', () => {
     assert.deepEqual(gemessenerAnschluss(null, 16), LADEANSCHLUSS_STANDARD);
     assert.deepEqual(gemessenerAnschluss(10_000, null), LADEANSCHLUSS_STANDARD);
     assert.deepEqual(gemessenerAnschluss(0, 0), LADEANSCHLUSS_STANDARD);
+  });
+
+  it('rechnet an der Haushaltsdose ganz andere Kilowatt', () => {
+    // Der Punkt der ganzen Übung: Dieselben 16 A.
+    assert.equal(Math.round(ladeleistungAusStromW(16, LADEANSCHLUSS_STANDARD) ?? 0), 11_085);
+    assert.equal(Math.round(ladeleistungAusStromW(16, LADEANSCHLUSS_HAUSHALT) ?? 0), 3680);
   });
 });

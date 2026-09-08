@@ -20,3 +20,13 @@ export interface LadeAnzeige {
 }
 export function formatLadestrom(ev: LadeAnzeige | null | undefined): string;
 export function formatLadeleistung(ev: LadeAnzeige | null | undefined): string;
+export interface RegelAnzeige {
+  betriebsart?: string;
+  zustand?: string;
+  verfuegbarW?: number | null;
+  minA?: number | null;
+  maxA?: number | null;
+  anschluss?: { phasen?: number; name?: string; wattProAmpere?: number } | null;
+}
+export function dosenText(regelung: RegelAnzeige | null | undefined): string;
+export function umsteckText(regelung: RegelAnzeige | null | undefined): string;

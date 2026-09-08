@@ -10,7 +10,7 @@
  * was sich nicht testen lässt, ohne eine echte Wallbox anzufassen: Zeitgeber,
  * Wiederholversuche, Protokoll.
  *
- * Drei Betriebsarten, umschaltbar in config.json:
+ * Drei Modi, umschaltbar in config.json:
  *
  *   aus         — nichts geschieht.
  *   beobachten  — es wird gerechnet und angezeigt, aber nichts gesendet.
@@ -24,25 +24,28 @@
  * nicht hergibt, kommen sie aus dem Netz — genau das, was diese Regelung
  * verhindern soll. `work_mode` bleibt unangetastet.
  *
- * ── Volladung ───────────────────────────────────────────────────────────────
- * Daneben gibt es den bewussten Übersteuerungsfall: Wer morgen früh voll
- * losfahren muss, drückt "Volladung" und nimmt den Netzbezug in Kauf. Das ist
- * kein Schlupfloch in der Autarkieregel, sondern eine ausdrückliche Entscheidung
- * des Menschen — sie wird deshalb auch deutlich angezeigt und endet von selbst,
- * sobald das Fahrzeug abgesteckt wird.
+ * ── Zwei Betriebsarten für den Menschen ────────────────────────────────────
+ * Davon zu trennen ist, was der Benutzer wählt: `intelligent` lädt nur aus
+ * eigener Erzeugung, `manuell` mit einem festen Ladestrom, notfalls aus dem
+ * Netz. Der Handbetrieb ist kein Schlupfloch in der Autarkieregel, sondern eine
+ * ausdrückliche Entscheidung — er wird deutlich angezeigt und endet von selbst,
+ * sobald das Fahrzeug abgesteckt wird oder der Server neu startet.
  */
 
 import {
+  anschlussName,
   berechneLadeziel,
   beruhige,
   bewaehrtW,
   gedaechtnisAusMesswerten,
+  gemessenerAnschluss,
   ladeleistungAusStromW,
   LEERES_GEDAECHTNIS,
   merkeEntladung,
   nachweisZuruecknehmen,
   neueHistorie,
   speicherspielraum,
+  type Ladeanschluss,
   type Ladeentscheidung,
   type Ladezustand,
   type Messwerte,
@@ -60,17 +63,26 @@ import type { EnergyEngine, EngineState } from './engine.ts';
 /**
  * Wie geladen wird — die Entscheidung des Menschen, nicht der Regelung.
  *
- * `autark`     Nur Sonne und freigegebene Speicherleistung. Die Vorgabe, und
- *              der einzige Zustand, in dem die Regel "das Auto verursacht
- *              keinen Netzbezug" gilt.
- * `manuell`    Ein fester Ladestrom, den ein Mensch eingestellt hat. Reicht
- *              die Sonne nicht, kommt der Rest aus dem Netz.
- * `volladung`  Höchster Ladestrom, den Wallbox und Fahrzeug zulassen.
+ * `intelligent`  Nur, was Sonne und freigegebene Speicherleistung hergeben.
+ *                Die Vorgabe, und der einzige Zustand, in dem die Regel "das
+ *                Auto verursacht keinen Netzbezug" gilt.
+ * `manuell`      Ein fester Ladestrom, den ein Mensch eingestellt hat. Reicht
+ *                die eigene Erzeugung nicht, kommt der Rest aus dem Netz.
  *
- * Die beiden letzten sind keine Schlupflöcher in der Autarkieregel, sondern
- * ausdrückliche Übersteuerungen — sie werden angezeigt und enden beim Abstecken.
+ * Eine eigene Art "Volladung" gab es einmal und ist entfallen: Sie war nichts
+ * anderes als Handbetrieb auf dem Höchstwert. Ein Knopf weniger, der dasselbe
+ * kann wie der Schieberegler ganz rechts.
  */
-export type Betriebsart = 'autark' | 'manuell' | 'volladung';
+export type Betriebsart = 'intelligent' | 'manuell';
+
+/** Wie das Auto angesteckt ist, samt Klartext für die Oberfläche. */
+export interface Anschlussinfo {
+  readonly phasen: 1 | 3;
+  readonly spannungV: number;
+  readonly name: string;
+  /** Was ein Ampere an dieser Dose bedeutet — für Regler und Vorschau. */
+  readonly wattProAmpere: number;
+}
 
 /** Ein Eintrag im Regelprotokoll. Bewusst flach — das liest ein Mensch. */
 export interface Regelschritt {
@@ -115,8 +127,12 @@ export interface Steuerzustand {
   readonly betriebsart: Betriebsart;
   /** Eingestellter Ladestrom im Handbetrieb, in Ampere. */
   readonly manuellA: number;
-  /** Erzwungene Volladung aus dem Netz. Abgeleitet aus `betriebsart`. */
+  /** Nur noch für ältere Oberflächen: Handbetrieb auf dem Höchstwert. */
   readonly volladung: boolean;
+  /** Wie das Auto angesteckt ist — erkannt, nicht konfiguriert. */
+  readonly anschluss: Anschlussinfo;
+  /** Angesteckt, fordert aber keinen Strom mehr (voll oder eigene Grenze). */
+  readonly fordertNicht: boolean;
   readonly protokoll: readonly Regelschritt[];
 }
 
@@ -145,6 +161,26 @@ const LAEDT_AB_W = 200;
 
 /** Platzhalter für "wir wissen nicht, was an der Wallbox eingestellt ist". */
 const UNBEKANNT_A = -1;
+
+/**
+ * So oft wird eingeschaltet, bevor die Regelung aufgibt.
+ *
+ * Ein Fahrzeug braucht nach dem Einschalten ein paar Sekunden, bis es Strom
+ * zieht — der erste Versuch beweist also nichts. Drei Versuche hintereinander
+ * ohne einen einzigen Ampere sind dagegen eindeutig: Der Akku ist voll, oder
+ * die im Auto eingestellte Ladegrenze ist erreicht.
+ */
+const VERSUCHE_BIS_AUFGABE = 3;
+
+/**
+ * Danach wird es noch einmal versucht.
+ *
+ * Nicht endgültig aufgeben: Ein Fahrzeug kann seine Meinung ändern — eine
+ * Abfahrtszeit rückt näher, die Klimatisierung springt an, der Ladestand fällt
+ * wieder unter die Grenze. Eine halbe Stunde ist selten genug, um die Wallbox
+ * in Ruhe zu lassen, und oft genug, um es nicht zu verpassen.
+ */
+const NEUER_VERSUCH_MS = 30 * 60_000;
 
 /**
  * Ein Befehl ohne Beobachtungszeit — für Vorgaben von Hand.
@@ -191,10 +227,32 @@ export class Ladesteuerung {
   private grenzen = { minA: 6, maxA: 16, schrittA: 1 };
   private letzterZustand: Ladezustand | null = null;
   private naechsteRegelungAt = 0;
-  /** Gewählte Betriebsart. Vorgabe ist `autark` — siehe `setzeBetriebsart`. */
-  private betriebsart: Betriebsart = 'autark';
+  /** Gewählte Betriebsart. Vorgabe ist `intelligent` — siehe `setzeBetriebsart`. */
+  private betriebsart: Betriebsart = 'intelligent';
   /** Ladestrom im Handbetrieb. Erst gültig, wenn `betriebsart === 'manuell'`. */
   private manuellA = 0;
+  /**
+   * Wie das Auto angesteckt ist — aus der Messung erkannt, nicht konfiguriert.
+   *
+   * Startet mit dem Wert aus config.json und wird korrigiert, sobald eine
+   * Messung eine andere Dose beweist. Bleibt danach stehen: Wenn das Fahrzeug
+   * gerade nichts zieht, gibt es nichts zu messen, und die zuletzt erkannte
+   * Dose ist immer noch die richtige Auskunft.
+   */
+  private anschluss: Ladeanschluss;
+  /**
+   * Fahrzeug ist angesteckt, will aber nicht laden.
+   *
+   * Das kommt vor, wenn der Akku voll ist oder die im Auto eingestellte
+   * Ladegrenze erreicht wurde. Ohne diese Erkennung böte die Regelung endlos
+   * weiter an, die Wallbox liesse den Schuetz jedes Mal nach einer Minute
+   * wieder fallen, und in der App stünde die ganze Zeit "lädt".
+   */
+  private fordertNicht = false;
+  /** Wie oft hintereinander eingeschaltet wurde, ohne dass Strom floss. */
+  private angeboteOhneLadung = 0;
+  /** Wann der nächste Versuch frühestens erlaubt ist, nachdem aufgegeben wurde. */
+  private naechsterVersuchAt = 0;
   /** Zuletzt an die Wallbox gesendeter Schalterzustand; null = unbekannt. */
   private ladenAn: boolean | null = null;
   /** Ob der Startwert schon aus dem Gerät übernommen wurde. */
@@ -225,7 +283,40 @@ export class Ladesteuerung {
     private readonly engine: EnergyEngine,
     private readonly wallbox: TuyaEvseConnector | null,
     private readonly config: AppConfig,
-  ) {}
+  ) {
+    this.anschluss = ladeanschlussAus(config);
+  }
+
+  /**
+   * Mitschreiben, ob das Fahrzeug die Freigabe annimmt.
+   *
+   * Zwei Beweise setzen alle Zweifel zurück: Es fliesst Strom (dann will es
+   * offensichtlich), oder es wurde abgesteckt (dann fängt beim nächsten Mal
+   * alles von vorn an). Wird aus dem Messtakt UND aus dem Regelzyklus
+   * aufgerufen — der Messtakt ist schneller, der Zyklus läuft auch dann, wenn
+   * der Dienst ohne laufenden Messtakt getaktet wird.
+   */
+  private merkeNachfrage(leistungW: number, angesteckt: boolean | null): void {
+    if (leistungW > LAEDT_AB_W) {
+      this.angeboteOhneLadung = 0;
+      this.fordertNicht = false;
+    }
+    if (angesteckt === false) {
+      this.angeboteOhneLadung = 0;
+      this.fordertNicht = false;
+      this.naechsterVersuchAt = 0;
+    }
+  }
+
+  /** Der erkannte Anschluss, aufbereitet für die Oberfläche. */
+  private anschlussInfo(): Anschlussinfo {
+    return {
+      phasen: this.anschluss.phasen,
+      spannungV: Math.round(this.anschluss.spannungV),
+      name: anschlussName(this.anschluss),
+      wattProAmpere: Math.round(ladeleistungAusStromW(1, this.anschluss) ?? 0),
+    };
+  }
 
   /**
    * Erfahrung aus aufgezeichneten Messwerten übernehmen.
@@ -304,6 +395,14 @@ export class Ladesteuerung {
       // Umschalten auf "regeln" ohne jede Erfahrung.
       this.gedaechtnis = merkeEntladung(this.gedaechtnis, speicher, jetzt);
 
+      // Im Zwei-Sekunden-Takt mitprüfen, ob das Fahrzeug zugreift. Nur im
+      // Regelzyklus zu schauen hiesse, einen kurzen Ladeversuch zwischen zwei
+      // Zyklen zu verpassen und zu Unrecht aufzugeben.
+      this.merkeNachfrage(
+        snap.evCharger?.chargePowerW ?? 0,
+        snap.evCharger?.vehicleConnected ?? null,
+      );
+
       if (this.config.ueberschuss.modus !== 'regeln' || this.laeuft) return;
       if (evLeistung <= LAEDT_AB_W) return;
       if (netzbezug <= this.config.ueberschuss.notbremseAbW) return;
@@ -358,18 +457,25 @@ export class Ladesteuerung {
   private setzeBetriebsartStill(art: Betriebsart, ampere: number): void {
     this.betriebsart = art;
     this.manuellA = ampere;
+    // Wer umschaltet, will es jetzt wissen — nicht in einer halben Stunde.
+    this.fordertNicht = false;
+    this.angeboteOhneLadung = 0;
+    this.naechsterVersuchAt = 0;
     console.log(
-      art === 'autark'
-        ? '[Laderegelung] Autark — es wird nur geladen, was Sonne und Speicher hergeben.'
-        : art === 'volladung'
-          ? '[Laderegelung] Volladung eingeschaltet — bis zur Obergrenze, auch aus dem Netz.'
-          : `[Laderegelung] Handbetrieb mit ${ampere} A — feste Vorgabe, auch aus dem Netz.`,
+      art === 'intelligent'
+        ? '[Laderegelung] Intelligentes Laden — nur, was Sonne und Speicher hergeben.'
+        : `[Laderegelung] Handbetrieb mit ${ampere} A — feste Vorgabe, auch aus dem Netz.`,
     );
   }
 
-  /** Alte Schnittstelle: Volladung als Ein/Aus. */
+  /**
+   * Alte Schnittstelle, damit eine noch zwischengespeicherte Oberfläche auf
+   * dem Handy nicht ins Leere greift. "Volladung" heisst jetzt Handbetrieb auf
+   * dem Höchstwert — gleiches Verhalten, ein Knopf weniger.
+   */
   setzeVolladung(an: boolean): void {
-    this.setzeBetriebsart(an ? 'volladung' : 'autark');
+    if (an) this.setzeBetriebsart('manuell', this.grenzen.maxA);
+    else this.setzeBetriebsart('intelligent');
   }
 
   stop(): void {
@@ -405,7 +511,9 @@ export class Ladesteuerung {
       ),
       betriebsart: this.betriebsart,
       manuellA: this.manuellA,
-      volladung: this.betriebsart === 'volladung',
+      volladung: this.betriebsart === 'manuell' && this.manuellA >= this.grenzen.maxA,
+      anschluss: this.anschlussInfo(),
+      fordertNicht: this.fordertNicht,
       // Neueste zuerst — so liest man ein Protokoll.
       protokoll: [...this.protokoll].reverse(),
     };
@@ -432,6 +540,8 @@ export class Ladesteuerung {
     minA: number;
     maxA: number;
     volladung: boolean;
+    anschluss: Anschlussinfo;
+    fordertNicht: boolean;
   } {
     const e = this.letzte;
     return {
@@ -447,7 +557,9 @@ export class Ladesteuerung {
       manuellA: this.manuellA,
       minA: this.grenzen.minA,
       maxA: this.grenzen.maxA,
-      volladung: this.betriebsart === 'volladung',
+      volladung: this.betriebsart === 'manuell' && this.manuellA >= this.grenzen.maxA,
+      anschluss: this.anschlussInfo(),
+      fordertNicht: this.fordertNicht,
     };
   }
 
@@ -456,7 +568,7 @@ export class Ladesteuerung {
   private parameter(): Reglerparameter {
     const u = this.config.ueberschuss;
     return {
-      anschluss: ladeanschlussAus(this.config),
+      anschluss: this.anschluss,
       minA: this.grenzen.minA,
       maxA: this.grenzen.maxA,
       schrittA: this.grenzen.schrittA,
@@ -582,6 +694,29 @@ export class Ladesteuerung {
       // Strom, obwohl wir pausiert zu haben glauben, wird das Gedächtnis
       // verworfen und der Stopp erneut geschickt.
       const laedtWirklich = (messwerte.evLeistungW ?? 0) > LAEDT_AB_W;
+      this.merkeNachfrage(messwerte.evLeistungW ?? 0, messwerte.evAngesteckt);
+
+      // ── An welcher Dose hängt das Auto? ─────────────────────────────────
+      // Aus gesetztem Strom und gemessener Leistung folgt beides: die Art der
+      // Dose und ihre tatsächliche Spannung. Nur solange wirklich Strom
+      // fliesst — ohne Messung gibt es nichts zu erkennen, und der zuletzt
+      // erkannte Anschluss bleibt die richtige Auskunft.
+      if (laedtWirklich) {
+        const erkannt = gemessenerAnschluss(
+          messwerte.evLeistungW,
+          messwerte.evStromA,
+          this.anschluss,
+        );
+        if (erkannt.phasen !== this.anschluss.phasen) {
+          console.log(
+            `[Laderegelung] Anschluss erkannt: ${anschlussName(erkannt)} `
+              + `(${Math.round(erkannt.spannungV)} V, ${erkannt.phasen === 3 ? 'dreiphasig' : 'einphasig'}). `
+              + `Ein Ampere sind hier ${Math.round(ladeleistungAusStromW(1, erkannt) ?? 0)} W.`,
+          );
+        }
+        this.anschluss = erkannt;
+      }
+
       if (laedtWirklich && this.historie.gesetztA === 0) {
         console.warn(
           `[Laderegelung] Die Wallbox lädt mit ${Math.round(messwerte.evLeistungW ?? 0)} W, `
@@ -624,31 +759,57 @@ export class Ladesteuerung {
 
       // Handbetrieb endet, sobald das Fahrzeug weg ist — sonst gälte er
       // stillschweigend auch für den nächsten Ladevorgang.
-      if (this.betriebsart !== 'autark' && messwerte.evAngesteckt === false) {
-        this.setzeBetriebsartStill('autark', this.manuellA);
+      if (this.betriebsart !== 'intelligent' && messwerte.evAngesteckt === false) {
+        this.setzeBetriebsartStill('intelligent', this.manuellA);
+      }
+
+      // ── Nimmt das Fahrzeug überhaupt noch? ──────────────────────────────
+      // Nach drei Freigaben ohne ein einziges Ampere ist der Fall klar: voll,
+      // oder die im Auto eingestellte Ladegrenze ist erreicht. Weiter
+      // anzubieten heisst dann nur, dass die Wallbox alle paar Minuten ein
+      // Schütz schaltet und in der App "lädt" steht, während nichts fliesst.
+      if (this.angeboteOhneLadung >= VERSUCHE_BIS_AUFGABE && !this.fordertNicht) {
+        this.fordertNicht = true;
+        this.naechsterVersuchAt = Date.now() + NEUER_VERSUCH_MS;
+        console.log(
+          `[Laderegelung] Fahrzeug hat ${VERSUCHE_BIS_AUFGABE} Freigaben nicht angenommen — `
+            + 'vermutlich voll. Laden wird beendet, neuer Versuch in '
+            + `${Math.round(NEUER_VERSUCH_MS / 60_000)} Minuten.`,
+        );
+      }
+      // Nach der Wartezeit noch einmal von vorn: Ein Fahrzeug darf seine
+      // Meinung ändern.
+      if (this.fordertNicht && Date.now() >= this.naechsterVersuchAt) {
+        this.fordertNicht = false;
+        this.angeboteOhneLadung = 0;
+      }
+      if (this.fordertNicht && messwerte.evAngesteckt === true) {
+        entscheidung = {
+          ...entscheidung,
+          zustand: 'fordert-nicht',
+          zielA: 0,
+          zielLeistungW: 0,
+          grund:
+            'Das Fahrzeug nimmt keinen Strom mehr an — Akku voll oder die im '
+            + 'Auto eingestellte Ladegrenze erreicht. Laden beendet.',
+        };
       }
 
       // Übersteuerung durch den Menschen. Die Gerätegrenzen gelten weiterhin:
       // Was Wallbox und Fahrzeug nicht zulassen, wird auch von Hand nicht
       // gesetzt.
       const vonHand =
-        this.betriebsart !== 'autark'
+        this.betriebsart === 'manuell'
         && messwerte.evAngesteckt === true
         && messwerte.wallboxErreichbar;
       if (vonHand) {
-        const zielA =
-          this.betriebsart === 'volladung'
-            ? this.grenzen.maxA
-            : Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, this.manuellA));
+        const zielA = Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, this.manuellA));
         entscheidung = {
           ...entscheidung,
           zustand: 'laedt',
           zielA,
-          zielLeistungW: ladeleistungAusStromW(zielA, this.parameter().anschluss) ?? 0,
-          grund:
-            this.betriebsart === 'volladung'
-              ? `Volladung erzwungen — lädt mit ${zielA} A, auch aus dem Netz.`
-              : `Handbetrieb — fest auf ${zielA} A eingestellt, auch aus dem Netz.`,
+          zielLeistungW: ladeleistungAusStromW(zielA, this.anschluss) ?? 0,
+          grund: `Handbetrieb — fest auf ${zielA} A eingestellt, auch aus dem Netz.`,
         };
       }
       this.letzte = entscheidung;
@@ -658,7 +819,13 @@ export class Ladesteuerung {
 
       // In Zuständen ohne Regelbedarf wird nichts gesendet, aber protokolliert:
       // "nicht verbunden" oder "gestört" sind Auskünfte, keine Ereignisse.
-      const regelbar = entscheidung.zustand === 'laedt' || entscheidung.zustand.startsWith('pausiert');
+      // "fordert-nicht" gehoert dazu: Es muss ein Stopp hinausgehen, sonst
+      // bliebe die Wallbox eingeschaltet und wartete auf ein Auto, das nicht
+      // mehr will.
+      const regelbar =
+        entscheidung.zustand === 'laedt'
+        || entscheidung.zustand === 'fordert-nicht'
+        || entscheidung.zustand.startsWith('pausiert');
       if (!regelbar) {
         this.notiere(messwerte, entscheidung, netzW, false, entscheidung.grund, null);
         return;
@@ -733,6 +900,9 @@ export class Ladesteuerung {
           if (this.ladenAn !== true) {
             await this.wallbox.setzeLaden(true);
             this.ladenAn = true;
+            // Jede Freigabe zaehlt, bis wirklich Strom fliesst. Zurueckgesetzt
+            // wird im Messtakt, sobald das Fahrzeug zugreift.
+            this.angeboteOhneLadung += 1;
           }
         }
         this.historie = { ...ergebnis.historie, gesetztA: ergebnis.stromA };
