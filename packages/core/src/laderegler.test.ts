@@ -202,3 +202,72 @@ describe('Mindestabstand zwischen Befehlen', () => {
     assert.equal(zweiter.befehle.length, 0);
   });
 });
+
+describe('Der erste Befehl nach einem Neustart', () => {
+  it('geht sofort hinaus, ohne Beobachtungszeit', () => {
+    // Beim Start ist unbekannt, was an der Wallbox steht (-1). Auf eine Frist
+    // zu warten hiesse, auf einen Vergleichswert zu warten, den es nicht gibt.
+    const e = beruhige({
+      wunschA: 14,
+      netzbezugW: 0,
+      jetztMs: 1000,
+      historie: neueHistorie(-1, 0),
+      zeit: ZEIT,
+    });
+    assert.equal(e.senden, true);
+    assert.equal(e.stromA, 14);
+  });
+
+  it('lässt sich von einem wackelnden Wunsch nicht aufhalten', () => {
+    // Der echte Fehler vom 8.9.: Bei wechselnder Bewölkung sprang der Wunsch
+    // zwischen 13 und 14 A. Jeder Sprung setzte die 90-Sekunden-Frist zurück,
+    // und nach einem Neustart ging deshalb NIE ein Befehl hinaus — das Auto
+    // stand, obwohl die Rechnung "lädt mit 14 A" meldete.
+    let historie = neueHistorie(-1, 0);
+    let befehle = 0;
+    for (let t = 0; t < 300_000; t += 30_000) {
+      const e = beruhige({
+        wunschA: (t / 30_000) % 2 === 0 ? 13 : 14,
+        netzbezugW: 0,
+        jetztMs: t,
+        historie,
+        zeit: ZEIT,
+      });
+      historie = e.historie;
+      if (e.senden) befehle++;
+    }
+    assert.ok(befehle > 0, 'nach fünf Minuten war noch kein Befehl unterwegs');
+  });
+
+  it('sendet danach wieder mit den normalen Fristen', () => {
+    // Der Startfall darf keine Dauerfreigabe sein: Sobald ein Wert gesetzt ist,
+    // gelten die Haltezeiten wieder.
+    const erst = beruhige({
+      wunschA: 10,
+      netzbezugW: 0,
+      jetztMs: 0,
+      historie: neueHistorie(-1, 0),
+      zeit: ZEIT,
+    });
+    const gleich = beruhige({
+      wunschA: 12,
+      netzbezugW: 0,
+      jetztMs: 10_000,
+      historie: erst.historie,
+      zeit: ZEIT,
+    });
+    assert.equal(gleich.senden, false, 'hat ohne Beobachtungszeit erhöht');
+  });
+
+  it('kann als ersten Befehl auch abschalten', () => {
+    const e = beruhige({
+      wunschA: 0,
+      netzbezugW: 0,
+      jetztMs: 1000,
+      historie: neueHistorie(-1, 0),
+      zeit: ZEIT,
+    });
+    assert.equal(e.senden, true);
+    assert.equal(e.stromA, 0);
+  });
+});

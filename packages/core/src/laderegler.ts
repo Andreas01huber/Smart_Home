@@ -144,6 +144,27 @@ export function beruhige(eingang: BeruhigungsEingang): BeruhigungsErgebnis {
     return bleibt('Sollwert unverändert.');
   }
 
+  // ── Startfall ────────────────────────────────────────────────────────────
+  // Ein negativer Sollwert heisst: Wir wissen nicht, was am Gerät eingestellt
+  // ist. Dann wird sofort gesendet, ohne jede Frist.
+  //
+  // Das war schon immer die Absicht hinter dem Platzhalter — nur griff sie
+  // nicht: Die Haltezeiten unten verlangen einen Wunsch, der sich neunzig
+  // Sekunden lang nicht ändert, und bei wechselnder Bewölkung wackelt der um
+  // ein Ampere. Jedes Wackeln setzte die Frist zurück, und es ging überhaupt
+  // kein Befehl hinaus. Nach jedem Neustart stand das Auto dann, obwohl die
+  // Rechnung "lädt mit 14 A" meldete. Die Totzone, die genau solches Wackeln
+  // sonst abfängt, gilt hier nicht — sie setzt zwei gültige Sollwerte voraus,
+  // und einen davon gibt es nicht.
+  if (historie.gesetztA < 0) {
+    return senden(
+      wunschA,
+      jetztMs,
+      fortgeschrieben,
+      `Erster Befehl nach dem Start: ${wunschA === 0 ? 'Pause' : `${wunschA} A`}.`,
+    );
+  }
+
   const runter = wunschA < historie.gesetztA;
   const stabilMs = jetztMs - wunschStabilSeit;
   const seitBefehlMs = jetztMs - historie.gesetztAtMs;
