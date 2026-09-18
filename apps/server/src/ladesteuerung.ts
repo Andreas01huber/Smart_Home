@@ -348,18 +348,21 @@ export class Ladesteuerung {
    * Den Ladestrom auf das begrenzen, was die erkannte Dose verträgt.
    *
    * An der Starkstromdose sind es die Grenzen des Geräts, sonst nichts. An der
-   * Haushaltssteckdose kommt eine dazu, und die ist kein Software-Detail: Eine
-   * Schuko-Steckdose ist zwar mit 16 A gekennzeichnet, aber für 16 A im
-   * DAUERBETRIEB nicht gebaut. Stundenlang 3,7 kW über Kontakte, die dafür
-   * nicht ausgelegt sind, ist die klassische Ursache für geschmolzene Dosen —
-   * Ladeziegel, die einer Haushaltsdose beiliegen, begrenzen aus genau diesem
-   * Grund auf 8 bis 10 A.
+   * Haushaltssteckdose kommt eine zweite Grenze dazu: `haushaltMaxA`.
+   *
+   * Wie hoch die sein darf, weiss die Software nicht — das hängt an der
+   * Sicherung und dem Leitungsquerschnitt der jeweiligen Installation, und das
+   * kann nur ein Mensch beurteilen, der seine eigene Elektroinstallation kennt.
+   * Viele Schuko-Steckdosen sind für 16 A nicht im Dauerbetrieb ausgelegt,
+   * andere — mit passender Absicherung — durchaus. An DIESER Anlage ist
+   * geprüft: Die Leitung trägt 16 A auch an der Haushaltssteckdose, nur die
+   * Leistung ist geringer als an der Starkstromdose (3,7 statt 11 kW).
    *
    * Deshalb gilt hier eine eigene Obergrenze, und zwar auch im Handbetrieb: Die
    * Regel dieser Anlage lautet, dass die Software nie über das hinausgeht, was
-   * die Elektroinstallation zulässt. Wer es anders will, ändert
-   * `haushaltMaxA` in config.json — bewusst und an einer Stelle, nicht mit
-   * einem Fingertipp auf dem Handy.
+   * die Elektroinstallation zulässt. Der Wert kommt bewusst aus config.json und
+   * nicht als Fingertipp auf dem Handy — wer eine schwächere Dose oder einen
+   * Ladeziegel mit eigener Begrenzung nutzt, trägt dort die passende Zahl ein.
    */
   private begrenzeAufDose(ampere: number): number {
     const geraet = Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, Math.round(ampere)));
@@ -717,12 +720,15 @@ export class Ladesteuerung {
     // Ältester Messwert, der in die Entscheidung eingeht. Der Netzzähler ist
     // das Rückführsignal - ist der alt, ist die ganze Regelung blind.
     //
-    // Das Alter der Wallbox zählt nur mit, solange sie eingeschaltet ist. Eine
-    // abgeschaltete Wallbox meldet minutenlang nichts, weil sich nichts ändert
-    // — ihr "0 W" ist dann alt und trotzdem richtig. Zählte es mit, könnte die
-    // Regelung nie wieder anfangen zu laden: Sie bräuchte einen frischen Wert,
-    // den es erst gäbe, wenn sie eingeschaltet hätte.
-    const wallboxLaeuft = ev?.schalterAn === true || (ev?.chargePowerW ?? 0) > 0;
+    // Das Alter der Wallbox zählt nur mit, solange tatsächlich Strom fließt.
+    // Eine eingeschaltete, aber untätige Wallbox (Auto voll, wartet, oder
+    // Schalter an ohne Ladung) meldet minutenlang nichts, weil Tuya nur bei
+    // Wertänderung meldet — ihr "0 W" ist dann alt und trotzdem richtig.
+    // Zählte allein "Schalter an" schon mit, würde die Regelung genau dann
+    // blockieren, wenn das Auto gerade steckt, aber noch nichts anfordert -
+    // also im ganz normalen Ruhezustand. Echte Nichterreichbarkeit prüft
+    // ohnehin `wallboxErreichbar` separat.
+    const wallboxLaeuft = (ev?.chargePowerW ?? 0) > LAEDT_AB_W;
     const alter = [
       snap.gridImportW.provenance.ageMs,
       snap.solarProductionW.provenance.ageMs,

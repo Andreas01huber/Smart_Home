@@ -38,6 +38,7 @@ import {
 import { TuyaCloudClient, type TuyaStatusEntry } from './tuya-cloud.ts';
 import { entschluessblePhase, phasenAusMessung } from './tuya-phase.ts';
 import type { ConnectorDiagnostics, EnergyConnector } from './types.ts';
+import { mitWachhund } from './wachhund.ts';
 
 export interface TuyaEvseOptions {
   readonly accessId: string;
@@ -208,7 +209,18 @@ export class TuyaEvseConnector implements EnergyConnector {
     // abgewartet, spätere laufen im Hintergrund — so bremst die Wallbox nie den
     // 2-Sekunden-Takt der anderen Quellen.
     if (Date.now() - this.cachedAt >= interval && this.inFlight === null) {
-      this.inFlight = this.refresh().finally(() => {
+      // Notbremse gegen einen hängenden Cloud-Aufruf (siehe `wachhund.ts`).
+      // `refresh()` selbst hat um jeden HTTP-Aufruf ein 8-s-Timeout — trotzdem
+      // blieb an dieser Anlage einmal ein Poll über Stunden hängen:
+      // `this.inFlight` wurde nie wieder `null`, weil ohne Wachhund nichts
+      // dafür gesorgt hätte, und jeder `read()`-Aufruf dahinter fand
+      // `inFlight !== null` vor und tat nichts mehr. Die App zeigte den
+      // letzten guten Wert für immer weiter, ohne Fehlermeldung.
+      this.inFlight = mitWachhund(
+        this.refresh(),
+        TuyaEvseConnector.WATCHDOG_MS,
+        undefined,
+      ).finally(() => {
         this.inFlight = null;
       });
       if (this.cached === null) await this.inFlight;
@@ -348,6 +360,16 @@ export class TuyaEvseConnector implements EnergyConnector {
    * Sekundenrhythmus, und jeder Aufruf kostet Cloud-Kontingent.
    */
   private static readonly ERREICHBARKEIT_INTERVALL_MS = 30_000;
+
+  /**
+   * Harte Obergrenze für einen einzelnen Aktualisierungsversuch.
+   *
+   * Grösser als der denkbare Worst Case aus lauter 8-s-Timeouts (Token holen,
+   * Eigenschaften lesen, alle 30 s zusätzlich die Erreichbarkeit prüfen —
+   * höchstens drei sequentielle Aufrufe), aber weit unter den Stunden, die ein
+   * tatsächlicher Hänger sonst dauern würde.
+   */
+  private static readonly WATCHDOG_MS = 25_000;
 
   private async refresh(): Promise<void> {
     const startedAt = Date.now();
