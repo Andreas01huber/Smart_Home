@@ -845,6 +845,19 @@ describe('Haushaltssteckdose begrenzt den Ladestrom', () => {
     assert.equal(a.steuerung.zustand().zielA, 16);
     assert.doesNotMatch(a.steuerung.zustand().grund, /Haushaltssteckdose/);
   });
+
+  it('erlaubt an der Haushaltssteckdose auch 16 A, wenn die Installation es zulässt', async () => {
+    // Diese Anlage ist geprüft: Die Leitung trägt 16 A auch an der
+    // Haushaltssteckdose. `haushaltMaxA` ist eine Einstellung je Installation,
+    // keine feste Schuko-Grenze im Code — bei 16 konfiguriert darf auch 16
+    // ankommen, genau wie an der Starkstromdose.
+    const a = await anHaushaltsdose({ haushaltMaxA: 16 });
+    a.wallbox.befehle.length = 0;
+    a.steuerung.setzeBetriebsart('manuell', 16);
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().zielA, 16);
+    assert.doesNotMatch(a.steuerung.zustand().grund, /Haushaltssteckdose höchstens/);
+  });
 });
 
 describe('Laden von Hand beenden', () => {
@@ -947,5 +960,26 @@ describe('Alter des Wallbox-Werts', () => {
     });
     await zyklus();
     assert.equal(steuerung.zustand().zustand, 'pausiert-messwerte');
+  });
+
+  it('hält eine eingeschaltete, aber untätige Wallbox nicht für unbrauchbar', async () => {
+    // Der Fall vom 18.9.: Auto steckt, Schalter ist an, es fliesst aber (noch)
+    // nichts — Akku wartet, oder die Freigabe ist gerade erst gesetzt. Tuya
+    // meldet `phase_a` nur bei Wertänderung, darum ist der Wert nach zehn
+    // Minuten ohne Fluss alt und trotzdem richtig. Zählte "Schalter an" allein
+    // schon als Grund für Frische, würde die Regelung genau hier blockieren —
+    // im ganz normalen Ruhezustand mit angestecktem Auto.
+    const { engine, steuerung, zyklus } = aufbau({ maxMessalterSekunden: 30 });
+    engine.setze({
+      pv: 12_000,
+      hausOhneAuto: 500,
+      ev: 0,
+      stromA: 10,
+      schalterAn: true,
+      evAlterMs: 600_000,
+    });
+    await zyklus();
+    assert.notEqual(steuerung.zustand().zustand, 'pausiert-messwerte');
+    assert.ok(steuerung.zustand().zielA > 0, 'hat trotz Sonne und angestecktem Auto nicht geladen');
   });
 });
