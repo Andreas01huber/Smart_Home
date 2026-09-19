@@ -139,17 +139,28 @@ const THEME_MODES = [
 ];
 
 function currentThemeMode() {
-  const saved = localStorage.getItem('energie-theme');
+  let saved = null;
+  try { saved = localStorage.getItem('energie-theme'); } catch { /* privater Modus */ }
   return saved === 'light' || saved === 'dark' ? saved : 'auto';
+}
+
+/**
+ * „Automatisch“ muss das Attribut selbst setzen: Das Stylesheet kennt nur
+ * `data-theme='dark'`, keine Media-Query. Vorher blieb die App im
+ * Automatikmodus auch bei dunklem System immer hell.
+ */
+function setzeSystemThema() {
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.setAttribute('data-theme', 'dark');
+  else document.documentElement.removeAttribute('data-theme');
 }
 
 function applyTheme(mode) {
   if (mode === 'auto') {
-    document.documentElement.removeAttribute('data-theme');
-    localStorage.removeItem('energie-theme');
+    setzeSystemThema();
+    try { localStorage.removeItem('energie-theme'); } catch { /* ohne Speicher bleibt es bei Automatisch */ }
   } else {
     document.documentElement.setAttribute('data-theme', mode);
-    localStorage.setItem('energie-theme', mode);
+    try { localStorage.setItem('energie-theme', mode); } catch { /* gilt dann nur bis zum Neuladen */ }
   }
   // Farben kommen aus CSS-Variablen — die von JS gezeichneten Teile (Fluss,
   // Diagramm, Legende) müssen deshalb neu gezeichnet werden.
@@ -168,11 +179,11 @@ function initTheme() {
 
 /** Nur anwenden, ohne neu zu zeichnen — für den Start vor dem ersten Render. */
 function applyThemeFromStorage() {
-  const saved = localStorage.getItem('energie-theme');
+  const saved = currentThemeMode();
   if (saved === 'light' || saved === 'dark') {
     document.documentElement.setAttribute('data-theme', saved);
   } else {
-    document.documentElement.removeAttribute('data-theme');
+    setzeSystemThema();
   }
 }
 
@@ -1435,7 +1446,32 @@ function dayBounds(date) {
 }
 const GAP_MS = 4 * 60 * 1000; // Lücke, wenn Punkte weiter auseinander liegen
 
+/**
+ * Das Diagramm in Worten: Höchstwert und Zeitpunkt je sichtbarer Reihe. Für
+ * Screenreader und für alle, die eine Zahl statt einer Kurve lesen wollen.
+ * Lücken zählen nicht mit — ein fehlender Punkt ist kein Nullwert.
+ */
+function chartZusammenfassung() {
+  const pts = (dayData && dayData.series) || [];
+  if (!dayData?.hasData || pts.length < 2) return '';
+  const teile = [];
+  for (const s of activeSeries()) {
+    let best = null;
+    for (const p of pts) {
+      const v = s.get(p);
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+      if (best === null || Math.abs(v) > Math.abs(best.v)) best = { v, t: p.t };
+    }
+    if (best === null) continue;
+    const wert = chartView === 'soc' ? `${Math.round(best.v)} %` : formatPower(best.v);
+    teile.push(`${s.label} höchstens ${wert} um ${anlagenUhrzeit(best.t)}`);
+  }
+  return teile.length ? `Im Diagramm: ${teile.join(' · ')}.` : '';
+}
+
 function renderChart() {
+  const zusammenfassung = el('chart-summary');
+  if (zusammenfassung) zusammenfassung.textContent = chartZusammenfassung();
   const svg = el('today-chart');
   const rect = svg.getBoundingClientRect();
   const W = Math.max(320, Math.round(rect.width));
@@ -2229,7 +2265,7 @@ function evLiveMarkup(ev) {
       <div class="detail-grid">
         ${tile('Wallbox · gemessene Leistung', formatPower(ev.wallboxPowerW), !charging, charging ? 'ok' : '')}
         ${tile('Wallbox · gemessener Strom (Phase A)', Number.isFinite(ev.stromA) ? `${ev.stromA.toLocaleString('de-DE', { maximumFractionDigits: 1 })} A` : '—', !charging)}
-        ${tile('Von der Wallbox gemeldete Grenze', formatLadestrom(ev), true)}
+        ${tile('An der Wallbox eingestellt', formatLadestrom(ev), true)}
         ${tile('Geprüfte Ladeleistung', formatLadeleistung(ev), true)}
         ${tile('Möglich wären', r ? formatPower(Math.max(0, r.verfuegbarW)) : '—', !r)}
         ${tile('Netz', netzW >= 0 ? `${formatPower(netzW)} Bezug` : `${formatPower(-netzW)} Einspeisung`, true, netzW > 100 ? 'bad' : 'ok')}
