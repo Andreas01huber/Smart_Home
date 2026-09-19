@@ -51,7 +51,7 @@ import {
 
 import type { EngineState } from './engine.ts';
 import { localDate } from './history.ts';
-import { writeJsonAtomic } from './persist.ts';
+import { bewahreBeschaedigt, writeJsonAtomic } from './persist.ts';
 
 /**
  * Ab dieser Leistung gilt ein Ladevorgang als aktiv.
@@ -362,8 +362,16 @@ export class ChargeSessionLog {
 
   private load(): void {
     if (!existsSync(this.path)) return;
+    let parsed: any;
     try {
-      const parsed = JSON.parse(readFileSync(this.path, 'utf8'));
+      parsed = JSON.parse(readFileSync(this.path, 'utf8'));
+    } catch {
+      // Ein unlesbares Ladeprotokoll wird beiseitegelegt statt überschrieben —
+      // sonst wäre die gesamte Ladehistorie mit dem nächsten Speichern weg.
+      bewahreBeschaedigt(this.path);
+      return;
+    }
+    try {
       if (Array.isArray(parsed?.sessions)) this.sessions = parsed.sessions as ChargeSession[];
 
       // Eine beim Herunterfahren offene Session wird fortgesetzt, sofern sie

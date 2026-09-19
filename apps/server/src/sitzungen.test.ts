@@ -164,6 +164,38 @@ describe('Sitzungen', () => {
     s.neu('neu', 'Android', '10.0.0.6', jetzt);
     assert.equal(s.alle()[0]?.benutzerId, 'neu');
   });
+
+  it('hält ein Abmelden über den Neustart hinweg fest', () => {
+    const pfad = neuerPfad();
+    const s = new Sitzungsspeicher(pfad, GEHEIM);
+    const bleibt = s.neu('u1', 'iPhone', '10.0.0.5');
+    const weg = s.neu('u2', 'Android', '10.0.0.6');
+    s.beende(weg.split('.')[0] ?? '');
+
+    const nachNeustart = new Sitzungsspeicher(pfad, GEHEIM);
+    assert.equal(nachNeustart.pruefe(weg), null, 'abgemeldetes Gerät war wieder angemeldet');
+    assert.ok(nachNeustart.pruefe(bleibt), 'das andere Gerät wurde mit abgemeldet');
+  });
+
+  it('lässt ein Abmelden auch dann gelten, wenn nicht geschrieben werden kann', () => {
+    // Der gefährliche Fall: Die Platte ist voll oder das Verzeichnis weg. Die
+    // Sitzung ist dann nur im Arbeitsspeicher gelöscht — stünde sie weiter in
+    // der Datei, wäre das verlorene Handy nach dem nächsten Neustart wieder
+    // angemeldet. Genau das darf nicht passieren.
+    const ordner = mkdtempSync(join(tmpdir(), 'sitzung-weg-'));
+    const pfad = join(ordner, 'sitzungen.json');
+    const s = new Sitzungsspeicher(pfad, GEHEIM);
+    const keks = s.neu('u1', 'iPhone', '10.0.0.5');
+    assert.ok(s.pruefe(keks), 'Aufbau stimmt nicht');
+
+    // Ab jetzt lässt sich dort nichts mehr schreiben.
+    rmSync(ordner, { recursive: true, force: true });
+    s.beende(keks.split('.')[0] ?? '');
+
+    assert.equal(s.pruefe(keks), null, 'abgemeldete Sitzung galt weiter');
+    const nachNeustart = new Sitzungsspeicher(pfad, GEHEIM);
+    assert.equal(nachNeustart.pruefe(keks), null, 'die Abmeldung überlebte den Neustart nicht');
+  });
 });
 
 describe('Gerätename', () => {

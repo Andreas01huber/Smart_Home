@@ -1,6 +1,6 @@
 import { test, describe, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -211,6 +211,23 @@ describe('EnergyAccumulator — Speicherung & Aggregation', () => {
     acc.integrate(state({ at: new Date(2026, 7, 19, 12, 0, 10), pv: 0, house: 500, gi: 0, ge: 0, ev: 2000 }), 0);
     const v: any = acc.dayView(localDate(d));
     assert.equal(v.totals.evChargeWh, 0, 'der ungeprüfte Cloud-Wert wurde integriert');
+  });
+
+  test('eine kaputte Datei reisst die anderen nicht mit und bleibt erhalten', () => {
+    // Vorher lagen history.json, tariff.json und today.json in EINEM try/catch:
+    // Eine beschädigte Historie kostete auch den Tarif. Und beim nächsten
+    // Speichern wurde die kaputte Datei kommentarlos überschrieben.
+    const acc = makeAcc();
+    acc.setTariff({ importPricePerKWh: 0.42, exportPricePerKWh: 0.07 });
+    acc.persist();
+
+    writeFileSync(join(dir, 'history.json'), '{ das ist kein JSON', 'utf8');
+    const acc2 = new EnergyAccumulator({ dataDir: dir, pvSources: [], names: {}, tariff: TARIFF });
+
+    assert.equal(acc2.getTariff().importPricePerKWh, 0.42, 'der Tarif ging mit verloren');
+    const beiseite = readdirSync(dir).filter((f) => f.includes('beschaedigt'));
+    assert.equal(beiseite.length, 1, 'die kaputte Datei wurde nicht aufbewahrt');
+    assert.match(readFileSync(join(dir, beiseite[0] ?? ''), 'utf8'), /das ist kein JSON/);
   });
 
   test('Neustart stellt den heutigen Zwischenstand wieder her', () => {

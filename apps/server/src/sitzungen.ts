@@ -23,10 +23,10 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 
 import { SESSION_TTL_MS } from './auth.ts';
-import { writeJsonAtomic } from './persist.ts';
+import { bewahreBeschaedigt, writeJsonAtomic } from './persist.ts';
 
 export interface Sitzung {
   readonly id: string;
@@ -106,6 +106,16 @@ export class Sitzungsspeicher {
   private readonly liste = new Map<string, Sitzung>();
   private letzteSchreibung = 0;
   private ungespeichert = false;
+  /**
+   * Ein Abmelden liess sich nicht dauerhaft festhalten.
+   *
+   * Dann gilt gar keine Sitzung mehr. Das ist die einzige Richtung, in der man
+   * sich hier irren darf: Wer abmeldet — weil das Handy weg ist oder das
+   * Passwort gewechselt wurde —, muss sich darauf verlassen können. Bliebe die
+   * alte Datei liegen, wären die abgemeldeten Geräte nach dem nächsten Neustart
+   * wieder angemeldet, und niemand hätte es gemerkt.
+   */
+  private gesperrt = false;
 
   constructor(
     private readonly pfad: string,
@@ -133,7 +143,10 @@ export class Sitzungsspeicher {
       }
     } catch {
       // Kaputte Datei: lieber alle neu anmelden lassen als beim Start stehen
-      // bleiben. Der Bestand ist Bequemlichkeit, keine wertvollen Daten.
+      // bleiben. Der Bestand ist Bequemlichkeit, keine wertvollen Daten — die
+      // Datei selbst bleibt trotzdem erhalten, damit sich hinterher klären
+      // lässt, warum plötzlich alle abgemeldet waren.
+      bewahreBeschaedigt(this.pfad);
     }
   }
 
@@ -170,7 +183,7 @@ export class Sitzungsspeicher {
    * Gibt es den geringsten Zweifel, ist die Antwort `null`.
    */
   pruefe(token: string | undefined, now = Date.now()): Sitzung | null {
-    if (!token) return null;
+    if (this.gesperrt || !token) return null;
     const punkt = token.lastIndexOf('.');
     if (punkt <= 0) return null;
 
@@ -207,6 +220,7 @@ export class Sitzungsspeicher {
    * Gerät noch angemeldet ist.
    */
   gilt(id: string, now = Date.now()): boolean {
+    if (this.gesperrt) return false;
     const sitzung = this.liste.get(id);
     return sitzung !== undefined && sitzung.ablauf > now;
   }
@@ -230,7 +244,7 @@ export class Sitzungsspeicher {
 
   beende(id: string): boolean {
     const weg = this.liste.delete(id);
-    if (weg) this.schreiben(true);
+    if (weg) this.widerrufFesthalten();
     return weg;
   }
 
@@ -243,15 +257,55 @@ export class Sitzungsspeicher {
         anzahl += 1;
       }
     }
-    if (anzahl > 0) this.schreiben(true);
+    if (anzahl > 0) this.widerrufFesthalten();
     return anzahl;
   }
 
   beendeAlle(): number {
     const anzahl = this.liste.size;
     this.liste.clear();
-    this.schreiben(true);
+    this.widerrufFesthalten();
     return anzahl;
+  }
+
+  /**
+   * Ein Abmelden dauerhaft festhalten — oder notfalls alles sperren.
+   *
+   * Ein gewöhnlicher Schreibfehler ist hier kein Schönheitsfehler: Die Sitzung
+   * ist dann nur im Arbeitsspeicher weg, in der Datei steht sie weiter. Nach
+   * dem nächsten Neustart wäre das abgemeldete Gerät wieder angemeldet — genau
+   * dann, wenn es darauf ankommt (verlorenes Handy, gewechseltes Passwort).
+   *
+   * Deshalb hier drei Stufen, jede davon in die sichere Richtung:
+   *
+   *   1. Schreiben. Klappt das, ist alles gut.
+   *   2. Die Datei löschen. Ohne Datei ist nach einem Neustart niemand
+   *      angemeldet — unbequem, aber sicher.
+   *   3. Geht auch das nicht, gilt im laufenden Betrieb keine Sitzung mehr.
+   *      Angemeldet bleibt dann niemand, und der Fehler steht deutlich in der
+   *      Ausgabe, statt unbemerkt zu bleiben.
+   */
+  private widerrufFesthalten(): void {
+    this.ungespeichert = true;
+    if (this.persist()) return;
+
+    try {
+      rmSync(this.pfad, { force: true });
+      console.warn(
+        'Abmeldung liess sich nicht speichern — die Sitzungsdatei wurde gelöscht. '
+          + 'Nach einem Neustart müssen sich alle Geräte neu anmelden.',
+      );
+      this.ungespeichert = false;
+      return;
+    } catch {
+      /* Auch das Löschen ging nicht — nächste Stufe. */
+    }
+
+    this.gesperrt = true;
+    console.error(
+      'Abmeldung liess sich weder speichern noch die Sitzungsdatei löschen. '
+        + 'Es gilt ab sofort keine Sitzung mehr; bitte Datenverzeichnis prüfen.',
+    );
   }
 
   private aufraeumen(now: number): void {
@@ -267,16 +321,20 @@ export class Sitzungsspeicher {
     this.persist();
   }
 
-  persist(): void {
-    if (!this.ungespeichert) return;
+  /** Schreibt den Bestand. Gibt zurück, ob er wirklich auf der Platte steht. */
+  persist(): boolean {
+    if (!this.ungespeichert) return true;
     const inhalt: Gespeichert = { version: 1, sitzungen: [...this.liste.values()] };
     try {
       writeJsonAtomic(this.pfad, inhalt);
       this.letzteSchreibung = Date.now();
       this.ungespeichert = false;
+      return true;
     } catch {
       // Lässt sich nicht schreiben (Platte voll, Rechte): Der Betrieb läuft aus
       // dem Arbeitsspeicher weiter. Erst ein Neustart kostet die Anmeldungen.
+      // Beim Abmelden reicht das NICHT — siehe `widerrufFesthalten`.
+      return false;
     }
   }
 }

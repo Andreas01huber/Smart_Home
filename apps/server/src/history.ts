@@ -34,7 +34,7 @@ import {
 } from '@energy/core';
 
 import type { EngineState } from './engine.ts';
-import { writeJsonAtomic } from './persist.ts';
+import { bewahreBeschaedigt, writeJsonAtomic } from './persist.ts';
 
 export interface DailyRecord {
   readonly date: string; // YYYY-MM-DD (lokale Zeit)
@@ -438,45 +438,69 @@ export class EnergyAccumulator {
         quality: parsed.quality,
       };
     } catch {
+      // Ein beschädigtes Tagesarchiv bleibt liegen: Der Tag ist damit zwar
+      // nicht abrufbar, aber auch nicht verloren.
+      bewahreBeschaedigt(path);
       return null;
     }
   }
 
+  /**
+   * Jede Datei für sich.
+   *
+   * Vorher lagen alle drei in EINEM try/catch: Eine beschädigte history.json
+   * riss den Tarif und den heutigen Zwischenstand mit, obwohl mit denen nichts
+   * war. Eine kaputte Datei soll genau ihren eigenen Inhalt kosten — und auch
+   * den nicht endgültig, siehe `bewahreBeschaedigt`.
+   */
   private load(): void {
+    this.leseDatei(this.historyPath(), (parsed) => {
+      if (Array.isArray(parsed?.days)) this.history = parsed.days as DailyRecord[];
+    });
+    this.leseDatei(this.tariffPath(), (parsed) => {
+      this.tariff = { ...this.tariff, ...parsed };
+    });
+    this.leseDatei(this.todayPath(), (parsed) => this.uebernehmeHeute(parsed));
+  }
+
+  /** Liest eine JSON-Datei; bei Beschädigung bleibt sie erhalten. */
+  private leseDatei(pfad: string, uebernehmen: (parsed: any) => void): void {
+    if (!existsSync(pfad)) return;
+    let parsed: unknown;
     try {
-      if (existsSync(this.historyPath())) {
-        const parsed = JSON.parse(readFileSync(this.historyPath(), 'utf8'));
-        if (Array.isArray(parsed?.days)) this.history = parsed.days as DailyRecord[];
-      }
-      if (existsSync(this.tariffPath())) {
-        this.tariff = { ...this.tariff, ...JSON.parse(readFileSync(this.tariffPath(), 'utf8')) };
-      }
-      if (existsSync(this.todayPath())) {
-        const parsed = JSON.parse(readFileSync(this.todayPath(), 'utf8'));
-        if (parsed?.date === this.currentDate && parsed.totals) {
-          this.today = toMutable(parsed.totals as EnergyTotals);
-          if (Array.isArray(parsed.series)) {
-            this.series = parsed.series as SeriesPoint[];
-            // Ohne diese Zeile stand lastSeriesAt nach einem Neustart auf 0:
-            // Der erste Messzyklus setzte dann sofort einen weiteren Punkt,
-            // wenige Sekunden nach dem zuletzt gespeicherten. Die Kurve bekam
-            // bei jedem Start einen Doppelpunkt.
-            const last = this.series[this.series.length - 1];
-            if (last && Number.isFinite(last.t)) this.lastSeriesAt = last.t;
-          }
-          if (parsed.batteryNames) this.batteryNames = parsed.batteryNames;
-          if (parsed.batteryCaps) this.batteryCaps = parsed.batteryCaps;
-        } else if (parsed?.date && parsed.date !== this.currentDate && parsed.totals) {
-          // today.json stammt von einem früheren Tag (Server war über Mitternacht
-          // aus): diesen Tag noch archivieren, damit seine Kurve nicht verloren geht.
-          this.archiveDayFrom(parsed);
-          this.history = this.history.filter((r) => r.date !== parsed.date);
-          this.history.push({ date: parsed.date, totals: parsed.totals });
-          this.history.sort((a, b) => a.date.localeCompare(b.date));
-        }
-      }
+      parsed = JSON.parse(readFileSync(pfad, 'utf8'));
+    } catch {
+      bewahreBeschaedigt(pfad);
+      return;
+    }
+    try {
+      uebernehmen(parsed);
     } catch (error) {
-      console.warn('Historie konnte nicht vollständig geladen werden:', error);
+      console.warn(`${pfad} hat einen unerwarteten Inhalt:`, error);
+    }
+  }
+
+  private uebernehmeHeute(parsed: any): void {
+    if (parsed?.date === this.currentDate && parsed.totals) {
+      this.today = toMutable(parsed.totals as EnergyTotals);
+      if (Array.isArray(parsed.series)) {
+        this.series = parsed.series as SeriesPoint[];
+        // Ohne diese Zeile stand lastSeriesAt nach einem Neustart auf 0:
+        // Der erste Messzyklus setzte dann sofort einen weiteren Punkt,
+        // wenige Sekunden nach dem zuletzt gespeicherten. Die Kurve bekam
+        // bei jedem Start einen Doppelpunkt.
+        const last = this.series[this.series.length - 1];
+        if (last && Number.isFinite(last.t)) this.lastSeriesAt = last.t;
+      }
+      if (parsed.batteryNames) this.batteryNames = parsed.batteryNames;
+      if (parsed.batteryCaps) this.batteryCaps = parsed.batteryCaps;
+    } else if (parsed?.date && parsed.date !== this.currentDate && parsed.totals) {
+      // today.json stammt von einem früheren Tag (Server war über Mitternacht
+      // aus): diesen Tag noch archivieren, damit seine Kurve nicht verloren geht.
+      this.archiveDayFrom(parsed);
+      this.history = this.history.filter((r) => r.date !== parsed.date);
+      this.history.push({ date: parsed.date, totals: parsed.totals });
+      this.history.sort((a, b) => a.date.localeCompare(b.date));
     }
   }
 
