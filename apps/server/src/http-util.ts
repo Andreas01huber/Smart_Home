@@ -46,3 +46,30 @@ export function readBody(request: IncomingMessage, maxBytes = 64_000): Promise<s
     request.on('error', reject);
   });
 }
+
+/**
+ * Stammt eine zustandsändernde Anfrage von dieser App selbst?
+ *
+ * Ein angemeldeter Browser schickt seinen Keks bei jeder Anfrage mit — auch
+ * wenn eine fremde Webseite sie auslöst. Ohne diese Prüfung könnte eine
+ * präparierte Seite im Namen des Angemeldeten "Laden fortsetzen" drücken oder
+ * den Tarif ändern. Browser setzen dafür `Origin` bzw. `Sec-Fetch-Site`; passt
+ * die Herkunft nicht zum angefragten Host, wird abgelehnt.
+ *
+ * Lesende Methoden (GET, HEAD) sind nicht betroffen. Anfragen ganz ohne diese
+ * Köpfe (Skripte, curl) gehen durch — sie tragen keinen fremden Keks.
+ */
+export function herkunftErlaubt(request: IncomingMessage): boolean {
+  const methode = (request.method ?? 'GET').toUpperCase();
+  if (methode === 'GET' || methode === 'HEAD' || methode === 'OPTIONS') return true;
+  const fetchSite = request.headers['sec-fetch-site'];
+  if (fetchSite === 'cross-site') return false;
+  const origin = request.headers['origin'];
+  if (typeof origin !== 'string' || origin === '') return true;
+  if (origin === 'null') return false;
+  try {
+    return new URL(origin).host === (request.headers['host'] ?? '');
+  } catch {
+    return false;
+  }
+}

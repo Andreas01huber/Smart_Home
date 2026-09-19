@@ -1,7 +1,7 @@
-import { it } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { mitHttpFehlergrenze } from './http-util.ts';
+import { herkunftErlaubt, mitHttpFehlergrenze } from './http-util.ts';
 
 function antwort() {
   return { status: 0, body: '', destroyed: false, writableEnded: false, headersSent: false,
@@ -37,4 +37,25 @@ it('übersteht synchrone und asynchrone Fehler und verarbeitet die nächste Anfr
     await handler(request('/'), ok as unknown as ServerResponse);
     assert.equal(ok.status, 200);
   }
+});
+
+describe('Herkunftsschutz für zustandsändernde Anfragen', () => {
+  const anfrage = (method: string, headers: Record<string, string>) =>
+    ({ method, headers: { host: 'smarthome.example', ...headers } }) as unknown as IncomingMessage;
+
+  it('lässt Anfragen der eigenen Seite und Skripte ohne Browserkopf durch', () => {
+    assert.equal(herkunftErlaubt(anfrage('POST', { origin: 'https://smarthome.example' })), true);
+    assert.equal(herkunftErlaubt(anfrage('POST', { 'sec-fetch-site': 'same-origin' })), true);
+    assert.equal(herkunftErlaubt(anfrage('POST', {})), true);
+  });
+
+  it('lehnt fremde Seiten ab', () => {
+    assert.equal(herkunftErlaubt(anfrage('POST', { origin: 'https://boese.example' })), false);
+    assert.equal(herkunftErlaubt(anfrage('PUT', { 'sec-fetch-site': 'cross-site' })), false);
+    assert.equal(herkunftErlaubt(anfrage('POST', { origin: 'null' })), false);
+  });
+
+  it('lesende Anfragen sind nicht betroffen', () => {
+    assert.equal(herkunftErlaubt(anfrage('GET', { origin: 'https://boese.example' })), true);
+  });
 });

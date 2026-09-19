@@ -23,7 +23,7 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
 import { SESSION_TTL_MS } from './auth.ts';
 import { bewahreBeschaedigt, writeJsonAtomic } from './persist.ts';
@@ -117,14 +117,36 @@ export class Sitzungsspeicher {
    */
   private gesperrt = false;
 
+  /**
+   * @param notfallMarker Datei an einem ZWEITEN Ort (neben secrets.json). Lässt
+   *   sich ein Abmelden weder speichern noch die Sitzungsdatei löschen, wird dort
+   *   ein Marker hinterlegt; beim nächsten Start gilt dann keine gespeicherte
+   *   Sitzung. Erst ein erfolgreicher Schreiblauf räumt ihn wieder weg.
+   */
   constructor(
     private readonly pfad: string,
     private readonly geheimnis: string,
+    private readonly notfallMarker: string | null = null,
   ) {
     this.laden();
   }
 
+  /** Für die Verwaltung: Ist der Bestand gesperrt, liegt ein Notfall-Marker? */
+  betriebszustand(): { gesperrt: boolean; notfallMarker: boolean } {
+    return {
+      gesperrt: this.gesperrt,
+      notfallMarker: this.notfallMarker !== null && existsSync(this.notfallMarker),
+    };
+  }
+
   private laden(): void {
+    if (this.notfallMarker !== null && existsSync(this.notfallMarker)) {
+      // Ein Abmelden konnte beim letzten Mal nicht gespeichert werden. Die
+      // Datei darf deshalb nicht geglaubt werden — alle melden sich neu an.
+      console.warn('Notfall-Marker für Sitzungen gefunden — alle Geräte müssen sich neu anmelden.');
+      this.ungespeichert = true;
+      return;
+    }
     if (!existsSync(this.pfad)) return;
     try {
       const roh: unknown = JSON.parse(readFileSync(this.pfad, 'utf8'));
@@ -281,9 +303,14 @@ export class Sitzungsspeicher {
    *   1. Schreiben. Klappt das, ist alles gut.
    *   2. Die Datei löschen. Ohne Datei ist nach einem Neustart niemand
    *      angemeldet — unbequem, aber sicher.
-   *   3. Geht auch das nicht, gilt im laufenden Betrieb keine Sitzung mehr.
-   *      Angemeldet bleibt dann niemand, und der Fehler steht deutlich in der
-   *      Ausgabe, statt unbemerkt zu bleiben.
+   *   3. Einen Notfall-Marker an einem zweiten Ort schreiben. Er sorgt dafür,
+   *      dass nach einem Neustart keine gespeicherte Sitzung gilt.
+   *   4. Im laufenden Betrieb gilt keine Sitzung mehr.
+   *
+   * Grenze: Lässt sich an KEINEM Ort schreiben oder löschen, überlebt die
+   * Sperre nur bis zum nächsten Neustart. Der Zustand steht deshalb deutlich
+   * in der Verwaltung und in der Ausgabe; vor einem Neustart muss das
+   * Datenverzeichnis repariert werden.
    */
   private widerrufFesthalten(): void {
     this.ungespeichert = true;
@@ -301,6 +328,14 @@ export class Sitzungsspeicher {
       /* Auch das Löschen ging nicht — nächste Stufe. */
     }
 
+    if (this.notfallMarker !== null) {
+      try {
+        writeFileSync(this.notfallMarker, new Date().toISOString(), 'utf8');
+        console.error('Abmeldung nicht speicherbar — Notfall-Marker gesetzt, nach Neustart gilt keine Sitzung.');
+      } catch {
+        /* Auch der zweite Ort ist nicht beschreibbar. */
+      }
+    }
     this.gesperrt = true;
     console.error(
       'Abmeldung liess sich weder speichern noch die Sitzungsdatei löschen. '
@@ -329,6 +364,10 @@ export class Sitzungsspeicher {
       writeJsonAtomic(this.pfad, inhalt);
       this.letzteSchreibung = Date.now();
       this.ungespeichert = false;
+      // Der Bestand steht wieder ehrlich auf der Platte: Marker weg.
+      if (this.notfallMarker !== null && existsSync(this.notfallMarker)) {
+        try { rmSync(this.notfallMarker, { force: true }); } catch { /* bleibt, schadet nicht */ }
+      }
       return true;
     } catch {
       // Lässt sich nicht schreiben (Platte voll, Rechte): Der Betrieb läuft aus

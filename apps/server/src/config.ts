@@ -164,6 +164,11 @@ const UEBERSCHUSS_STANDARD: UeberschussConfig = {
 export interface AppConfig {
   /** Bewusster Betrieb ohne Anmeldung; standardmäßig nicht erlaubt. */
   readonly allowUnauthenticatedAccess?: boolean;
+  /**
+   * Adressen, deren Weiterleitungsköpfe (Client-IP, HTTPS) geglaubt werden —
+   * typischerweise der lokal laufende Cloudflare-Tunnel. Vorgabe: nur lokal.
+   */
+  readonly trustedProxies: readonly string[];
   readonly port: number;
   /**
    * Netzwerk-Interface, auf dem der Server lauscht.
@@ -264,6 +269,9 @@ export function loadConfig(path = resolve(process.cwd(), 'config.json')): AppCon
   return {
     secretsPfad,
     allowUnauthenticatedAccess: record['allowUnauthenticatedAccess'] === true,
+    trustedProxies: Array.isArray(record['trustedProxies'])
+      ? (record['trustedProxies'] as unknown[]).filter((x): x is string => typeof x === 'string')
+      : ['127.0.0.1', '::1'],
     ueberschuss,
     port: typeof record['port'] === 'number' ? record['port'] : DEFAULTS.port,
     host: typeof record['host'] === 'string' ? record['host'] : DEFAULTS.host,

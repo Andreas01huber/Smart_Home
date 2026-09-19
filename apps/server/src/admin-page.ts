@@ -18,6 +18,7 @@
 import { esc } from './html.ts';
 import type { Benutzer } from './benutzer.ts';
 import type { Sitzung } from './sitzungen.ts';
+import type { Schreibstatus } from './persist.ts';
 
 export interface AdminAnsicht {
   readonly ich: Benutzer;
@@ -27,6 +28,10 @@ export interface AdminAnsicht {
   readonly fehler?: string;
   /** Name, um den es in der Meldung geht. */
   readonly wer?: string;
+  /** Schreibstatus aller Datenbestände — siehe persist.ts. */
+  readonly speicher?: readonly Schreibstatus[];
+  /** Zustand der Sitzungsverwaltung (Sperre, Notfall-Marker). */
+  readonly sitzungsbetrieb?: { readonly gesperrt: boolean; readonly notfallMarker: boolean };
 }
 
 const OK_TEXTE: Readonly<Record<string, string>> = {
@@ -382,6 +387,8 @@ ${kontoZeilen}
     </form>
   </section>
 
+  ${speicherAbschnitt(ansicht)}
+
   <p class="fuss">
     Passwort vergessen und niemand kommt mehr in die Verwaltung? Auf dem Server-PC
     im Ordner der App <span class="mono">npm run passwort</span> ausführen — das
@@ -391,4 +398,39 @@ ${kontoZeilen}
 </div>
 </body>
 </html>`;
+}
+
+/**
+ * Datenspeicher: letzter erfolgreicher Schreibzeitpunkt, aktueller Fehler,
+ * Sperren. Vorher standen Schreibfehler nur in der Konsole — bemerkt hat sie
+ * niemand.
+ */
+function speicherAbschnitt(ansicht: AdminAnsicht): string {
+  const liste = ansicht.speicher ?? [];
+  const sb = ansicht.sitzungsbetrieb;
+  const warnungen: string[] = [];
+  if (sb?.gesperrt) {
+    warnungen.push('Ein Abmelden liess sich nicht speichern. Im laufenden Betrieb gilt keine Sitzung. '
+      + 'Datenverzeichnis prüfen, BEVOR der Dienst neu gestartet wird.');
+  }
+  if (sb?.notfallMarker) {
+    warnungen.push('Notfall-Marker gesetzt: Nach einem Neustart gilt keine gespeicherte Sitzung — alle melden sich neu an.');
+  }
+  const zeilen = liste.map((s) => `
+      <tr>
+        <td class="mono">${esc(s.datei)}</td>
+        <td>${s.letzterErfolgAm ? esc(new Date(s.letzterErfolgAm).toLocaleString('de-DE')) : '—'}</td>
+        <td>${s.gesperrt ? `<b>gesperrt:</b> ${esc(s.gesperrt)}` : s.fehler ? `${esc(s.fehler)} (seit ${esc(new Date(s.fehlerSeit ?? '').toLocaleString('de-DE'))}, ${s.fehlversuche}×)` : 'in Ordnung'}</td>
+      </tr>`).join('');
+  return `
+  <section>
+    <h2>Datenspeicher</h2>
+    <p class="unter">Wann jede Datei zuletzt gespeichert wurde und ob gerade ein Fehler ansteht.</p>
+    ${warnungen.map((w) => `<p class="hinweisbox schlecht" role="alert">${esc(w)}</p>`).join('')}
+    ${liste.length === 0 ? '<p class="klein-dim">Seit dem Start wurde noch nichts gespeichert.</p>' : `
+    <table>
+      <thead><tr><th>Datei</th><th>Zuletzt gespeichert</th><th>Zustand</th></tr></thead>
+      <tbody>${zeilen}</tbody>
+    </table>`}
+  </section>`;
 }

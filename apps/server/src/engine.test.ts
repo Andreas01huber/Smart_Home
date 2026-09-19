@@ -45,3 +45,16 @@ it('erkennt einen ausbleibenden konfigurierten Speicher bereits beim ersten Poll
   assert.equal(engine.current()?.resolution.snapshot.houseConsumptionW.valueW, null);
   assert.ok(engine.current()?.resolution.unavailable.includes('battery:victron-modbus'));
 });
+
+it('eine nie antwortende Quelle blockiert den Messzyklus nicht dauerhaft', async () => {
+  const haengt = { id: 'haengt', diagnostics: () => ({}), read: () => new Promise<ConnectorReading>(() => undefined) } as unknown as EnergyConnector;
+  const gesund = { id: 'test', diagnostics: () => ({}), read: async () => lesen(1500) } as unknown as EnergyConnector;
+  const engine = new EnergyEngine([haengt, gesund], config, 50);
+  const start = Date.now();
+  await poll(engine);
+  assert.ok(Date.now() - start < 1000, 'der Poll hing an der toten Quelle');
+  assert.equal(engine.current()?.resolution.snapshot.solarProductionW.valueW, 1500);
+  // Und der nächste Poll kommt wieder zum Zug.
+  await poll(engine);
+  assert.ok(engine.current() !== null);
+});

@@ -46,7 +46,7 @@ import { Hausverbrauch, type HausAnteil } from './hausverbrauch.ts';
 import { EnergyAccumulator, localDate } from './history.ts';
 import { ChargeSessionLog } from './ev-log.ts';
 import { Ladesteuerung } from './ladesteuerung.ts';
-import { readBody, mitHttpFehlergrenze } from './http-util.ts';
+import { readBody, mitHttpFehlergrenze, herkunftErlaubt } from './http-util.ts';
 import { pruefeBetriebsartAnfrage, pruefeStoppAnfrage } from './ev-anfragen.ts';
 
 const PUBLIC_DIR = resolve(import.meta.dirname, '..', 'public');
@@ -662,6 +662,9 @@ export async function starteServer(o: Startoptionen): Promise<LaufenderServer> {
   const konten = Kontenspeicher.ladenFuerServer(config.secretsPfad, config.allowUnauthenticatedAccess);
   const sitzungen = konten === null ? null : new Sitzungsspeicher(
     resolve(datenverzeichnis, 'sitzungen.json'), konten.sessionSecret,
+    // Zweiter Ort für den Notfall-Marker: neben secrets.json, nicht im
+    // Datenverzeichnis — fällt das aus, soll der Marker trotzdem ankommen.
+    resolve(config.secretsPfad, '..', 'sitzungen-gesperrt.flag'),
   );
   const { connectors, wallbox } = o.quellen ?? buildConnectors(config);
 
@@ -739,17 +742,26 @@ export async function starteServer(o: Startoptionen): Promise<LaufenderServer> {
 
   const server = createServer(mitHttpFehlergrenze(async (request, response, url) => {
     if (o.vorbehandlung && (await o.vorbehandlung(request, response, url))) return;
+    if (!herkunftErlaubt(request)) {
+      response.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
+      response.end(JSON.stringify({ error: 'Anfrage von fremder Herkunft abgelehnt.' }));
+      return;
+    }
 
     // Offener Betrieb ist nur nach ausdrücklicher Konfiguration möglich.
     let ich: Benutzer | null = null;
     let sitzungId: string | null = null;
     if (konten !== null && sitzungen !== null) {
-      const schranke = authGate(request, response, url, { konten, sitzungen, throttle });
+      const schranke = authGate(request, response, url, {
+        konten, sitzungen, throttle, vertrauteProxies: config.trustedProxies,
+      });
       if (!schranke.weiter) return;
       ich = schranke.benutzer ?? null;
       sitzungId = schranke.sitzungId ?? null;
 
-      if (ich !== null && adminRouten(request, response, url, ich, { konten, sitzungen })) {
+      if (ich !== null && adminRouten(request, response, url, ich, {
+        konten, sitzungen, vertrauteProxies: config.trustedProxies,
+      })) {
         return;
       }
     } else if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {

@@ -159,30 +159,59 @@ export class LoginThrottle {
   }
 }
 
+/** Adresse ohne IPv4-in-IPv6-Präfix, damit 127.0.0.1 und ::ffff:127.0.0.1 gleich sind. */
+export function normalisiereAdresse(adresse: string | undefined): string | undefined {
+  return adresse?.startsWith('::ffff:') ? adresse.slice(7) : adresse;
+}
+
+/**
+ * Kommt diese Verbindung von einem ausdrücklich vertrauten Proxy?
+ *
+ * Nur dann dürfen Weiterleitungsköpfe (CF-Connecting-IP, X-Forwarded-For,
+ * X-Forwarded-Proto) gelten. Ein Gerät im Heimnetz, das direkt verbindet,
+ * könnte sie sonst fälschen und sich für jeden Anmeldeversuch eine neue
+ * Identität geben — die Bremse gegen Passwortraten wäre wirkungslos.
+ */
+export function vertrauterProxy(
+  remoteAddress: string | undefined,
+  vertraut: readonly string[],
+): boolean {
+  const a = normalisiereAdresse(remoteAddress);
+  return a !== undefined && vertraut.some((v) => normalisiereAdresse(v) === a);
+}
+
 /**
  * Herkunft einer Anfrage.
  *
  * Hinter dem Tunnel steht in `remoteAddress` immer die lokale Adresse des
  * Tunnels - ohne den Cloudflare-Kopf wären alle Anfragen aus dem Internet
  * dieselbe Herkunft, und ein einziger Angreifer würde die ganze Welt aussperren.
+ * Den Kopf gibt es deshalb — aber nur von einem vertrauten Proxy.
  */
 export function herkunftVon(
   headers: Readonly<Record<string, string | string[] | undefined>>,
   remoteAddress: string | undefined,
+  vomProxy = false,
 ): string {
+  if (!vomProxy) return normalisiereAdresse(remoteAddress) ?? 'unbekannt';
   const cf = headers['cf-connecting-ip'];
   if (typeof cf === 'string' && cf.length > 0) return cf;
   const weiter = headers['x-forwarded-for'];
   if (typeof weiter === 'string' && weiter.length > 0) {
     return (weiter.split(',')[0] ?? weiter).trim();
   }
-  return remoteAddress ?? 'unbekannt';
+  return normalisiereAdresse(remoteAddress) ?? 'unbekannt';
 }
 
-/** Kam die Anfrage über HTTPS herein? Hinter dem Tunnel sagt das nur der Kopf. */
+/**
+ * Kam die Anfrage über HTTPS herein? Hinter dem Tunnel sagt das nur der Kopf —
+ * und dem wird nur geglaubt, wenn er von einem vertrauten Proxy stammt.
+ */
 export function istHttps(
   headers: Readonly<Record<string, string | string[] | undefined>>,
+  vomProxy = false,
 ): boolean {
+  if (!vomProxy) return false;
   const proto = headers['x-forwarded-proto'];
   if (typeof proto === 'string') return proto.split(',')[0]?.trim() === 'https';
   return false;

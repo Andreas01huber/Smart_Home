@@ -206,6 +206,7 @@ function konfiguration(ueber: Partial<AppConfig['ueberschuss']> = {}): AppConfig
     announcedBatteries: [],
     tariff: { importPricePerKWh: 0.28, exportPricePerKWh: 0.08 },
     secretsPfad: 'unbenutzt',
+    trustedProxies: [],
     ueberschuss: {
       modus: 'regeln',
       intervallSekunden: 30,

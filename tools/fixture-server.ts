@@ -262,6 +262,7 @@ function konfiguration(port: number, dir: string): AppConfig {
     host: '127.0.0.1',
     pollIntervalMs: 2000,
     allowUnauthenticatedAccess: true,
+    trustedProxies: [],
     secretsPfad: join(dir, 'secrets-gibt-es-hier-nicht.json'),
     sources: {
       fronius: { enabled: true, host: 'fixture', displayName: 'Fronius Symo' },

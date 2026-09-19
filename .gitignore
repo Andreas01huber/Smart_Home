@@ -52,3 +52,6 @@ desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# Notfall-Marker der Sitzungsverwaltung (siehe sitzungen.ts)
+sitzungen-gesperrt.flag

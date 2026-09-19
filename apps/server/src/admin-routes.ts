@@ -12,9 +12,10 @@
  * Administrator sie gerade zurückgestuft hat.
  */
 
+import { schreibstatus } from './persist.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { clearCookie, istHttps } from './auth.ts';
+import { clearCookie, istHttps, vertrauterProxy } from './auth.ts';
 import { adminPage } from './admin-page.ts';
 import type { Benutzer, Kontenspeicher, Rolle } from './benutzer.ts';
 import { readBody } from './http-util.ts';
@@ -25,6 +26,7 @@ const KEIN_CACHE = 'no-store, no-cache, must-revalidate';
 export interface AdminKontext {
   readonly konten: Kontenspeicher;
   readonly sitzungen: Sitzungsspeicher;
+  readonly vertrauteProxies?: readonly string[];
 }
 
 function sendeSeite(response: ServerResponse, status: number, html: string): void {
@@ -133,6 +135,8 @@ export function adminRouten(
         ...(ok === null ? {} : { ok }),
         ...(fehler === null ? {} : { fehler }),
         ...(wer === null ? {} : { wer }),
+        speicher: schreibstatus(),
+        sitzungsbetrieb: sitzungen.betriebszustand(),
       }),
     );
     return true;
@@ -232,7 +236,7 @@ export function adminRouten(
           sitzungen.beendeAlle();
           // Das eigene Gerät ist mit abgemeldet. Direkt auf die Anmeldung
           // schicken, statt auf eine Seite, die sofort weiterleitet.
-          leiteWeiter(response, '/login', clearCookie(istHttps(request.headers)));
+          leiteWeiter(response, '/login', clearCookie(istHttps(request.headers, vertrauterProxy(request.socket.remoteAddress, kontext.vertrauteProxies ?? []))));
           return;
         }
 

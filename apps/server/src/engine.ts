@@ -26,6 +26,7 @@ export class EnergyEngine {
   constructor(
     private readonly connectors: readonly EnergyConnector[],
     private readonly config: AppConfig,
+    private readonly quellenFristMs = QUELLEN_FRIST_MS,
   ) {}
 
   start(): void {
@@ -59,8 +60,11 @@ export class EnergyEngine {
       // verworfen — auch die Werte der Geräte, die einwandfrei geantwortet
       // haben. Deshalb allSettled: Was da ist, wird verwendet, der Rest fehlt
       // und wird als fehlend ausgewiesen.
+      // Jede Quelle hat eine absolute Frist. Eine Zusage, die nie endet, darf
+      // den Zyklus nicht festhalten — sonst stauen sich keine neuen Polls auf,
+      // es gibt schlicht keine mehr (pollLaeuft bliebe für immer gesetzt).
       const settled = await Promise.allSettled(
-        this.connectors.map((connector) => connector.read()),
+        this.connectors.map((connector) => mitFrist(connector.read(), this.quellenFristMs, connector.id)),
       );
       const readings: ConnectorReading[] = [];
       settled.forEach((result, index) => {
@@ -126,4 +130,17 @@ export class EnergyEngine {
       this.pollLaeuft = false;
     }
   }
+}
+
+/** Längste Wartezeit auf eine einzelne Quelle in einem Messzyklus. */
+const QUELLEN_FRIST_MS = 30_000;
+
+function mitFrist<T>(zusage: Promise<T>, ms: number, name: string): Promise<T> {
+  let frist: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    zusage,
+    new Promise<never>((_, nein) => {
+      frist = setTimeout(() => nein(new Error(`${name}: keine Antwort binnen ${ms} ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(frist));
 }

@@ -20,6 +20,7 @@ import {
   clearCookie,
   herkunftVon,
   istHttps,
+  vertrauterProxy,
   parseCookies,
   sicheresZiel,
   sessionCookie,
@@ -43,6 +44,8 @@ export interface AuthKontext {
   readonly konten: Kontenspeicher;
   readonly sitzungen: Sitzungsspeicher;
   readonly throttle: LoginThrottle;
+  /** Adressen, deren Weiterleitungsköpfe geglaubt werden. */
+  readonly vertrauteProxies?: readonly string[];
 }
 
 export interface GateErgebnis {
@@ -84,7 +87,8 @@ export function authGate(
   kontext: AuthKontext,
 ): GateErgebnis {
   const { konten, sitzungen, throttle } = kontext;
-  const sicher = istHttps(request.headers);
+  const vomProxy = vertrauterProxy(request.socket.remoteAddress, kontext.vertrauteProxies ?? []);
+  const sicher = istHttps(request.headers, vomProxy);
   const kekse = parseCookies(request.headers.cookie);
   const token = kekse[SESSION_COOKIE];
 
@@ -121,7 +125,7 @@ export function authGate(
     }
 
     if (request.method === 'POST') {
-      const herkunft = herkunftVon(request.headers, request.socket.remoteAddress);
+      const herkunft = herkunftVon(request.headers, request.socket.remoteAddress, vomProxy);
       const sperre = throttle.gesperrtFuer(herkunft);
       if (sperre > 0) {
         const minuten = Math.ceil(sperre / 60_000);
