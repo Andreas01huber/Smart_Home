@@ -80,6 +80,16 @@ export function provenance(
   };
 }
 
+/**
+ * Längstes Intervall, das als gemessen integriert wird.
+ *
+ * Gilt für Tagesbilanz und Ladeprotokoll gleichermassen. Ist mehr Zeit seit dem
+ * letzten Messwert vergangen, war dazwischen nachweislich keine Messung — das
+ * ganze Intervall ist dann Lücke, nicht nur der Teil über dieser Grenze.
+ * Sonst gälten nach jedem Ausfall die ersten Sekunden als sicher gemessen.
+ */
+export const MAX_INTEGRATIONSSCHRITT_S = 15;
+
 /** Ist dieser Messpunkt aktuell genug, um als Messung durchzugehen? */
 export function istAktuell(provenance: Provenance): boolean {
   return provenance.quality === 'live';

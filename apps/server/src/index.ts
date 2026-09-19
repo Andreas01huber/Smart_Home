@@ -19,7 +19,7 @@ import { networkInterfaces } from 'node:os';
 import {
   checkEnergyBalance,
   formatAgeDe,
-  aggregateStorage,
+  speicherGesamt,
   ladeleistungAusStromW,
   ladestromAusLeistungA,
   type Ladeanschluss,
@@ -177,23 +177,41 @@ function announcedPlaceholders(
  */
 const hausTeiler = new Hausverbrauch();
 
-/** Aufbereitung für die Oberfläche — hier entstehen keine neuen Zahlen. */
-
-function hausUndAuto(snapshot: EnergySnapshot): HausAnteil {
-  return hausTeiler.teile(
+/**
+ * Die Aufteilung für genau diesen Messzyklus.
+ *
+ * Jeder Aufrufer — Bilanz, Ladeprotokoll, jeder offene Browser — bekommt für
+ * denselben Messzeitpunkt dasselbe Ergebnis; siehe `Hausverbrauch.fuerZyklus`.
+ * Eine nicht erreichbare Wallbox hat keine Leistung, auch wenn ihr letzter Wert
+ * noch im Speicher steht.
+ */
+function hausUndAuto(state: EngineState): HausAnteil {
+  const snapshot = state.resolution.snapshot;
+  const charger = snapshot.evCharger;
+  const autoW = charger === null || charger.state === 'offline' ? null : charger.chargePowerW;
+  return hausTeiler.fuerZyklus(
+    state.polledAt.getTime(),
     snapshot.houseConsumptionW.valueW,
-    snapshot.evCharger?.chargePowerW ?? null,
-    Date.now(),
+    autoW,
   );
 }
 
 function hausOhneAutoMetrik(snapshot: EnergySnapshot, anteil: HausAnteil): unknown {
   const haus = snapshot.houseConsumptionW;
   return {
-    valueW: anteil.wattW,
-    autoAbgezogenW: anteil.autoW,
-    /** false = aus der gemerkten Grundlast geschaetzt, weil die Werte sich widersprachen. */
-    autoBeruecksichtigt: anteil.frisch,
+    valueW: anteil.hausOhneAuto.w,
+    art: anteil.hausOhneAuto.art,
+    autoAbgezogenW: anteil.auto.w,
+    autoArt: anteil.auto.art,
+    // Eine Schätzung trägt ihre Grundlage und ihr Ablaufdatum mit sich.
+    schaetzung:
+      anteil.schaetzung === null
+        ? null
+        : {
+            grundlastW: anteil.schaetzung.grundlastW,
+            grundlastAm: new Date(anteil.schaetzung.grundlastAmMs).toISOString(),
+            gueltigBis: new Date(anteil.schaetzung.gueltigBisMs).toISOString(),
+          },
     source: haus.provenance.connectorId,
     quality: haus.provenance.quality,
     ageMs: Number.isFinite(haus.provenance.ageMs) ? haus.provenance.ageMs : null,
@@ -227,27 +245,29 @@ function hausOhneAutoMetrik(snapshot: EnergySnapshot, anteil: HausAnteil): unkno
  *
  * `null` heisst unbekannt — nicht null Watt.
  */
-function geprueftAutoW(snapshot: EnergySnapshot, anteil: HausAnteil): number | null {
-  // Ohne brauchbare Aufteilung bleibt es beim Wert der Wallbox — lieber der
-  // unsichere Messwert als eine erfundene Null.
-  if (anteil.wattW === null) return snapshot.evCharger?.chargePowerW ?? null;
-  return anteil.autoW;
+function geprueftAutoW(anteil: HausAnteil): number | null {
+  // Bilanz und Protokoll zählen nur Gemessenes. Eine Schätzung aus der
+  // Grundlast ist für die Anzeige gut, als Energiesumme wäre sie eine
+  // Behauptung; sie wird deshalb zur ausgewiesenen Lücke.
+  return anteil.auto.art === 'gemessen' ? anteil.auto.w : null;
 }
 
 function evAusZaehler(snapshot: EnergySnapshot, anteil: HausAnteil): Record<string, unknown> {
   const charger = snapshot.evCharger;
   if (charger === null) return {};
   const gemeldet = charger.chargePowerW;
-  if (anteil.wattW === null) return {};
-  const laedt = anteil.autoW > 200;
+  const auto = anteil.auto.w;
+  const laedt = auto === null ? null : auto > 200;
   return {
-    powerW: anteil.autoW,
-    ...(gemeldet !== null && Math.abs(gemeldet - anteil.autoW) > 200
+    // `null` heisst unbekannt; die Anzeige macht daraus einen Strich.
+    powerW: auto,
+    leistungArt: anteil.auto.art,
+    ...(gemeldet !== null && (auto === null || Math.abs(gemeldet - auto) > 200)
       ? { gemeldeteLeistungW: gemeldet }
       : {}),
-    // "charging" wird zurückgenommen, wenn nichts fliesst. Umgekehrt wird
-    // nichts behauptet: Ob ein Fahrzeug angesteckt ist, weiss nur die Wallbox.
-    ...(charger.state === 'charging' && !laedt ? { state: 'connected' } : {}),
+    // "charging" wird zurückgenommen, wenn nachweislich nichts fliesst. Bei
+    // unbekannter Leistung wird nichts behauptet — auch nicht das Gegenteil.
+    ...(charger.state === 'charging' && laedt === false ? { state: 'connected' } : {}),
   };
 }
 
@@ -259,7 +279,7 @@ function serializeState(
   const { snapshot, unavailable, disagreements, derivedConsumptionNegative } =
     state.resolution;
 
-  const anteil = hausUndAuto(snapshot);
+  const anteil = hausUndAuto(state);
 
   const metric = (value: (typeof snapshot)['solarProductionW']) => ({
     valueW: value.valueW,
@@ -307,23 +327,47 @@ function serializeState(
       ),
     ],
     // Gesamtspeicher, kapazitätsgewichtet (Anforderung 15).
+    // Erwartet sind alle gelieferten, alle als fehlend gemeldeten und alle
+    // angekündigten Speicher. Fehlt einer, gibt es keinen Gesamt-SOC und keine
+    // Gesamtleistung — nur die Werte der erreichbaren, als Teilmenge benannt.
     storageAggregate: (() => {
-      const agg = aggregateStorage(
+      const fehlend = unavailable.filter((u) => u.startsWith('battery:')).length;
+      const angekuendigt = announcedPlaceholders(
+        config,
+        snapshot.batteries.map((battery) => ({ source: battery.provenance.connectorId })),
+      ).length;
+      const gesamt = speicherGesamt(
         snapshot.batteries.map((b) => ({
           usableCapacityWh: b.usableCapacityWh,
           socPercent: b.socPercent,
+          chargeW: b.chargeW,
+          dischargeW: b.dischargeW,
+          erreichbar: b.provenance.quality === 'live' || b.provenance.quality === 'stale',
         })),
-      );
-      const net = snapshot.batteries.reduce(
-        (sum, b) => sum + (b.chargeW ?? 0) - (b.dischargeW ?? 0),
-        0,
+        snapshot.batteries.length + fehlend + angekuendigt,
       );
       return {
-        totalCapacityWh: agg.totalCapacityWh,
-        storedWh: agg.storedWh,
-        socPercent: agg.socPercent,
-        netPowerW: net,
+        erwartet: gesamt.erwartet,
+        verfuegbar: gesamt.verfuegbar,
+        vollstaendig: gesamt.vollstaendig,
+        kapazitaetBekanntWh: gesamt.kapazitaetBekanntWh,
+        energieBekanntWh: gesamt.energieBekanntWh,
+        socPercent: gesamt.socPercent,
+        netPowerW: gesamt.nettoLeistungW,
       };
+    })(),
+    // Dieselbe Regel für PV: Die Summe ist nur bekannt, wenn alle
+    // Wechselrichter liefern. Die Einzelwerte stehen trotzdem in `inverters`.
+    solarVollstaendigkeit: (() => {
+      const quellen = Array.isArray(config.sourceMapping.solarProductionW)
+        ? config.sourceMapping.solarProductionW
+        : [config.sourceMapping.solarProductionW];
+      const liefernd = state.readings.filter(
+        (r) => quellen.includes(r.connectorId)
+          && r.solarProductionW !== null
+          && r.solarProductionW.valueW !== null,
+      ).length;
+      return { erwartet: quellen.length, verfuegbar: liefernd };
     })(),
     // PV je Wechselrichter (live) für den JETZT-Bereich (Anforderung 11).
     inverters: perInverterLive(state, config),
@@ -604,8 +648,8 @@ async function main(): Promise<void> {
   // Ein Abonnement für beide, damit sie garantiert mit derselben geprüften
   // Ladeleistung rechnen — zwei getrennte Aufrufe hatten je ihre eigene.
   engine.subscribe((state) => {
-    const anteil = hausUndAuto(state.resolution.snapshot);
-    const autoW = geprueftAutoW(state.resolution.snapshot, anteil);
+    const anteil = hausUndAuto(state);
+    const autoW = geprueftAutoW(anteil);
     accumulator.integrate(state, autoW);
     evLog.integrate(state, autoW);
   });
@@ -673,6 +717,12 @@ async function main(): Promise<void> {
       );
       return;
     }
+
+    // Rechte, serverseitig: Familienkonten dürfen Dashboard und Ladebedienung
+    // nutzen; Tarife und Konten verwaltet ein Administrator. Im ausdrücklich
+    // konfigurierten offenen Betrieb gibt es keine Konten und damit keine
+    // Unterscheidung.
+    const darfVerwalten = konten === null ? true : ich?.rolle === 'admin';
 
     // Wer bin ich? Die Oberfläche entscheidet damit, ob sie den Abmelden-Knopf
     // und den Zugang zur Verwaltung zeigt.
@@ -882,30 +932,44 @@ async function main(): Promise<void> {
 
     if (url.pathname === '/api/tariff') {
       if (request.method === 'GET') {
-        sendJson(response, 200, accumulator.getTariff());
+        sendJson(response, 200, {
+          ...accumulator.tarife.aktuell(),
+          verlauf: accumulator.tarife.verlauf(),
+          darfAendern: darfVerwalten,
+        });
         return;
       }
       if (request.method === 'PUT') {
-        void readBody(request)
-          .then((body) => {
-            const parsed = JSON.parse(body) as Partial<Tariff>;
-            const current = accumulator.getTariff();
-            const next: Tariff = {
-              importPricePerKWh:
-                typeof parsed.importPricePerKWh === 'number'
-                  ? parsed.importPricePerKWh
-                  : current.importPricePerKWh,
-              exportPricePerKWh:
-                typeof parsed.exportPricePerKWh === 'number'
-                  ? parsed.exportPricePerKWh
-                  : current.exportPricePerKWh,
-            };
-            accumulator.setTariff(next);
-            sendJson(response, 200, accumulator.getTariff());
-          })
-          .catch(() => sendJson(response, 400, { error: 'Ungültiger Tarif' }));
+        // Tarife gelten serverweit und verändern Kostenrechnungen — das ist
+        // Verwaltung, nicht Bedienung. Die Prüfung steht hier und nicht nur in
+        // der Oberfläche, weil ein versteckter Knopf keine Berechtigung ist.
+        if (!darfVerwalten) {
+          sendJson(response, 403, { error: 'Tarife darf nur ein Administrator ändern.' });
+          return;
+        }
+        let roh: unknown;
+        try {
+          roh = JSON.parse(await readBody(request));
+        } catch {
+          sendJson(response, 400, { error: 'Ungültige Anfrage' });
+          return;
+        }
+        try {
+          const neu = accumulator.tarife.setze(roh);
+          sendJson(response, 200, { ...neu, verlauf: accumulator.tarife.verlauf(), darfAendern: true });
+        } catch (error) {
+          if (error instanceof TypeError) {
+            sendJson(response, 400, { error: error.message });
+          } else {
+            // Nicht dauerhaft gespeichert — also auch nicht übernommen.
+            sendJson(response, 500, { error: 'Tarif konnte nicht gespeichert werden. Bisheriger Tarif gilt weiter.' });
+          }
+        }
         return;
       }
+      response.writeHead(405, { allow: 'GET, PUT' });
+      response.end();
+      return;
     }
 
     await serveStatic(url.pathname, response);

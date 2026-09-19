@@ -8,7 +8,7 @@
 
 import { test, describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -115,6 +115,33 @@ function tick(opts: {
   };
 }
 
+/**
+ * Das Protokoll, so wie es der Dienst füttert.
+ *
+ * Die Tests unten denken in Minuten, der echte Dienst misst alle zwei
+ * Sekunden. Zwischen zwei Testschritten fragt diese Hülle deshalb alle zehn
+ * Sekunden mit dem unveränderten letzten Zustand nach — genau das, was die
+ * Engine bis zur nächsten Änderung melden würde. Ohne sie wäre jeder
+ * Minutenschritt länger als der zulässige Integrationsschritt und damit eine
+ * Lücke.
+ */
+class Protokoll extends ChargeSessionLog {
+  private zuletzt: { state: EngineState; ev: number | null | undefined } | null = null;
+
+  override integrate(state: EngineState, evLeistungW?: number | null): void {
+    const z = this.zuletzt;
+    if (z !== null) {
+      for (let t = z.state.polledAt.getTime() + 10_000; t < state.polledAt.getTime(); t += 10_000) {
+        if (z.ev === undefined) super.integrate({ ...z.state, polledAt: new Date(t) });
+        else super.integrate({ ...z.state, polledAt: new Date(t) }, z.ev);
+      }
+    }
+    this.zuletzt = { state, ev: evLeistungW };
+    if (evLeistungW === undefined) super.integrate(state);
+    else super.integrate(state, evLeistungW);
+  }
+}
+
 const t0 = new Date('2026-08-26T18:00:00');
 const at = (minutes: number) => new Date(t0.getTime() + minutes * 60_000);
 
@@ -137,7 +164,7 @@ function steckeAb(
 
 describe('Ladeprotokoll — Session-Erkennung', () => {
   test('erkennt Anstecken, Laden und Abstecken als EINE Session', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     log.integrate(tick({ at: at(0), ev: charger({ connected: false, powerW: 0 }) }));
     log.integrate(tick({ at: at(1), ev: charger({ connected: true, powerW: 0 }) }));
     // 30 Minuten mit 3 kW aus dem Netz
@@ -159,7 +186,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
   });
 
   test('eine Ladepause erzeugt KEINE zweite Session', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     log.integrate(tick({ at: at(0), ev: charger({ connected: true, powerW: 0 }) }));
     for (let m = 1; m <= 10; m++) {
       log.integrate(tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }));
@@ -181,14 +208,14 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
   });
 
   test('kurzes Anstecken ohne Energie wird nicht als Ladevorgang gewertet', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     log.integrate(tick({ at: at(0), ev: charger({ connected: true, powerW: 0 }) }));
     log.integrate(tick({ at: at(1), ev: charger({ connected: false, powerW: 0 }) }));
     assert.equal(log.list().length, 0);
   });
 
   test('teilt die Energie der Session nach Quellen auf', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     log.integrate(tick({ at: at(0), ev: charger({ connected: true, powerW: 0 }) }));
     // 30 min: 2 kW PV + 2 kW Batterie versorgen ein 2-kW-Auto -> je 50 %
     for (let m = 1; m <= 30; m++) {
@@ -213,7 +240,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
   });
 
   test('schliesst die Session sauber ab, wenn das Ladegerät ausfällt', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     log.integrate(tick({ at: at(0), ev: charger({ connected: true, powerW: 0 }) }));
     for (let m = 1; m <= 20; m++) {
       log.integrate(tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }));
@@ -227,7 +254,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
 
   test('Sessions überleben einen Neustart des Servers', () => {
     const dir = tempDir();
-    const first = new ChargeSessionLog(dir);
+    const first = new Protokoll(dir);
     first.integrate(tick({ at: at(0), ev: charger({ connected: true, powerW: 0 }) }));
     for (let m = 1; m <= 20; m++) {
       first.integrate(tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }));
@@ -236,7 +263,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
     const before = first.list()[0]!;
 
     // Neustart: neue Instanz auf demselben Verzeichnis
-    const second = new ChargeSessionLog(dir);
+    const second = new Protokoll(dir);
     const after = second.list()[0];
     assert.ok(after, 'Session nach Neustart vorhanden');
     assert.equal(after!.id, before.id);
@@ -244,7 +271,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
   });
 
   test('Statistik zählt nur Sessions des gewählten Zeitraums', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     log.integrate(tick({ at: at(0), ev: charger({ connected: true, powerW: 0 }) }));
     for (let m = 1; m <= 20; m++) {
       log.integrate(tick({ at: at(m), ev: charger({ connected: true, powerW: 3000 }), grid: 3000 }));
@@ -263,7 +290,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
   });
 
   test('ein nächtlicher Ladevorgang zählt zum Tag der Ortszeit', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     // 00:30 Uhr nach der Uhr im Haus. Gespeichert wird der Zeitpunkt als ISO
     // in UTC — dort liegt er in unserer Zeitzone noch auf dem Vortag. Genau
     // in diesen Stunden wird ein Auto üblicherweise geladen, deshalb darf die
@@ -292,7 +319,7 @@ describe('Ladeprotokoll — Session-Erkennung', () => {
   });
 
   test('ohne Ladegerät passiert nichts (kein Absturz, keine Geister-Session)', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     for (let m = 0; m <= 5; m++) log.integrate(tick({ at: at(m), ev: null }));
     assert.equal(log.list().length, 0);
     assert.equal(log.current(), null);
@@ -312,7 +339,7 @@ describe('Eine Ladung ist ein Ladevorgang', () => {
   }
 
   it('Szenario I — Ampere wechselt und pausiert: trotzdem EINE Session', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     const schritte: { minute: number; ev: EvChargerSnapshot }[] = [];
     // 14:00-14:20 5 kW, 14:20-14:35 3 kW, 14:35-14:40 Pause, 14:40-15:10 6 kW,
     // 15:10-15:30 2 kW - genau der Ablauf aus der Anforderung.
@@ -344,7 +371,7 @@ describe('Eine Ladung ist ein Ladevorgang', () => {
   });
 
   it('übersteht einen Aussetzer der Tuya-Cloud ohne neue Session', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     const laedt = charger({ connected: true, powerW: 5000 });
     const weg = charger({ connected: null, powerW: null, state: 'offline' });
     const schritte: { minute: number; ev: EvChargerSnapshot }[] = [];
@@ -359,7 +386,7 @@ describe('Eine Ladung ist ein Ladevorgang', () => {
   });
 
   it('Szenario J — Abstecken schliesst die Session ab', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     const schritte: { minute: number; ev: EvChargerSnapshot }[] = [];
     for (let m = 0; m <= 30; m++) {
       schritte.push({ minute: m, ev: charger({ connected: true, powerW: 6000 }) });
@@ -428,7 +455,7 @@ describe('Ladeprotokoll — geprüfte Ladeleistung', () => {
     // Hauszähler für das ganze Haus 1203 W zeigte. Die Anzeige rechnete das
     // längst heraus, das Protokoll integrierte weiter — für denselben Tag
     // standen so zwei verschiedene Kilowattstunden in der App.
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     const ev = charger({ connected: true, powerW: 2000 });
     for (let m = 0; m <= 10; m++) log.integrate(tick({ at: at(m), ev }), 0);
 
@@ -439,7 +466,7 @@ describe('Ladeprotokoll — geprüfte Ladeleistung', () => {
   });
 
   it('weist unbekannte Leistung als Lücke aus, nicht als null Watt', () => {
-    const log = new ChargeSessionLog(tempDir());
+    const log = new Protokoll(tempDir());
     const ev = charger({ connected: true, powerW: null, state: 'connected' });
     for (let m = 0; m <= 5; m++) log.integrate(tick({ at: at(m), ev }));
 
@@ -448,5 +475,107 @@ describe('Ladeprotokoll — geprüfte Ladeleistung', () => {
     assert.equal(laufend.hasGaps, true, 'unbekannte Leistung wurde nicht als Lücke vermerkt');
     assert.equal(laufend.energyWh, 0);
     assert.ok(laufend.connectedSeconds > 0, 'die Steckzeit zählt trotzdem');
+  });
+});
+
+describe('Ladeprotokoll — Tage, Monate und Steckereignisse', () => {
+  /** Lädt von `von` bis kurz vor `bis` alle 10 s mit `watt` — ab `bis` gilt der nächste Zustand. */
+  function lade(log: ChargeSessionLog, von: Date, bis: Date, watt: number): void {
+    for (let t = von.getTime(); t < bis.getTime(); t += 10_000) {
+      log.integrate(tick({ at: new Date(t), ev: charger({ connected: true, powerW: watt }), grid: watt }));
+    }
+  }
+  function steckAbAb(log: ChargeSessionLog, ab: Date, sekunden: number): void {
+    for (let t = ab.getTime(); t <= ab.getTime() + sekunden * 1000; t += 10_000) {
+      log.integrate(tick({ at: new Date(t), ev: charger({ connected: false, powerW: 0 }) }));
+    }
+  }
+
+  test('23:30 bis 00:30 mit 6 kW: je 3 kWh pro Tag, eine Session mit 6 kWh', () => {
+    const log = new ChargeSessionLog(tempDir());
+    lade(log, new Date(2026, 7, 26, 23, 30), new Date(2026, 7, 27, 0, 30), 6000);
+    steckAbAb(log, new Date(2026, 7, 27, 0, 30), 90);
+
+    assert.equal(log.list().length, 1);
+    const s = log.list()[0]!;
+    assert.ok(Math.abs(s.energyWh - 6000) < 1, `Session ${s.energyWh} Wh`);
+    const a = log.stats('day', '2026-08-26') as { energyWh: number; sessionCount: number };
+    const b = log.stats('day', '2026-08-27') as { energyWh: number; sessionCount: number };
+    assert.ok(Math.abs(a.energyWh - 3000) < 1, `26.8.: ${a.energyWh}`);
+    assert.ok(Math.abs(b.energyWh - 3000) < 1, `27.8.: ${b.energyWh}`);
+    assert.equal(a.sessionCount, 1);
+    assert.equal(b.sessionCount, 1);
+  });
+
+  test('über die Monatsgrenze landet die Energie im richtigen Monat', () => {
+    const log = new ChargeSessionLog(tempDir());
+    lade(log, new Date(2026, 7, 31, 23, 0), new Date(2026, 8, 1, 1, 0), 3000);
+    steckAbAb(log, new Date(2026, 8, 1, 1, 0), 90);
+    const aug = log.stats('month', '2026-08-15') as { energyWh: number };
+    const sep = log.stats('month', '2026-09-15') as { energyWh: number };
+    assert.ok(Math.abs(aug.energyWh - 3000) < 1, `August ${aug.energyWh}`);
+    assert.ok(Math.abs(sep.energyWh - 3000) < 1, `September ${sep.energyWh}`);
+  });
+
+  test('ein kurzes, eindeutiges Abstecken ergibt zwei Ladevorgänge', () => {
+    // Früher verschmolzen die, weil jede Abwesenheit zehn Minuten Frist hatte.
+    const log = new ChargeSessionLog(tempDir());
+    lade(log, new Date(2026, 7, 26, 18, 0), new Date(2026, 7, 26, 18, 20), 3000);
+    steckAbAb(log, new Date(2026, 7, 26, 18, 20, 10), 5 * 60);
+    lade(log, new Date(2026, 7, 26, 18, 26), new Date(2026, 7, 26, 18, 46), 3000);
+    steckAbAb(log, new Date(2026, 7, 26, 18, 46, 10), 90);
+    assert.equal(log.list().length, 2);
+  });
+
+  test('ein Cloud-Ausfall ist kein Steckereignis', () => {
+    const log = new ChargeSessionLog(tempDir());
+    lade(log, new Date(2026, 7, 26, 18, 0), new Date(2026, 7, 26, 18, 20), 3000);
+    for (let t = new Date(2026, 7, 26, 18, 20, 10).getTime(); t < new Date(2026, 7, 26, 18, 25).getTime(); t += 10_000) {
+      log.integrate(tick({ at: new Date(t), ev: charger({ connected: null, powerW: null, state: 'offline' }) }));
+    }
+    lade(log, new Date(2026, 7, 26, 18, 25), new Date(2026, 7, 26, 18, 45), 3000);
+    steckAbAb(log, new Date(2026, 7, 26, 18, 45, 10), 90);
+    assert.equal(log.list().length, 1);
+    assert.equal(log.list()[0]!.hasGaps, true, 'die Ausfallzeit wurde nicht als Lücke vermerkt');
+  });
+
+  test('ein Messaussetzer von Minuten wird Lücke, nicht Energie', () => {
+    const log = new ChargeSessionLog(tempDir());
+    lade(log, new Date(2026, 7, 26, 18, 0), new Date(2026, 7, 26, 18, 10), 3000);
+    // Zehn Minuten keine Messung, dann weiter.
+    lade(log, new Date(2026, 7, 26, 18, 20), new Date(2026, 7, 26, 18, 30), 3000);
+    const s = log.current()!;
+    // Zweimal 590 s gemessenes Laden mit 3 kW; die zehn Minuten dazwischen nicht.
+    assert.ok(Math.abs(s.energyWh - (2 * 590 * 3000) / 3600) < 1, `${s.energyWh} Wh — die Lücke wurde mitgezählt`);
+    assert.equal(s.hasGaps, true);
+  });
+
+  test('Altbestand ohne Tagesaufteilung zählt als Näherung zum Starttag', () => {
+    const dir = tempDir();
+    const alt: ChargeSession = {
+      id: 'alt', startedAt: new Date(2026, 7, 20, 23, 0).toISOString(),
+      endedAt: new Date(2026, 7, 21, 2, 0).toISOString(),
+      chargingSeconds: 10800, connectedSeconds: 10800, energyWh: 9000, maxPowerW: 3000,
+      avgPowerW: 3000, socStartPercent: null, socEndPercent: null,
+      split: { pvWh: 0, gridWh: 9000, batteryWh: {}, unknownWh: 0 },
+      endReason: 'unplugged', faultText: null, hasGaps: false,
+    };
+    writeFileSync(join(dir, 'ev-sessions.json'), JSON.stringify({ version: 2, sessions: [alt], open: null }));
+    const log = new ChargeSessionLog(dir);
+    const tag = log.stats('day', '2026-08-20') as { energyWh: number; naeherungWh: number };
+    assert.equal(tag.energyWh, 9000);
+    assert.equal(tag.naeherungWh, 9000);
+  });
+
+  test('ungültige Einträge werden verworfen und die Datei aufbewahrt', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'ev-sessions.json'), JSON.stringify({
+      version: 3,
+      sessions: [{ id: 'x', startedAt: 'gestern', energyWh: -5 }],
+      open: null,
+    }));
+    const log = new ChargeSessionLog(dir);
+    assert.equal(log.list().length, 0);
+    assert.ok(readdirSync(dir).some((f) => f.includes('beschaedigt')), 'Originaldatei nicht aufbewahrt');
   });
 });

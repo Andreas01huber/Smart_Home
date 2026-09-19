@@ -43,6 +43,7 @@ import {
   emptySplit,
   gemesseneLadeleistungW,
   LADEN_AB_W,
+  MAX_INTEGRATIONSSCHRITT_S,
   splitTotalWh,
   type ChargeSession,
   type ChargeSessionEnd,
@@ -53,33 +54,37 @@ import type { EngineState } from './engine.ts';
 import { localDate } from './history.ts';
 import { bewahreBeschaedigt, writeJsonAtomic } from './persist.ts';
 
-/**
- * Ab dieser Leistung gilt ein Ladevorgang als aktiv.
- *
- * Kommt aus `@energy/core` und nicht als eigene Zahl hierher: Tagesbilanz und
- * Ladeprotokoll müssen dieselbe Schwelle benutzen, sonst weisen sie für
- * denselben Tag verschiedene Kilowattstunden aus.
- */
-const CHARGING_THRESHOLD_W = LADEN_AB_W;
-/** Längster Zeitschritt, der integriert wird — schützt vor Lücken/Neustarts. */
-const MAX_DT_SECONDS = 60;
 /** Sessions unterhalb dieser Energie sind Fehlanschlüsse, kein Ladevorgang. */
 const MIN_SESSION_WH = 10;
 /**
- * So lange darf das Fahrzeug „weg“ sein, ohne dass die Session endet.
+ * So lange darf die Verbindung zur Wallbox abreissen, ohne dass die Session endet.
  *
- * Deckt Cloud-Aussetzer, kurze Control-Pilot-Wackler, Regelpausen und einen
- * Neustart des Servers ab. Zehn Minuten sind lang genug für all das und kurz
- * genug, dass zwei wirklich getrennte Ladevorgänge nicht verschmelzen — dazu
- * müsste man das Auto binnen zehn Minuten ab- und wieder anstecken.
+ * Gilt nur für UNKLARE Zustände: Wallbox offline, Control Pilot ohne Aussage,
+ * Störung. Das sind Datenlücken, keine Steckereignisse — ein Cloud-Aussetzer
+ * oder ein Neustart des Servers darf einen Ladevorgang nicht zerreissen.
  */
 const ABKLINGZEIT_MS = 10 * 60_000;
+/**
+ * So lange muss ein eindeutig gemeldetes Abstecken anhalten.
+ *
+ * Deutlich kürzer als die Abklingzeit: Wer absteckt und nach fünf Minuten
+ * wieder ansteckt, hat zwei Ladevorgänge — früher verschmolzen die, weil jede
+ * Abwesenheit gleich behandelt wurde. Eine Minute filtert ein kurzes Wackeln
+ * des Control Pilot heraus.
+ */
+const ABGESTECKT_BESTAETIGT_MS = 60_000;
 /** Ab dieser Leistungsänderung beginnt ein neuer Abschnitt im Verlauf. */
 const ABSCHNITT_SCHWELLE_W = 300;
 /** Obergrenze für den Verlauf je Session — schützt die Datei vor Wildwuchs. */
 const VERLAUF_MAX = 400;
-/** Aktuelle Fassung des Dateiformats. */
-const FORMAT_VERSION = 2;
+/**
+ * Fassung des Dateiformats.
+ *   2  Sessions zusammengeführt (Abklingzeit)
+ *   3  Energie je Tag (`jeTag`)
+ */
+const FORMAT_VERSION = 3;
+
+type TagesAnteil = { energyWh: number; chargingSeconds: number; split: EvEnergySplit };
 
 interface OpenSession {
   id: string;
@@ -92,18 +97,42 @@ interface OpenSession {
   hasGaps: boolean;
   faultText: string | null;
   lastSeenAt: number;
-  /** Zeitpunkt, seit dem das Fahrzeug nicht mehr gemeldet wird. */
+  /** Seit wann der Zustand unklar ist (offline, Control Pilot ohne Aussage). */
   getrenntSeit: number | null;
+  /** Seit wann das Fahrzeug eindeutig als abgesteckt gemeldet wird. */
+  abgestecktSeit: number | null;
   verlauf: { ab: string; leistungW: number; stromA: number | null }[];
   /** Aus wie vielen zuvor getrennten Vorgängen zusammengeführt. */
   teile: number;
+  jeTag: Record<string, TagesAnteil>;
+}
+
+/** Was an einem Messzeitpunkt über das Laden bekannt ist. Gilt bis zum nächsten. */
+interface Messpunkt {
+  readonly tMs: number;
+  /** `nein` nur bei eindeutiger Meldung einer erreichbaren Wallbox. */
+  readonly angesteckt: 'ja' | 'nein' | 'unklar';
+  readonly stoerung: boolean;
+  readonly leistungW: number | null;
+  readonly stromA: number | null;
+  readonly faultText: string | null;
+  readonly pvW: number | null;
+  readonly bezugW: number | null;
+  readonly einspeisungW: number | null;
+  readonly speicherEntladenW: Record<string, number>;
+  readonly speicherLadenW: number;
+}
+
+function naechsterTagesbeginn(ms: number): number {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
 }
 
 export class ChargeSessionLog {
   private readonly path: string;
   private sessions: ChargeSession[] = [];
   private open: OpenSession | null = null;
-  private lastAt: number | null = null;
+  private letzter: Messpunkt | null = null;
   private dirty = false;
 
   constructor(dataDir: string) {
@@ -116,94 +145,134 @@ export class ChargeSessionLog {
   /**
    * Wird bei jedem Messzyklus aufgerufen.
    *
-   * @param evLeistungW Am Hauszähler geprüfte Ladeleistung. Fehlt sie, gilt der
-   *   Wert der Wallbox.
+   * @param evLeistungW Am Hauszähler geprüfte, gemessene Ladeleistung; `null`
+   *   = unbekannt. Fehlt der Parameter, gilt der Wert der Wallbox.
    */
   integrate(state: EngineState, evLeistungW?: number | null): void {
-    const snap = state.resolution.snapshot;
-    const ev = snap.evCharger;
-    const now = state.polledAt.getTime();
-    const previous = this.lastAt;
-    this.lastAt = now;
+    const p = this.messpunkt(state, evLeistungW);
+    const vorher = this.letzter;
+    this.letzter = p;
 
-    // Ladegerät nicht erreichbar. Früher wurde hier sofort geschlossen — das
-    // war der Grund für die vielen zerstückelten Ladevorgänge: Jeder Aussetzer
-    // der Tuya-Cloud beendete den Vorgang. Jetzt läuft die Abklingzeit.
-    if (ev === null || ev.state === 'offline') {
-      this.abwesend(now, 'interrupted');
+    // Das Intervall bis jetzt gehört dem VORHERIGEN Messpunkt — dieselbe
+    // Halteregel wie in der Tagesbilanz.
+    if (vorher !== null && this.open !== null && p.tMs > vorher.tMs) {
+      this.verbuche(this.open, vorher, p.tMs);
+    }
+    this.zustand(p, state.polledAt);
+  }
+
+  /** Energie, Zeit und Herkunft für [vorher.tMs, bisMs] buchen. */
+  private verbuche(session: OpenSession, vorher: Messpunkt, bisMs: number): void {
+    this.dirty = true;
+    const dauerS = (bisMs - vorher.tMs) / 1000;
+    // Ein zu langes Intervall ist eine Lücke. Auch die Steckzeit ist dann
+    // unbekannt; sie wird nicht geschätzt.
+    if (dauerS > MAX_INTEGRATIONSSCHRITT_S || vorher.angesteckt !== 'ja') {
+      session.hasGaps = true;
       return;
     }
-
-    const connected = ev.vehicleConnected === true;
-
-    if (!connected) {
-      // `null` heisst "Control Pilot unklar", nicht "abgesteckt". Auch das
-      // läuft über die Abklingzeit, statt sofort zu schliessen.
-      this.abwesend(now, ev.state === 'fault' ? 'fault' : 'unplugged');
-      return;
-    }
-
-    // Fahrzeug ist (wieder) da.
-    if (this.open === null) this.begin(state.polledAt);
-    else this.open.getrenntSeit = null;
-
-    const session = this.open;
-    if (session === null || previous === null) return;
-
-    const dtSeconds = Math.min(MAX_DT_SECONDS, (now - previous) / 1000);
-    if (dtSeconds <= 0) return;
-    const hours = dtSeconds / 3600;
-
-    session.connectedSeconds += dtSeconds;
-    session.lastSeenAt = now;
-    if (ev.faultText !== null) session.faultText = ev.faultText;
-
-    const powerW = gemesseneLadeleistungW(
-      evLeistungW === undefined ? ev.chargePowerW : evLeistungW,
-    );
-    if (powerW === null) {
-      // Ladegerät liefert die Leistung gerade nicht — Lücke offen ausweisen.
+    session.connectedSeconds += dauerS;
+    session.lastSeenAt = bisMs;
+    if (vorher.leistungW === null) {
       // Unbekannt ist ausdrücklich nicht dasselbe wie gemessene null Watt.
       session.hasGaps = true;
+      return;
+    }
+    if (vorher.leistungW <= LADEN_AB_W) return;
+
+    // An lokaler Mitternacht teilen: Die Energie gehört dem Tag, an dem sie floss.
+    let start = vorher.tMs;
+    while (start < bisMs) {
+      const ende = Math.min(bisMs, naechsterTagesbeginn(start));
+      const sekunden = (ende - start) / 1000;
+      const h = sekunden / 3600;
+      const stueck = attributeEvEnergy(
+        {
+          evW: vorher.leistungW,
+          pvW: vorher.pvW,
+          gridImportW: vorher.bezugW,
+          gridExportW: vorher.einspeisungW,
+          batteryDischargeW: vorher.speicherEntladenW,
+          batteryChargeW: vorher.speicherLadenW,
+        },
+        h,
+      );
+      const energie = vorher.leistungW * h;
+      session.chargingSeconds += sekunden;
+      session.energyWh += energie;
+      session.split = addSplit(session.split, stueck);
+      if (stueck.unknownWh > 0) session.hasGaps = true;
+      const tag = localDate(new Date(start));
+      const bisher = session.jeTag[tag] ?? { energyWh: 0, chargingSeconds: 0, split: emptySplit() };
+      session.jeTag[tag] = {
+        energyWh: bisher.energyWh + energie,
+        chargingSeconds: bisher.chargingSeconds + sekunden,
+        split: addSplit(bisher.split, stueck),
+      };
+      start = ende;
+    }
+    if (vorher.leistungW > session.maxPowerW) session.maxPowerW = vorher.leistungW;
+  }
+
+  /** Sessionbeginn und -ende aus dem neuen Messpunkt. */
+  private zustand(p: Messpunkt, at: Date): void {
+    if (p.angesteckt === 'ja') {
+      if (this.open === null) this.begin(at);
+      const s = this.open;
+      if (s === null) return;
+      s.getrenntSeit = null;
+      s.abgestecktSeit = null;
+      s.lastSeenAt = p.tMs;
+      if (p.faultText !== null) s.faultText = p.faultText;
+      if (p.leistungW !== null) this.merkeAbschnitt(s, p.leistungW, p.stromA, at);
       this.dirty = true;
       return;
     }
-
-    // Verlauf mitschreiben: Stufen, nicht jeder Messwert. Ein neuer Abschnitt
-    // beginnt, wenn sich die Leistung deutlich ändert oder der eingestellte
-    // Strom wechselt — also genau bei den Ereignissen, die früher fälschlich
-    // wie ein neuer Ladevorgang aussahen.
-    this.merkeAbschnitt(session, powerW, ev.maxCurrentA, state.polledAt);
-
-    if (powerW > CHARGING_THRESHOLD_W) {
-      session.chargingSeconds += dtSeconds;
-      session.energyWh += powerW * hours;
-      if (powerW > session.maxPowerW) session.maxPowerW = powerW;
-
-      // Herkunft dieses Intervalls bestimmen — nur aus echten Messwerten.
-      const dischargeW: Record<string, number> = {};
-      let chargeW = 0;
-      for (const battery of snap.batteries) {
-        if (battery.dischargeW !== null && battery.dischargeW > 0) {
-          dischargeW[battery.deviceId] = battery.dischargeW;
-        }
-        if (battery.chargeW !== null && battery.chargeW > 0) chargeW += battery.chargeW;
-      }
-      const piece = attributeEvEnergy(
-        {
-          evW: powerW,
-          pvW: snap.solarProductionW.valueW,
-          gridImportW: snap.gridImportW.valueW,
-          gridExportW: snap.gridExportW.valueW,
-          batteryDischargeW: dischargeW,
-          batteryChargeW: chargeW,
-        },
-        hours,
-      );
-      session.split = addSplit(session.split, piece);
-      if (piece.unknownWh > 0) session.hasGaps = true;
-    }
+    const s = this.open;
+    if (s === null) return;
     this.dirty = true;
+    if (p.angesteckt === 'nein') {
+      // Eindeutig abgesteckt. Eine vorherige Unklarheit spielt dafür keine Rolle.
+      s.getrenntSeit = null;
+      s.abgestecktSeit ??= p.tMs;
+      if (p.tMs - s.abgestecktSeit >= ABGESTECKT_BESTAETIGT_MS) this.close('unplugged');
+      return;
+    }
+    // Unklar: Datenlücke, kein Steckereignis. Ein bereits laufendes
+    // "abgesteckt" wird davon nicht bestätigt, aber auch nicht aufgehoben.
+    s.getrenntSeit ??= p.tMs;
+    if (p.tMs - s.getrenntSeit >= ABKLINGZEIT_MS) this.close(p.stoerung ? 'fault' : 'interrupted');
+  }
+
+  private messpunkt(state: EngineState, evLeistungW: number | null | undefined): Messpunkt {
+    const snap = state.resolution.snapshot;
+    const ev = snap.evCharger;
+    const erreichbar = ev !== null && ev.state !== 'offline';
+    const angesteckt: Messpunkt['angesteckt'] =
+      !erreichbar || ev === null || ev.state === 'fault' || ev.vehicleConnected === null
+        ? 'unklar'
+        : ev.vehicleConnected ? 'ja' : 'nein';
+    const dischargeW: Record<string, number> = {};
+    let chargeW = 0;
+    for (const battery of snap.batteries) {
+      if (battery.dischargeW !== null && battery.dischargeW > 0) dischargeW[battery.deviceId] = battery.dischargeW;
+      if (battery.chargeW !== null && battery.chargeW > 0) chargeW += battery.chargeW;
+    }
+    return {
+      tMs: state.polledAt.getTime(),
+      angesteckt,
+      stoerung: ev?.state === 'fault',
+      leistungW: erreichbar
+        ? gemesseneLadeleistungW(evLeistungW === undefined ? ev?.chargePowerW : evLeistungW)
+        : null,
+      stromA: ev?.maxCurrentA ?? null,
+      faultText: ev?.faultText ?? null,
+      pvW: snap.solarProductionW.valueW,
+      bezugW: snap.gridImportW.valueW,
+      einspeisungW: snap.gridExportW.valueW,
+      speicherEntladenW: dischargeW,
+      speicherLadenW: chargeW,
+    };
   }
 
   /** Abgeschlossene Sessions, neueste zuerst. */
@@ -222,38 +291,51 @@ export class ChargeSessionLog {
   }
 
   /**
-   * Aggregat über einen Zeitraum. Bezugspunkt ist der Beginn des Ladevorgangs.
-   * `range`: 'day' | 'week' | 'month' | 'year' | 'total'.
+   * Aggregat über einen Zeitraum. `range`: 'day' | 'week' | 'month' | 'year' | 'total'.
+   *
+   * Maßgeblich ist, WANN die Energie floss — nicht, wann die Session begann.
+   * Laden von 23:30 bis 00:30 zählt je zur Hälfte auf beide Tage und bleibt
+   * trotzdem ein Ladevorgang. Ältere Sessions ohne Tagesaufteilung werden ihrem
+   * Starttag zugerechnet und als Näherung ausgewiesen (`naeherungWh`).
    */
   stats(range: string, dateStr: string): unknown {
     const all = [...this.sessions, ...(this.open ? [this.toSession(this.open, null)] : [])];
-    const inRange = all.filter((s) => matchesRange(s.startedAt, range, dateStr));
 
     let split = emptySplit();
     let energyWh = 0;
     let chargingSeconds = 0;
-    for (const s of inRange) {
-      split = addSplit(split, s.split);
-      energyWh += s.energyWh;
-      chargingSeconds += s.chargingSeconds;
-    }
-
-    // Verlauf für die Grafik: je Tag (bzw. je Monat im Jahres-/Gesamtmodus).
+    let naeherungWh = 0;
+    let sessionCount = 0;
     const buckets = new Map<string, number>();
-    for (const s of inRange) {
-      const day = localDayOf(s.startedAt);
-      const key = range === 'year' || range === 'total' ? day.slice(0, 7) : day;
-      buckets.set(key, (buckets.get(key) ?? 0) + s.energyWh);
+
+    for (const s of all) {
+      const anteile: [string, { energyWh: number; chargingSeconds: number; split?: EvEnergySplit }][] =
+        s.jeTag !== undefined
+          ? Object.entries(s.jeTag)
+          : [[localDayOf(s.startedAt), { energyWh: s.energyWh, chargingSeconds: s.chargingSeconds, split: s.split }]];
+      let beteiligt = false;
+      for (const [tag, anteil] of anteile) {
+        if (!matchesRange(tag, range, dateStr)) continue;
+        beteiligt = true;
+        energyWh += anteil.energyWh;
+        chargingSeconds += anteil.chargingSeconds;
+        if (anteil.split) split = addSplit(split, anteil.split);
+        if (s.jeTag === undefined) naeherungWh += anteil.energyWh;
+        const key = range === 'year' || range === 'total' ? tag.slice(0, 7) : tag;
+        buckets.set(key, (buckets.get(key) ?? 0) + anteil.energyWh);
+      }
+      if (beteiligt) sessionCount += 1;
     }
 
     return {
       range,
       date: dateStr,
-      sessionCount: inRange.length,
+      sessionCount,
       energyWh,
       chargingSeconds,
       split,
       attributedWh: splitTotalWh(split) - split.unknownWh,
+      naeherungWh,
       buckets: [...buckets.entries()]
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([key, wh]) => ({ key, energyWh: wh })),
@@ -261,25 +343,6 @@ export class ChargeSessionLog {
   }
 
   // ── intern ────────────────────────────────────────────────────────────
-
-  /**
-   * Das Fahrzeug meldet sich gerade nicht.
-   *
-   * Schliesst die Session NICHT sofort, sondern merkt sich den Zeitpunkt und
-   * wartet die Abklingzeit ab. Kommt das Fahrzeug vorher zurück, läuft dieselbe
-   * Session weiter — das ist der ganze Unterschied zwischen einem Ladevorgang
-   * und fünfzehn Einträgen in der Historie.
-   */
-  private abwesend(now: number, grund: ChargeSessionEnd): void {
-    const session = this.open;
-    if (session === null) return;
-    if (session.getrenntSeit === null) {
-      session.getrenntSeit = now;
-      this.dirty = true;
-      return;
-    }
-    if (now - session.getrenntSeit >= ABKLINGZEIT_MS) this.close(grund);
-  }
 
   /** Hält Leistungsstufen fest, statt jeden Messwert zu speichern. */
   private merkeAbschnitt(
@@ -294,11 +357,7 @@ export class ChargeSessionLog {
       Math.abs(powerW - letzter.leistungW) >= ABSCHNITT_SCHWELLE_W ||
       (stromA !== null && stromA !== letzter.stromA);
     if (!stufeNeu) return;
-    session.verlauf.push({
-      ab: at.toISOString(),
-      leistungW: Math.round(powerW),
-      stromA,
-    });
+    session.verlauf.push({ ab: at.toISOString(), leistungW: Math.round(powerW), stromA });
     // Ältestes verwerfen statt unbegrenzt wachsen. Der Verlauf ist Beiwerk;
     // die Kennzahlen der Session bleiben davon unberührt.
     if (session.verlauf.length > VERLAUF_MAX) session.verlauf.shift();
@@ -317,8 +376,10 @@ export class ChargeSessionLog {
       faultText: null,
       lastSeenAt: at.getTime(),
       getrenntSeit: null,
+      abgestecktSeit: null,
       verlauf: [],
       teile: 1,
+      jeTag: {},
     };
     this.dirty = true;
   }
@@ -357,60 +418,75 @@ export class ChargeSessionLog {
       hasGaps: open.hasGaps,
       verlauf: open.verlauf,
       teile: open.teile,
+      jeTag: open.jeTag,
     };
   }
 
   private load(): void {
     if (!existsSync(this.path)) return;
-    let parsed: any;
+    let parsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(readFileSync(this.path, 'utf8'));
+      parsed = JSON.parse(readFileSync(this.path, 'utf8')) as Record<string, unknown>;
     } catch {
       // Ein unlesbares Ladeprotokoll wird beiseitegelegt statt überschrieben —
       // sonst wäre die gesamte Ladehistorie mit dem nächsten Speichern weg.
       bewahreBeschaedigt(this.path);
       return;
     }
-    try {
-      if (Array.isArray(parsed?.sessions)) this.sessions = parsed.sessions as ChargeSession[];
-
-      // Eine beim Herunterfahren offene Session wird fortgesetzt, sofern sie
-      // frisch genug ist. Vorher wurde sie hier abgeschlossen — mit der Folge,
-      // dass jeder Deploy mitten im Laden den Vorgang in zwei zerschnitt.
-      if (parsed?.open && typeof parsed.open === 'object') {
-        const open = parsed.open as Partial<OpenSession> & { lastSeenAt?: number };
-        const alterMs = Date.now() - (open.lastSeenAt ?? 0);
-        if (alterMs < ABKLINGZEIT_MS) {
-          this.open = {
-            ...(open as OpenSession),
-            getrenntSeit: open.lastSeenAt ?? Date.now(),
-            verlauf: Array.isArray(open.verlauf) ? open.verlauf : [],
-            teile: typeof open.teile === 'number' ? open.teile : 1,
-          };
-        } else if ((open.energyWh ?? 0) >= MIN_SESSION_WH) {
-          this.sessions.push(this.toSession(open as OpenSession, 'interrupted'));
-        }
-      }
-
-      this.sessions.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-
-      // Migration auf Fassung 2: Was früher als eigener Ladevorgang gezählt
-      // wurde, aber nur ein Aussetzer war, wird jetzt zusammengeführt.
-      if (parsed?.version !== FORMAT_VERSION) {
-        const vorher = this.sessions.length;
-        this.sessions = fuehreZusammen(this.sessions);
-        const zusammengefuehrt = vorher - this.sessions.length;
-        if (zusammengefuehrt > 0) {
-          console.log(
-            `Ladeprotokoll: ${vorher} Einträge zu ${this.sessions.length} echten `
-              + `Ladevorgängen zusammengefasst (${zusammengefuehrt} Fragmente).`,
-          );
-        }
-        this.persist();
-      }
-    } catch (error) {
-      console.warn('Ladeprotokoll konnte nicht geladen werden:', error);
+    if (typeof parsed !== 'object' || parsed === null || !Array.isArray(parsed['sessions'])) {
+      console.warn(`${this.path}: unerwarteter Inhalt, Datei wird aufbewahrt.`);
+      bewahreBeschaedigt(this.path);
+      return;
     }
+
+    let verworfen = 0;
+    for (const roh of parsed['sessions'] as unknown[]) {
+      if (istSession(roh)) this.sessions.push(roh);
+      else verworfen += 1;
+    }
+
+    // Eine beim Herunterfahren offene Session wird fortgesetzt, sofern sie
+    // frisch genug ist — sonst zerschnitte jeder Deploy den Ladevorgang.
+    const offen = parsed['open'] as Partial<OpenSession> | null | undefined;
+    if (offen && typeof offen === 'object' && typeof offen.startedAt === 'string'
+      && nichtnegativ(offen.energyWh) && nichtnegativ(offen.lastSeenAt)) {
+      const alterMs = Date.now() - (offen.lastSeenAt ?? 0);
+      const wieder: OpenSession = {
+        ...(offen as OpenSession),
+        getrenntSeit: offen.lastSeenAt ?? Date.now(),
+        abgestecktSeit: null,
+        verlauf: Array.isArray(offen.verlauf) ? offen.verlauf : [],
+        teile: typeof offen.teile === 'number' ? offen.teile : 1,
+        jeTag: typeof offen.jeTag === 'object' && offen.jeTag !== null ? offen.jeTag : {},
+        // Die Zeit, in der der Server nicht lief, ist nicht gemessen.
+        hasGaps: true,
+      };
+      if (alterMs < ABKLINGZEIT_MS) this.open = wieder;
+      else if ((offen.energyWh ?? 0) >= MIN_SESSION_WH) this.sessions.push(this.toSession(wieder, 'interrupted'));
+    }
+
+    this.sessions.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+
+    const version = typeof parsed['version'] === 'number' ? parsed['version'] : 1;
+    // Migration auf Fassung 2: Was früher als eigener Ladevorgang gezählt
+    // wurde, aber nur ein Aussetzer war, wird zusammengeführt. Nur für Altdaten —
+    // neuere Sessions sind bereits richtig getrennt.
+    if (version < 2) {
+      const vorher = this.sessions.length;
+      this.sessions = fuehreZusammen(this.sessions);
+      const zusammengefuehrt = vorher - this.sessions.length;
+      if (zusammengefuehrt > 0) {
+        console.log(
+          `Ladeprotokoll: ${vorher} Einträge zu ${this.sessions.length} echten `
+            + `Ladevorgängen zusammengefasst (${zusammengefuehrt} Fragmente).`,
+        );
+      }
+    }
+    if (verworfen > 0) {
+      console.warn(`Ladeprotokoll: ${verworfen} ungültige Einträge — Originaldatei wird aufbewahrt.`);
+      bewahreBeschaedigt(this.path);
+    }
+    if (version < FORMAT_VERSION || verworfen > 0) this.persist();
   }
 
   persist(): void {
@@ -422,7 +498,7 @@ export class ChargeSessionLog {
       });
       this.dirty = false;
     } catch (error) {
-      console.warn('Ladeprotokoll konnte nicht gespeichert werden:', error);
+      console.warn('Ladeprotokoll konnte nicht gespeichert werden:', error instanceof Error ? error.message : error);
     }
   }
 
@@ -431,24 +507,50 @@ export class ChargeSessionLog {
   }
 }
 
+function nichtnegativ(x: unknown): x is number {
+  return typeof x === 'number' && Number.isFinite(x) && x >= 0;
+}
+
+/** Eine gespeicherte Session prüfen, bevor ihr geglaubt wird. */
+function istSession(roh: unknown): roh is ChargeSession {
+  if (typeof roh !== 'object' || roh === null) return false;
+  const s = roh as Record<string, unknown>;
+  if (typeof s['id'] !== 'string' || typeof s['startedAt'] !== 'string') return false;
+  if (Number.isNaN(new Date(s['startedAt']).getTime())) return false;
+  if (s['endedAt'] !== null && typeof s['endedAt'] !== 'string') return false;
+  if (!['energyWh', 'chargingSeconds', 'connectedSeconds', 'maxPowerW'].every((k) => nichtnegativ(s[k]))) {
+    return false;
+  }
+  const split = s['split'] as Record<string, unknown> | undefined;
+  if (typeof split !== 'object' || split === null) return false;
+  if (!nichtnegativ(split['pvWh']) || !nichtnegativ(split['gridWh']) || !nichtnegativ(split['unknownWh'])) {
+    return false;
+  }
+  if (s['jeTag'] !== undefined) {
+    if (typeof s['jeTag'] !== 'object' || s['jeTag'] === null) return false;
+    for (const [tag, a] of Object.entries(s['jeTag'] as Record<string, unknown>)) {
+      const anteil = a as Record<string, unknown>;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(tag) || !nichtnegativ(anteil?.['energyWh'])
+        || !nichtnegativ(anteil['chargingSeconds'])) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Lokales Datum eines gespeicherten Zeitstempels.
  *
  * `startedAt` ist eine ISO-Zeichenkette in UTC. Die ersten zehn Zeichen daraus
  * zu schneiden ergäbe den UTC-Tag — und der stimmt bei uns (UTC+1 bzw. UTC+2)
- * nachts nicht mit dem Kalendertag überein: Ein Ladevorgang, der um 01:00 Uhr
- * beginnt, steht in UTC noch auf dem Vortag. Gezählt wird aber nach dem Tag,
- * den die Uhr im Haus zeigt — sonst landen genau die nächtlichen Ladevorgänge,
- * also der Normalfall, im falschen Zeitraum.
+ * nachts nicht mit dem Kalendertag überein.
  */
 function localDayOf(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso.slice(0, 10) : localDate(date);
 }
 
-/** Ob ein Zeitpunkt in den gewählten Zeitraum fällt. */
-function matchesRange(iso: string, range: string, dateStr: string): boolean {
-  const day = localDayOf(iso);
+/** Ob ein lokaler Kalendertag in den gewählten Zeitraum fällt. */
+function matchesRange(day: string, range: string, dateStr: string): boolean {
   if (range === 'total') return true;
   if (range === 'day') return day === dateStr;
   if (range === 'month') return day.slice(0, 7) === dateStr.slice(0, 7);
@@ -468,17 +570,9 @@ function matchesRange(iso: string, range: string, dateStr: string): boolean {
 /**
  * Führt Bruchstücke eines Ladevorgangs wieder zu einer Session zusammen.
  *
- * Nötig, weil die frühere Fassung bei jedem Cloud-Aussetzer und bei jedem
- * Neustart des Servers geschlossen hat. In der Historie stehen dadurch
- * Ladevorgänge, die in Wahrheit einer waren — genau die "vielen einzelnen
- * Ladevorgänge", über die man in der Oberfläche stolpert.
- *
- * Zusammengeführt wird nur, was zeitlich unmittelbar aneinander anschliesst
- * (Lücke kleiner als die Abklingzeit). Zwei Ladevorgänge mit einer echten Pause
- * dazwischen bleiben zwei — dafür müsste man das Auto binnen zehn Minuten ab-
- * und wieder anstecken.
- *
- * Läuft einmalig beim Laden; danach steht Fassung 2 in der Datei.
+ * Nur für Altbestand der Fassung 1, der bei jedem Cloud-Aussetzer geschlossen
+ * hat. Zusammengeführt wird nur, was zeitlich unmittelbar aneinander
+ * anschliesst (Lücke kleiner als die Abklingzeit).
  */
 export function fuehreZusammen(
   sessions: readonly ChargeSession[],
