@@ -197,6 +197,9 @@ selbst mit und ist unter `http://<IP>:4173` erreichbar.
 `config.json`, `secrets.json` und `data/` bleiben dabei **außerhalb** des Images
 und werden vom Host eingehängt: Zugangsdaten landen nicht im Image, Adressen und
 Tarife lassen sich ohne Neubau ändern, und die Historie überlebt jedes Update.
+`config.json` und `secrets.json` sind schreibgeschützt; alles, was der Server
+schreibt (auch Konten und Sitzungen), liegt in `data/`. Der Healthcheck des
+Containers fragt `/health`, das auch bei aktiver Anmeldung antwortet.
 
 Ein Punkt ist wichtiger, als er aussieht: Die Zeitzone steht im Container fest auf
 `Europe/Berlin`. Der Tageswechsel der Historie liegt auf der Orts-Mitternacht —
@@ -229,8 +232,16 @@ du danach bequemer im Browser an, siehe unten. `npm run passwort` bleibt der
 Rückweg, falls niemand mehr in die Verwaltung kommt: Ein dort eingegebener Name
 bekommt ein neues Passwort und Administratorrechte.
 
-Ohne eingerichtete Anmeldung läuft alles weiter wie bisher, der Server weist
-beim Start aber deutlich darauf hin.
+Ohne eingerichtete Anmeldung startet der Server nicht — es sei denn,
+`allowUnauthenticatedAccess: true` steht ausdrücklich in `config.json`. Das ist
+nur für ein abgeschottetes Testnetz gedacht.
+
+**Unter Docker** ist `secrets.json` schreibgeschützt eingehängt. Konten und
+Sitzungsgeheimnis liegen dort deshalb in `data/konten.json` (Umgebungsvariable
+`SMARTHOME_KONTEN` in docker-compose.yml). Ein schon vorhandener Abschnitt
+`auth` in `secrets.json` wird beim ersten Start einmalig übernommen;
+`secrets.json` selbst bleibt dabei unverändert. Erstes Konto im Container:
+`docker compose run --rm smarthome ./node_modules/.bin/tsx tools/passwort.ts`.
 
 ### Konten für weitere Personen
 

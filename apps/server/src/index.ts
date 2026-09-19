@@ -48,6 +48,8 @@ import { ChargeSessionLog } from './ev-log.ts';
 import { Ladesteuerung } from './ladesteuerung.ts';
 import { readBody, mitHttpFehlergrenze, herkunftErlaubt } from './http-util.ts';
 import { pruefeBetriebsartAnfrage, pruefeStoppAnfrage } from './ev-anfragen.ts';
+import { gesundheit } from './gesundheit.ts';
+import { schreibstatus } from './persist.ts';
 
 const PUBLIC_DIR = resolve(import.meta.dirname, '..', 'public');
 
@@ -659,12 +661,13 @@ export async function starteServer(o: Startoptionen): Promise<LaufenderServer> {
   const { config, datenverzeichnis } = o;
   // Vor Messung, Persistenz und Ladebefehlen prüfen: Auth-Fehler dürfen keinen
   // teilweise laufenden, ungeschützten Server hinterlassen.
-  const konten = Kontenspeicher.ladenFuerServer(config.secretsPfad, config.allowUnauthenticatedAccess);
+  const konten = Kontenspeicher.ladenFuerServer(config.kontenPfad, config.allowUnauthenticatedAccess, config.secretsPfad);
   const sitzungen = konten === null ? null : new Sitzungsspeicher(
     resolve(datenverzeichnis, 'sitzungen.json'), konten.sessionSecret,
-    // Zweiter Ort für den Notfall-Marker: neben secrets.json, nicht im
-    // Datenverzeichnis — fällt das aus, soll der Marker trotzdem ankommen.
-    resolve(config.secretsPfad, '..', 'sitzungen-gesperrt.flag'),
+    // Zweiter Ort für den Notfall-Marker: neben der Kontendatei, die ohnehin
+    // beschreibbar sein muss — fällt das Datenverzeichnis aus, soll der Marker
+    // trotzdem ankommen. (Unter Docker liegen beide im selben Volume.)
+    resolve(config.kontenPfad, '..', 'sitzungen-gesperrt.flag'),
   );
   const { connectors, wallbox } = o.quellen ?? buildConnectors(config);
 
@@ -700,6 +703,11 @@ export async function starteServer(o: Startoptionen): Promise<LaufenderServer> {
 
   // Ein Abonnement für beide, damit sie garantiert mit derselben geprüften
   // Ladeleistung rechnen — zwei getrennte Aufrufe hatten je ihre eigene.
+  // Für den Healthcheck: Wann lief der letzte Messzyklus durch?
+  const startMs = Date.now();
+  let letzterZyklusMs: number | null = null;
+  engine.subscribe(() => { letzterZyklusMs = Date.now(); });
+
   engine.subscribe((state) => {
     const anteil = hausUndAuto(state);
     const autoW = geprueftAutoW(anteil);
@@ -742,6 +750,14 @@ export async function starteServer(o: Startoptionen): Promise<LaufenderServer> {
 
   const server = createServer(mitHttpFehlergrenze(async (request, response, url) => {
     if (o.vorbehandlung && (await o.vorbehandlung(request, response, url))) return;
+
+    // Healthcheck ohne Anmeldung, ohne private Daten; siehe gesundheit.ts.
+    if (url.pathname === '/health' && request.method === 'GET') {
+      const g = gesundheit({ startMs, letzterZyklusMs, jetztMs: Date.now(), speicher: schreibstatus() });
+      response.writeHead(g.status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      response.end(JSON.stringify(g.body));
+      return;
+    }
     if (!herkunftErlaubt(request)) {
       response.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
       response.end(JSON.stringify({ error: 'Anfrage von fremder Herkunft abgelehnt.' }));

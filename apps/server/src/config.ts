@@ -194,6 +194,12 @@ export interface AppConfig {
    * anlegt, und eine Kopie im Konfigurationsobjekt wäre danach veraltet.
    */
   readonly secretsPfad: string;
+  /**
+   * Wo Konten und Sitzungsgeheimnis liegen. Vorgabe: in secrets.json. Mit
+   * SMARTHOME_KONTEN (etwa unter Docker) eine eigene, beschreibbare Datei —
+   * dann darf secrets.json schreibgeschützt sein.
+   */
+  readonly kontenPfad: string;
   /** Regelung des Ladestroms nach Überschuss. */
   readonly ueberschuss: UeberschussConfig;
 }
@@ -268,6 +274,7 @@ export function loadConfig(path = resolve(process.cwd(), 'config.json')): AppCon
 
   return {
     secretsPfad,
+    kontenPfad: process.env['SMARTHOME_KONTEN'] ? resolve(process.env['SMARTHOME_KONTEN']) : secretsPfad,
     allowUnauthenticatedAccess: record['allowUnauthenticatedAccess'] === true,
     trustedProxies: Array.isArray(record['trustedProxies'])
       ? (record['trustedProxies'] as unknown[]).filter((x): x is string => typeof x === 'string')

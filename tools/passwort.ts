@@ -22,7 +22,9 @@ import { resolve } from 'node:path';
 import { Kontenspeicher, MINDESTLAENGE_PASSWORT } from '../apps/server/src/benutzer.ts';
 import { Sitzungsspeicher } from '../apps/server/src/sitzungen.ts';
 
-const PFAD = resolve(process.cwd(), 'secrets.json');
+const SECRETS = resolve(process.cwd(), 'secrets.json');
+// Wie im Server: mit SMARTHOME_KONTEN eine eigene Kontendatei (etwa unter Docker).
+const PFAD = process.env['SMARTHOME_KONTEN'] ? resolve(process.env['SMARTHOME_KONTEN']) : SECRETS;
 const SITZUNGEN = resolve(process.cwd(), 'data', 'sitzungen.json');
 const MINDESTLAENGE = MINDESTLAENGE_PASSWORT;
 
@@ -121,7 +123,7 @@ async function main(): Promise<void> {
   console.log('  ---------------------------------');
   console.log('');
 
-  const speicher = Kontenspeicher.ladenOderNeu(PFAD);
+  const speicher = Kontenspeicher.ladenOderNeu(PFAD, SECRETS);
   const vorhanden = speicher.alle();
 
   if (vorhanden.length > 0) {

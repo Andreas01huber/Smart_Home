@@ -2,8 +2,9 @@
 #
 # Ablauf bei jedem Push auf main:
 #   1. GitHub prüft auf einem geliehenen Linux-Rechner Typen und Tests.
-#   2. Erst wenn das grün ist, holt der Server zu Hause den neuen Stand und
-#      startet den Dienst neu.
+#   2. Erst wenn das grün ist, bereitet der Server zu Hause den neuen Stand
+#      vor, schaltet um, prüft /health und kehrt bei einem Fehler zum
+#      vorherigen Stand zurück.
 #
 # Der Server läuft direkt unter Windows mit Node, nicht in Docker: Die
 # Maschine ist dafür zu alt. Gestartet wird über die geplante Aufgabe
@@ -22,10 +23,12 @@ on:
   workflow_dispatch:
 
 # Zwei Deploys gleichzeitig würden sich beim Kopieren und beim Neustart des
-# Servers in die Quere kommen. Der neuere gewinnt, der ältere wird abgebrochen.
+# Servers in die Quere kommen. Der neuere WARTET, bis der laufende fertig ist:
+# Ein Abbruch mitten im Umschalten hinterliesse sonst einen angehaltenen Server.
+# (Bricht jemand von Hand ab, holt der letzte Schritt den alten Stand zurück.)
 concurrency:
   group: deploy
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -61,6 +64,18 @@ jobs:
       # NICHT der Arbeitsordner des Runners: Dort liegen weder secrets.json
       # noch die Historie, und beides darf ein Deploy nicht anfassen.
       DEPLOY_DIR: C:\SmartHome
+      # Hier wird der neue Stand vorbereitet, solange der alte noch läuft.
+      STAGE_DIR: C:\SmartHome-neu
+      # Hier liegt der zuletzt laufende Stand, für die Rückkehr bei Fehlern.
+      BACKUP_DIR: C:\SmartHome-vorher
+
+    # Ablauf in drei Teilen:
+    #   1. Vorbereiten (Server läuft weiter): Code in STAGE_DIR, neue
+    #      Abhängigkeiten dort installieren und laden. Scheitert etwas, bricht
+    #      der Deploy ab, und am laufenden Server hat sich nichts geändert.
+    #   2. Umschalten: sichern, anhalten, kopieren, starten, /health prüfen.
+    #   3. Scheitert Teil 2 oder wird der Lauf abgebrochen, kehrt der letzte
+    #      Schritt zum gesicherten Stand zurück und startet ihn wieder.
 
     steps:
       - uses: actions/checkout@v4
@@ -90,14 +105,88 @@ jobs:
           }
           Write-Host 'Autostart-Aufgabe "SmartHome" ist eingerichtet.'
 
+      - name: Neuen Stand vorbereiten (Server läuft weiter)
+        shell: powershell
+        run: |
+          if (Test-Path $env:STAGE_DIR) { Remove-Item -Recurse -Force $env:STAGE_DIR }
+          New-Item -ItemType Directory -Force -Path $env:STAGE_DIR | Out-Null
+
+          $schlimmster = 0
+          # Stammdateien ohne Unterordner. config.json liegt hier nur zum
+          # Vergleich; ob sie auf den Server kommt, entscheidet "Umschalten".
+          robocopy . $env:STAGE_DIR /LEV:1 /XF secrets.json .env /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -gt $schlimmster) { $schlimmster = $LASTEXITCODE }
+          foreach ($ordner in @('apps', 'packages', 'tools', 'deploy', 'docs')) {
+            if (-not (Test-Path ".\$ordner")) { continue }
+            robocopy ".\$ordner" (Join-Path $env:STAGE_DIR $ordner) /MIR /XD node_modules dist /NFL /NDL /NJH /NJS /NP
+            if ($LASTEXITCODE -gt $schlimmster) { $schlimmster = $LASTEXITCODE }
+          }
+          if ($schlimmster -ge 8) {
+            Write-Host "::error::robocopy ist mit $schlimmster fehlgeschlagen. Der laufende Server ist unveraendert."
+            exit 1
+          }
+
+          # Neue Abhängigkeiten nur, wenn sich package-lock.json geändert hat.
+          # Dann werden sie HIER installiert und der Server einmal zur Probe
+          # geladen - ohne Netz oder mit kaputtem Paket scheitert das jetzt,
+          # nicht erst nach dem Anhalten.
+          $marke = Join-Path $env:DEPLOY_DIR 'node_modules\.deploy-lock-hash'
+          $neu = (Get-FileHash (Join-Path $env:STAGE_DIR 'package-lock.json') -Algorithm SHA256).Hash
+          $vorher = if (Test-Path $marke) { (Get-Content $marke -Raw).Trim() } else { '' }
+          $tsxDa = Test-Path (Join-Path $env:DEPLOY_DIR 'node_modules\tsx')
+          if ($tsxDa -and $vorher -eq $neu) {
+            Write-Host 'Abhaengigkeiten unveraendert.'
+            Set-Content -Path (Join-Path $env:STAGE_DIR '.abhaengigkeiten') -Value 'gleich' -Encoding ascii
+            exit 0
+          }
+
+          Push-Location $env:STAGE_DIR
+          npm ci --include=dev --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '::error::npm ci ist fehlgeschlagen (kein Internet auf dem Server?). Der laufende Server ist unveraendert.'
+            exit 1
+          }
+          # Laden, ohne zu starten: index.ts startet nur als Hauptprogramm.
+          & .\node_modules\.bin\tsx.cmd -e "import('./apps/server/src/index.ts').then(() => process.exit(0), (e) => { console.error(e); process.exit(1); })"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '::error::Der neue Stand laesst sich nicht laden. Der laufende Server ist unveraendert.'
+            exit 1
+          }
+          Pop-Location
+          Set-Content -Path (Join-Path $env:STAGE_DIR '.abhaengigkeiten') -Value 'neu' -Encoding ascii
+          Write-Host 'Neue Abhaengigkeiten installiert und geprueft.'
+
+      - name: Laufenden Stand sichern
+        shell: powershell
+        run: |
+          # Nur Code und Stammdateien. data\, logs\ und secrets.json fasst der
+          # Deploy ohnehin nicht an, sie brauchen keine Sicherung.
+          New-Item -ItemType Directory -Force -Path $env:BACKUP_DIR | Out-Null
+          $schlimmster = 0
+          robocopy $env:DEPLOY_DIR $env:BACKUP_DIR /LEV:1 /XF secrets.json .env /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -gt $schlimmster) { $schlimmster = $LASTEXITCODE }
+          foreach ($ordner in @('apps', 'packages', 'tools', 'deploy', 'docs')) {
+            $quelle = Join-Path $env:DEPLOY_DIR $ordner
+            if (-not (Test-Path $quelle)) { continue }
+            robocopy $quelle (Join-Path $env:BACKUP_DIR $ordner) /MIR /XD node_modules dist /NFL /NDL /NJH /NJS /NP
+            if ($LASTEXITCODE -gt $schlimmster) { $schlimmster = $LASTEXITCODE }
+          }
+          if ($schlimmster -ge 8) {
+            Write-Host "::error::Sicherung fehlgeschlagen (robocopy $schlimmster). Ohne Sicherung wird nicht umgeschaltet."
+            exit 1
+          }
+          Write-Host "Laufender Stand gesichert nach $env:BACKUP_DIR."
+
       - name: Server anhalten
         shell: powershell
         run: |
+          # Ab hier ist der Server unten. Die Marke sagt dem letzten Schritt,
+          # dass er bei einem Fehler oder Abbruch zurückkehren muss.
+          Set-Content -Path (Join-Path $env:RUNNER_TEMP 'smarthome-angehalten') -Value '1' -Encoding ascii
+
           # Fehler beim Anhalten werden hier bewusst eingesammelt statt
-          # verschluckt: Scheitert das Anhalten an fehlenden Rechten, bricht der
-          # Deploy hier ab - noch bevor eine einzige Datei kopiert ist. Auf dem
-          # Server sieht das dann so aus, als sei der Push nie angekommen.
-          # Deshalb muss die Meldung sagen, woran es wirklich lag.
+          # verschluckt: Scheitert das Anhalten an fehlenden Rechten, muss die
+          # Meldung sagen, woran es wirklich lag.
           $rechteproblem = $false
 
           try {
@@ -111,12 +200,8 @@ jobs:
           # Die Aufgabe startet run-server.cmd, das seinerseits Node startet.
           # Wird die Aufgabe beendet, überlebt der Node-Prozess das und hält
           # den Port weiter besetzt. Also gezielt den freimachen, der auf 4173
-          # hört.
-          #
-          # Das ist ein harter Abbruch ohne sauberes Herunterfahren. Verloren
-          # gehen dabei höchstens die Energiewerte seit dem letzten
-          # automatischen Sichern - die Historie schreibt sich alle zwei
-          # Minuten selbst weg.
+          # hört. Verloren gehen dabei höchstens die Energiewerte seit dem
+          # letzten automatischen Sichern (alle zwei Minuten).
           foreach ($v in Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue) {
             try {
               Stop-Process -Id $v.OwningProcess -Force -ErrorAction Stop
@@ -126,8 +211,6 @@ jobs:
             }
           }
 
-          # Erst weitermachen, wenn der Port wirklich frei ist - sonst kann der
-          # neue Server nicht binden und der Deploy scheitert erst ganz hinten.
           foreach ($i in 1..20) {
             if (-not (Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue)) {
               Write-Host 'Port 4173 ist frei.'
@@ -137,55 +220,56 @@ jobs:
           }
 
           if ($rechteproblem) {
-            Write-Host '::error::Der Runner darf den laufenden Server nicht beenden. Der Server laeuft als SYSTEM, der Runner-Dienst unter einem eingeschraenkten Konto. Behebung: auf dem Server "Runner reparieren.cmd" als Administrator ausfuehren.'
+            Write-Host '::error::Der Runner darf den laufenden Server nicht beenden. Behebung: auf dem Server "Runner reparieren.cmd" als Administrator ausfuehren.'
           } else {
             Write-Host '::error::Port 4173 ist nach 20 Sekunden noch belegt.'
           }
           exit 1
 
-      - name: Code in den Deploy-Ordner übertragen
+      - name: Umschalten
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force -Path $env:DEPLOY_DIR | Out-Null
-
           $schlimmster = 0
-
-          # Durchgang 1: die Dateien im Projektstamm - ohne Unterordner (/LEV:1)
-          # und ohne Löschen. Im Stamm liegen data\ und secrets.json, die dem
-          # Server gehören und die ein Deploy niemals anfassen darf.
-          robocopy . $env:DEPLOY_DIR /LEV:1 /XF secrets.json .env /NFL /NDL /NJH /NJS /NP
+          robocopy $env:STAGE_DIR $env:DEPLOY_DIR /LEV:1 /XF secrets.json .env config.json .abhaengigkeiten /NFL /NDL /NJH /NJS /NP
           if ($LASTEXITCODE -gt $schlimmster) { $schlimmster = $LASTEXITCODE }
-
-          # Durchgang 2: die Ordner mit Code und Doku - als Spiegel (/MIR). Nur
-          # so verschwindet auf dem Server auch das, was im Repository gelöscht
-          # oder umbenannt wurde. Ohne Spiegel bliebe die alte Datei liegen und
-          # würde weiter ausgeliefert - beim Umbenennen lägen beide Fassungen da.
-          #
-          # Dass hier gelöscht werden darf, ist ungefährlich: data\ und
-          # secrets.json liegen im Stamm und damit außerhalb dieser Bäume. Das
-          # ist keine Frage der richtigen Ausschluss-Schalter mehr, sondern eine
-          # des Aufbaus - und deshalb nicht kaputtzukonfigurieren.
           foreach ($ordner in @('apps', 'packages', 'tools', 'deploy', 'docs')) {
-            if (-not (Test-Path ".\$ordner")) { continue }
-            $ziel = Join-Path $env:DEPLOY_DIR $ordner
-            robocopy ".\$ordner" $ziel /MIR /XD node_modules dist /NFL /NDL /NJH /NJS /NP
+            $quelle = Join-Path $env:STAGE_DIR $ordner
+            if (-not (Test-Path $quelle)) { continue }
+            robocopy $quelle (Join-Path $env:DEPLOY_DIR $ordner) /MIR /XD node_modules dist /NFL /NDL /NJH /NJS /NP
             if ($LASTEXITCODE -gt $schlimmster) { $schlimmster = $LASTEXITCODE }
           }
-
-          # robocopy meldet Erfolg mit 0-7, erst ab 8 ist es ein Fehler.
           if ($schlimmster -ge 8) {
             Write-Host "::error::robocopy ist mit $schlimmster fehlgeschlagen."
             exit 1
           }
-          Write-Host "Uebertragen. Hoechster robocopy-Status: $schlimmster (unter 8 = ok)."
-          exit 0
 
-      - name: Stand vermerken
-        shell: powershell
-        run: |
+          # config.json: Die Anlagenkonfiguration auf dem Server wird nicht
+          # durch die Fassung aus dem Repository ersetzt. Nur beim allerersten
+          # Deploy kommt sie mit. Weicht sie ab, liegt die Repo-Fassung als
+          # config.repo.json daneben, und der Lauf sagt es.
+          $ziel = Join-Path $env:DEPLOY_DIR 'config.json'
+          if (-not (Test-Path $ziel)) {
+            Copy-Item 'config.json' $ziel
+            Write-Host 'config.json erstmals angelegt.'
+          } elseif ((Get-FileHash 'config.json').Hash -ne (Get-FileHash $ziel).Hash) {
+            Copy-Item 'config.json' (Join-Path $env:DEPLOY_DIR 'config.repo.json') -Force
+            Write-Host '::warning::config.json im Repository weicht von der auf dem Server ab. Die Server-Fassung bleibt; die Repo-Fassung liegt als config.repo.json daneben.'
+          }
+
+          $abh = (Get-Content (Join-Path $env:STAGE_DIR '.abhaengigkeiten') -Raw).Trim()
+          if ($abh -eq 'neu') {
+            # Pakete liegen nach der Vorbereitung im npm-Cache; das hier
+            # braucht kein Netz mehr.
+            Push-Location $env:DEPLOY_DIR
+            npm ci --include=dev --no-audit --no-fund --prefer-offline
+            if ($LASTEXITCODE -ne 0) { Write-Host '::error::npm ci im Deploy-Ordner fehlgeschlagen.'; exit 1 }
+            $hash = (Get-FileHash 'package-lock.json' -Algorithm SHA256).Hash
+            Set-Content -Path 'node_modules\.deploy-lock-hash' -Value $hash -Encoding ascii
+            Pop-Location
+          }
+
           # Ohne diese Datei laesst sich auf dem Server nicht feststellen, welcher
-          # Stand dort eigentlich liegt - die .git-Historie wird nicht mitkopiert.
-          # "Server pruefen.cmd" liest sie aus.
+          # Stand dort eigentlich liegt. "Server pruefen.cmd" liest sie aus.
           $zeilen = @(
             "Stand      : $env:GITHUB_SHA",
             "Ausgeliefert: $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss')",
@@ -194,80 +278,78 @@ jobs:
           Set-Content -Path (Join-Path $env:DEPLOY_DIR 'VERSION.txt') -Value $zeilen -Encoding ascii
           $zeilen | ForEach-Object { Write-Host $_ }
 
-      - name: Zugangsdaten vorhanden?
-        shell: powershell
-        run: |
-          $secrets = Join-Path $env:DEPLOY_DIR 'secrets.json'
-          if (-not (Test-Path $secrets)) {
-            # Kein Abbruch: Alles außer der Wallbox läuft auch ohne sie.
-            Write-Host "::warning::secrets.json fehlt in $env:DEPLOY_DIR - die Wallbox bleibt leer."
-          }
-
-      - name: Abhängigkeiten aktualisieren
-        shell: powershell
-        working-directory: C:\SmartHome
-        run: |
-          # npm ci bei jedem Deploy wäre Verschwendung und würde ohne Internet
-          # scheitern, obwohl sich gar nichts geändert hat. Deshalb nur dann,
-          # wenn node_modules fehlt oder package-lock.json sich geändert hat -
-          # gemerkt an einer Prüfsumme neben den Abhängigkeiten.
-          $marke = 'node_modules\.deploy-lock-hash'
-          $jetzt = (Get-FileHash 'package-lock.json' -Algorithm SHA256).Hash
-          $vorher = if (Test-Path $marke) { Get-Content $marke -Raw } else { '' }
-
-          if ((Test-Path 'node_modules\tsx') -and $vorher.Trim() -eq $jetzt) {
-            Write-Host 'Abhaengigkeiten unveraendert - uebersprungen.'
-            exit 0
-          }
-
-          # --include=dev ist nötig: tsx steht in devDependencies, wird aber
-          # zum Laufen gebraucht - der Server läuft aus den TypeScript-Quellen.
-          npm ci --include=dev --no-audit --no-fund
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host '::error::npm ci ist fehlgeschlagen (kein Internet auf dem Server?).'
-            exit 1
-          }
-          Set-Content -Path $marke -Value $jetzt -Encoding ascii
-          Write-Host 'Abhaengigkeiten neu installiert.'
-
-      - name: Server starten
+      - name: Starten und prüfen
         shell: powershell
         run: |
           Start-ScheduledTask -TaskName 'SmartHome'
-          Write-Host 'Aufgabe "SmartHome" gestartet.'
-
-      - name: Läuft er wirklich?
-        shell: powershell
-        run: |
-          # Nicht auf "gestartet" vertrauen, sondern nachsehen. Der erste Start
-          # dauert länger, weil tsx den Code einmal übersetzt - deshalb bis zu
-          # 90 Sekunden.
+          # /health braucht keine Anmeldung und sagt, ob die Messung läuft.
+          # Der erste Start dauert länger, weil tsx den Code übersetzt.
           $ok = $false
           foreach ($i in 1..45) {
             try {
-              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:4173/api/snapshot' `
-                     -UseBasicParsing -TimeoutSec 3
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:4173/health' -UseBasicParsing -TimeoutSec 3
               if ($r.StatusCode -eq 200) { $ok = $true; break }
-            } catch { Start-Sleep -Seconds 2 }
+            } catch { }
+            Start-Sleep -Seconds 2
           }
-
-          $log = Join-Path $env:DEPLOY_DIR 'logs\server.log'
-
           if (-not $ok) {
-            Write-Host '::error::Der Server antwortet nach 90 Sekunden nicht.'
-            if (Test-Path $log) {
-              Write-Host '--- letzte 60 Zeilen aus logs\server.log ---'
-              Get-Content $log -Tail 60
-            } else {
-              Write-Host "Keine Logdatei unter $log - die Aufgabe ist vermutlich gar nicht angelaufen."
-              Get-ScheduledTask -TaskName 'SmartHome' | Get-ScheduledTaskInfo
-            }
+            Write-Host '::error::Der neue Stand meldet sich nach 90 Sekunden nicht gesund.'
+            $log = Join-Path $env:DEPLOY_DIR 'logs\server.log'
+            if (Test-Path $log) { Get-Content $log -Tail 60 }
             exit 1
           }
-
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'smarthome-angehalten') -Force
           Write-Host 'Der Server antwortet auf Port 4173.'
-          # Die Adressen, unter denen das Dashboard jetzt erreichbar ist -
-          # praktisch, wenn sich die IP des Servers einmal geändert hat.
           Get-NetIPAddress -AddressFamily IPv4 |
             Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
             ForEach-Object { '   http://' + $_.IPAddress + ':4173' }
+
+      - name: Bei Fehler oder Abbruch zum alten Stand zurück
+        # Läuft auch nach einem Abbruch. Ohne die Marke aus "Server anhalten"
+        # war der Server nie unten, dann gibt es nichts zu tun.
+        if: failure() || cancelled()
+        shell: powershell
+        run: |
+          if (-not (Test-Path (Join-Path $env:RUNNER_TEMP 'smarthome-angehalten'))) {
+            Write-Host 'Der Server wurde nicht angehalten - nichts zurueckzunehmen.'
+            exit 0
+          }
+          Write-Host 'Kehre zum gesicherten Stand zurueck.'
+          try { Stop-ScheduledTask -TaskName 'SmartHome' -ErrorAction Stop } catch { }
+          foreach ($v in Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue) {
+            try { Stop-Process -Id $v.OwningProcess -Force -ErrorAction Stop } catch { }
+          }
+          Start-Sleep -Seconds 2
+
+          robocopy $env:BACKUP_DIR $env:DEPLOY_DIR /LEV:1 /XF secrets.json .env config.json /NFL /NDL /NJH /NJS /NP | Out-Null
+          foreach ($ordner in @('apps', 'packages', 'tools', 'deploy', 'docs')) {
+            $quelle = Join-Path $env:BACKUP_DIR $ordner
+            if (-not (Test-Path $quelle)) { continue }
+            robocopy $quelle (Join-Path $env:DEPLOY_DIR $ordner) /MIR /XD node_modules dist /NFL /NDL /NJH /NJS /NP | Out-Null
+          }
+
+          # Passten die installierten Abhängigkeiten nicht mehr zum alten
+          # package-lock.json, jetzt zurückinstallieren (aus dem Cache).
+          Push-Location $env:DEPLOY_DIR
+          $marke = 'node_modules\.deploy-lock-hash'
+          $soll = (Get-FileHash 'package-lock.json' -Algorithm SHA256).Hash
+          $ist = if (Test-Path $marke) { (Get-Content $marke -Raw).Trim() } else { '' }
+          if ($ist -ne $soll) {
+            npm ci --include=dev --no-audit --no-fund --prefer-offline
+            if ($LASTEXITCODE -eq 0) { Set-Content -Path $marke -Value $soll -Encoding ascii }
+          }
+          Pop-Location
+
+          Start-ScheduledTask -TaskName 'SmartHome'
+          foreach ($i in 1..45) {
+            try {
+              $r = Invoke-WebRequest -Uri 'http://127.0.0.1:4173/health' -UseBasicParsing -TimeoutSec 3
+              if ($r.StatusCode -eq 200) {
+                Write-Host '::warning::Der Deploy ist gescheitert; der vorherige Stand laeuft wieder.'
+                exit 1
+              }
+            } catch { }
+            Start-Sleep -Seconds 2
+          }
+          Write-Host '::error::Auch der vorherige Stand meldet sich nicht gesund. Bitte auf dem Server "Server pruefen.cmd" ausfuehren.'
+          exit 1

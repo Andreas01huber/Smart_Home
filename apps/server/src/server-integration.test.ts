@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { ManagedConnector, type EnergyConnector } from '@energy/connectors';
 import { loadConfig } from './config.ts';
 import { starteServer } from './index.ts';
+import { Kontenspeicher } from './benutzer.ts';
 
 function aufbau() {
   const dir = mkdtempSync(join(tmpdir(), 'smarthome-http-test-'));
@@ -75,4 +76,29 @@ it('liefert für zukünftige Tarife denselben aktuellen Stand bei PUT und GET', 
     assert.equal(leer.hasData, false);
     assert.equal(typeof leer.zeitzone, 'string');
   } finally { await server.stoppe(); a.aufraeumen(); }
+});
+
+it('beantwortet /health ohne Anmeldung und ohne private Daten', async () => {
+  const a = aufbau();
+  // Ein Konto im Testordner, damit die Anmeldung wirklich aktiv ist.
+  const konten = Kontenspeicher.ladenOderNeu(a.config.secretsPfad);
+  assert.ok(konten.anlegen({ username: 'test', passwort: 'ein-langes-testpasswort', rolle: 'admin', angelegtVon: null }).ok);
+  const server = await starteServer({ ...a, datenverzeichnis: a.dir,
+    config: { ...a.config, allowUnauthenticatedAccess: false } });
+  const url = `http://127.0.0.1:${(server.server.address() as AddressInfo).port}`;
+  try {
+    const r = await fetch(url + '/health');
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    const body = JSON.parse(text) as { ok: boolean; messung: string };
+    assert.equal(body.ok, true);
+    assert.ok(['startet', 'laeuft'].includes(body.messung));
+    assert.doesNotMatch(text, /Testquelle|fake|1000|127\.0\.0\.1/);
+    // Alles andere bleibt hinter der Anmeldung.
+    const api = await fetch(url + '/api/snapshot', { redirect: 'manual' });
+    assert.notEqual(api.status, 200);
+  } finally {
+    await server.stoppe();
+    a.aufraeumen();
+  }
 });

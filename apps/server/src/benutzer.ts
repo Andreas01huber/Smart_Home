@@ -24,6 +24,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import { hashPassword, verifyPassword } from './auth.ts';
 import { writeJsonAtomic } from './persist.ts';
@@ -263,9 +264,31 @@ export class Kontenspeicher {
     return speicher;
   }
 
+  /**
+   * Konten aus einer eigenen, beschreibbaren Datei, beim ersten Mal übernommen
+   * aus secrets.json.
+   *
+   * Hintergrund: Unter Docker ist secrets.json schreibgeschützt eingehängt —
+   * die Cloud-Zugangsdaten soll der Container nicht verändern können. Konten
+   * ändern sich aber im Betrieb (letzte Anmeldung, neue Passwörter). Liegt
+   * `kontenPfad` woanders als `secretsPfad` und steht dort noch nichts, wird
+   * der Abschnitt `auth` einmalig hinübergeschrieben; secrets.json bleibt
+   * unverändert, ab dann gilt nur noch die neue Datei.
+   */
+  static ladenMitUmzug(kontenPfad: string, secretsPfad: string): Kontenspeicher | null {
+    if (resolve(kontenPfad) === resolve(secretsPfad) || existsSync(kontenPfad)) {
+      return Kontenspeicher.laden(kontenPfad);
+    }
+    const alt = leseAuth(leseDatei(secretsPfad)['auth']);
+    if (alt === null) return null;
+    const speicher = new Kontenspeicher(kontenPfad, alt);
+    speicher.speichern();
+    return Kontenspeicher.laden(kontenPfad);
+  }
+
   /** Ohne Konten nur starten, wenn der offene Betrieb ausdrücklich konfiguriert ist. */
-  static ladenFuerServer(pfad: string, ohneAnmeldungErlaubt = false): Kontenspeicher | null {
-    const speicher = Kontenspeicher.laden(pfad);
+  static ladenFuerServer(pfad: string, ohneAnmeldungErlaubt = false, secretsPfad = pfad): Kontenspeicher | null {
+    const speicher = Kontenspeicher.ladenMitUmzug(pfad, secretsPfad);
     if (speicher === null && !ohneAnmeldungErlaubt) {
       throw new Error('Keine Anmeldung eingerichtet. Zuerst npm run passwort ausführen.');
     }
@@ -280,9 +303,9 @@ export class Kontenspeicher {
    * gerade weil es noch keines gibt. Der Server benutzt weiterhin `laden` — für
    * ihn ist "kein Konto" eine Aussage, kein Zustand zum Weiterarbeiten.
    */
-  static ladenOderNeu(pfad: string): Kontenspeicher {
+  static ladenOderNeu(pfad: string, secretsPfad = pfad): Kontenspeicher {
     return (
-      Kontenspeicher.laden(pfad) ??
+      Kontenspeicher.ladenMitUmzug(pfad, secretsPfad) ??
       new Kontenspeicher(pfad, {
         sessionSecret: randomBytes(32).toString('hex'),
         benutzer: [],

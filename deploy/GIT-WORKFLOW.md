@@ -113,17 +113,38 @@ git push
 Mehr nicht. Den Fortschritt zeigt im Repository der Reiter **Actions**. Am Ende
 listet der Workflow die Adressen auf, unter denen das Dashboard erreichbar ist.
 
-Ein Deploy ohne Code-Änderung — etwa nach einer Änderung an `config.json` auf
-dem Server — geht über **Actions → Test und Deploy → Run workflow**.
+Ein Deploy ohne Code-Änderung geht über **Actions → Test und Deploy → Run
+workflow**. Eine Änderung an `config.json` auf dem Server braucht keinen Deploy,
+nur einen Neustart der Aufgabe.
 
 ---
+
+## Ablauf eines Deploys
+
+1. **Vorbereiten, während der alte Server läuft**: Der neue Stand kommt nach
+   `C:\SmartHome-neu`. Hat sich `package-lock.json` geändert, werden die
+   Abhängigkeiten dort installiert und der Server einmal zur Probe geladen.
+   Scheitert das (kein Internet, kaputtes Paket), bricht der Deploy ab — der
+   laufende Server hat davon nichts bemerkt.
+2. **Sichern**: Der laufende Code kommt nach `C:\SmartHome-vorher`.
+3. **Umschalten**: anhalten, kopieren, starten, dann bis zu 90 Sekunden auf
+   `/health` warten.
+4. **Zurück bei Fehlern**: Meldet sich der neue Stand nicht gesund, oder wird
+   der Lauf nach dem Anhalten abgebrochen, holt der letzte Schritt den
+   gesicherten Stand zurück und startet ihn wieder. Der Lauf bleibt dann rot.
+
+Ein neuer Push bricht einen laufenden Deploy **nicht** ab, sondern wartet auf
+ihn. Ein Abbruch mitten im Umschalten hätte sonst einen angehaltenen Server
+hinterlassen.
 
 ## Was der Deploy anfasst und was nicht
 
 | | |
 | --- | --- |
-| **Wird überschrieben** | Quellcode, `config.json`, Startskripte, Anleitungen |
-| **Bleibt unangetastet** | `C:\SmartHome\data` (Historie), `secrets.json`, `logs\`, `node_modules\`, eine lokale `.env` |
+| **Wird überschrieben** | Quellcode, Startskripte, Anleitungen |
+| **Nur beim allerersten Deploy** | `config.json` — danach gehört sie dem Server. Weicht die Fassung im Repository ab, liegt sie als `config.repo.json` daneben, und der Lauf zeigt eine Warnung. |
+| **Bleibt unangetastet** | `C:\SmartHome\data` (Historie, Lademodus, Sitzungen), `secrets.json`, `logs\`, eine lokale `.env` |
+| **Nur bei neuem package-lock.json** | `node_modules\` |
 | **Kommt gar nicht an** | `.git`, `.github` |
 
 Kopiert wird in zwei Durchgängen. Die Dateien im Projektstamm kommen ohne

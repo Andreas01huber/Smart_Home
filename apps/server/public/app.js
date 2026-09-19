@@ -3198,8 +3198,56 @@ function init() {
   // SW-Unterstützung) sind unkritisch — die App funktioniert auch ohne.
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker.register('/sw.js').then(beobachteUpdates).catch(() => {});
     });
   }
+}
+
+/**
+ * Neue Fassung nach einem Deploy: ein Hinweis mit „Neu laden“, nie ein
+ * Neuladen von selbst — mitten im Verschieben des Ladestrom-Reglers wäre das
+ * eine verlorene Eingabe. Der neue Service Worker wartet, bis hier getippt wird.
+ */
+function beobachteUpdates(reg) {
+  const wartet = () => {
+    if (reg.waiting && navigator.serviceWorker.controller) zeigeUpdateHinweis(reg);
+  };
+  wartet();
+  reg.addEventListener('updatefound', () => {
+    const neu = reg.installing;
+    neu?.addEventListener('statechange', () => { if (neu.state === 'installed') wartet(); });
+  });
+  // Eine offen gelassene App erfährt sonst erst beim nächsten Start davon.
+  setInterval(() => { reg.update().catch(() => {}); }, 30 * 60 * 1000);
+
+  let angefordert = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (angefordert) window.location.reload();
+  });
+  document.addEventListener('click', (e) => {
+    const knopf = e.target instanceof Element ? e.target.closest('[data-update]') : null;
+    if (!knopf) return;
+    if (knopf.dataset.update === 'spaeter') {
+      document.getElementById('update-hinweis')?.remove();
+      return;
+    }
+    angefordert = true;
+    knopf.disabled = true;
+    // Hat der Worker schon übernommen (anderes Fenster), direkt neu laden.
+    if (reg.waiting) reg.waiting.postMessage('neue-version-uebernehmen');
+    else window.location.reload();
+  });
+}
+
+function zeigeUpdateHinweis() {
+  if (document.getElementById('update-hinweis')) return;
+  const el = document.createElement('div');
+  el.id = 'update-hinweis';
+  el.className = 'update-hinweis';
+  el.setAttribute('role', 'status');
+  el.innerHTML = '<span>Eine neue Version der App ist bereit.</span>'
+    + '<button type="button" class="btn-primary" data-update="laden">Neu laden</button>'
+    + '<button type="button" class="update-spaeter" data-update="spaeter">Später</button>';
+  document.body.appendChild(el);
 }
 init();

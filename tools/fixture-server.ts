@@ -264,6 +264,7 @@ function konfiguration(port: number, dir: string): AppConfig {
     allowUnauthenticatedAccess: true,
     trustedProxies: [],
     secretsPfad: join(dir, 'secrets-gibt-es-hier-nicht.json'),
+    kontenPfad: join(dir, 'secrets-gibt-es-hier-nicht.json'),
     sources: {
       fronius: { enabled: true, host: 'fixture', displayName: 'Fronius Symo' },
       froniusGen24: { enabled: true, host: 'fixture', displayName: 'Fronius GEN24', batteryDisplayName: 'Kleiner Speicher', usableCapacityWh: 11_000 },

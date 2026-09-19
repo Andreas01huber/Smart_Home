@@ -279,3 +279,34 @@ describe('Kontenspeicher', () => {
     assert.equal('username' in (datei.auth as object), false);
   });
 });
+
+describe('Eigene Kontendatei (Docker)', () => {
+  it('übernimmt die Konten einmalig aus secrets.json und lässt diese unverändert', () => {
+    const secrets = neueDatei({ tuya: { accessId: 'abc' } });
+    const alt = Kontenspeicher.ladenOderNeu(secrets);
+    alt.anlegen({ username: 'Andreas', passwort: 'ein-langes-passwort', rolle: 'admin', angelegtVon: null });
+    const vorher = readFileSync(secrets, 'utf8');
+
+    const konten = join(secrets, '..', 'daten-konten.json');
+    const neu = Kontenspeicher.ladenFuerServer(konten, false, secrets);
+    assert.equal(neu?.anmelden('Andreas', 'ein-langes-passwort')?.username, 'Andreas');
+    assert.equal(neu?.sessionSecret, alt.sessionSecret);
+
+    // secrets.json bleibt, wie sie war — sie darf schreibgeschützt sein.
+    assert.equal(readFileSync(secrets, 'utf8'), vorher);
+    const datei = JSON.parse(readFileSync(konten, 'utf8')) as Record<string, unknown>;
+    assert.equal('tuya' in datei, false);
+    assert.ok('auth' in datei);
+  });
+
+  it('nimmt ab dann nur noch die eigene Datei', () => {
+    const secrets = neueDatei();
+    Kontenspeicher.ladenOderNeu(secrets).anlegen({ username: 'Alt', passwort: 'ein-langes-passwort', rolle: 'admin', angelegtVon: null });
+    const konten = join(secrets, '..', 'daten-konten.json');
+    const neu = Kontenspeicher.ladenOderNeu(konten, secrets);
+    neu.anlegen({ username: 'Neu', passwort: 'ein-langes-passwort', rolle: 'benutzer', angelegtVon: null });
+    const wieder = Kontenspeicher.ladenFuerServer(konten, false, secrets);
+    assert.deepEqual(wieder?.alle().map((b) => b.username), ['Alt', 'Neu']);
+    assert.equal(Kontenspeicher.laden(secrets)?.nachName('Neu'), null);
+  });
+});

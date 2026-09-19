@@ -14,6 +14,7 @@
 #       -v "$PWD/config.json:/app/config.json:ro" \
 #       -v "$PWD/secrets.json:/app/secrets.json:ro" \
 #       -v "$PWD/data:/app/data" \
+#       -e SMARTHOME_KONTEN=/app/data/konten.json \
 #       --restart unless-stopped smarthome
 
 FROM node:22-slim
@@ -63,10 +64,10 @@ USER node
 
 EXPOSE 4173
 
-# Prueft denselben Endpunkt, den auch das Dashboard nutzt. Kein curl noetig -
-# Node 22 bringt fetch mit, und das ist ohnehin schon im Image.
+# /health braucht keine Anmeldung und liefert keine Messwerte - /api/snapshot
+# waere bei aktiver Anmeldung nie "ok". Kein curl noetig, Node 22 hat fetch.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:4173/api/snapshot').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:4173/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # Exec-Form ohne npm dazwischen: So kommt das SIGTERM beim Beenden wirklich beim
 # Server an, und der schreibt Historie und Ladeprotokoll noch sauber weg

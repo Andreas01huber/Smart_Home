@@ -1705,3 +1705,18 @@ main {
   .ev-art span { display: none; }
   .ev-art b { font-size: 0.86rem; }
 }
+
+/* Hinweis auf eine neue Fassung (app.js, beobachteUpdates). Unten, über der
+   Tab-Leiste, und ohne etwas zu verdecken, das gerade bedient wird. */
+.update-hinweis {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 1rem; z-index: 60;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .6rem .9rem;
+  width: min(34rem, calc(100% - 2rem)); padding: .75rem 1rem;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--elev-2);
+}
+.update-hinweis span { flex: 1 1 12rem; }
+.update-spaeter { min-height: 44px; padding: 0 .9rem; background: none; border: 0; color: var(--text-dim); font: inherit; cursor: pointer; text-decoration: underline; }
+@media (max-width: 760px) {
+  .update-hinweis { bottom: calc(4.5rem + env(safe-area-inset-bottom)); }
+}

@@ -28,19 +28,28 @@ services:
     environment:
       # Muss zur Anlage passen: Der Tageswechsel der Historie haengt daran.
       TZ: Europe/Berlin
+      # Konten und Sitzungsgeheimnis liegen im beschreibbaren Datenordner,
+      # nicht in der schreibgeschuetzten secrets.json. Beim ersten Start wird
+      # ein vorhandener Abschnitt "auth" aus secrets.json einmalig dorthin
+      # uebernommen; secrets.json selbst bleibt unveraendert.
+      # Erstes Konto anlegen:
+      #   docker compose run --rm smarthome ./node_modules/.bin/tsx tools/passwort.ts
+      SMARTHOME_KONTEN: /app/data/konten.json
 
     volumes:
       # IP-Adressen, Port und Tarife. Schreibgeschuetzt eingehaengt - geaendert
       # wird die Datei auf dem Host, danach "docker compose restart".
       - ./config.json:/app/config.json:ro
 
-      # Zugangsdaten der Wallbox-Cloud. Liegt bewusst ausserhalb des Images.
-      # Fehlt die Datei, laeuft alles Uebrige weiter, nur die Wallbox bleibt leer
-      # - dann diese Zeile auskommentieren.
+      # Zugangsdaten der Wallbox-Cloud. Liegt bewusst ausserhalb des Images und
+      # ist schreibgeschuetzt: Der Container soll sie nicht aendern koennen.
+      # Ohne Wallbox-Cloud darf die Datei fehlen - dann diese Zeile
+      # auskommentieren. Die Anmeldung ist davon unabhaengig Pflicht.
       - ./secrets.json:/app/secrets.json:ro
 
-      # Historie, Tageswerte und Ladeprotokoll. Das Einzige, was der Container
-      # schreibt, und das Einzige, was ein Update ueberleben muss.
+      # Historie, Tageswerte, Ladeprotokoll, Lademodus, Konten und Sitzungen.
+      # Das Einzige, was der Container schreibt, und das Einzige, was ein
+      # Update ueberleben muss.
       - ./data:/app/data
 
     healthcheck:
@@ -48,7 +57,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:4173/api/snapshot').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - "fetch('http://127.0.0.1:4173/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 5s
       # Der erste Start dauert laenger: tsx uebersetzt den Code einmal.
