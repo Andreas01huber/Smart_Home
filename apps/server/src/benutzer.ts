@@ -218,9 +218,10 @@ function leseDatei(pfad: string): Record<string, unknown> {
   if (!existsSync(pfad)) return {};
   try {
     const roh: unknown = JSON.parse(readFileSync(pfad, 'utf8'));
-    return typeof roh === 'object' && roh !== null ? (roh as Record<string, unknown>) : {};
+    if (typeof roh !== 'object' || roh === null || Array.isArray(roh)) throw new Error();
+    return roh as Record<string, unknown>;
   } catch {
-    return {};
+    throw new Error('secrets.json ist unlesbar oder ungültig. Anmeldung bleibt gesperrt.');
   }
 }
 
@@ -246,7 +247,10 @@ export class Kontenspeicher {
   static laden(pfad: string): Kontenspeicher | null {
     const datei = leseDatei(pfad);
     const daten = leseAuth(datei['auth']);
-    if (daten === null) return null;
+    if (daten === null) {
+      if ('auth' in datei) throw new Error('Ungültige oder leere Anmeldekonfiguration in secrets.json.');
+      return null;
+    }
 
     const speicher = new Kontenspeicher(pfad, daten);
     // Kam der Stand aus der alten Form oder musste etwas ergänzt werden, gleich
@@ -255,6 +259,15 @@ export class Kontenspeicher {
     // Neustart wieder ein anderes, was alle Geräte abmelden würde.
     if (JSON.stringify(datei['auth']) !== JSON.stringify(speicher.alsJson())) {
       speicher.speichern();
+    }
+    return speicher;
+  }
+
+  /** Ohne Konten nur starten, wenn der offene Betrieb ausdrücklich konfiguriert ist. */
+  static ladenFuerServer(pfad: string, ohneAnmeldungErlaubt = false): Kontenspeicher | null {
+    const speicher = Kontenspeicher.laden(pfad);
+    if (speicher === null && !ohneAnmeldungErlaubt) {
+      throw new Error('Keine Anmeldung eingerichtet. Zuerst npm run passwort ausführen.');
     }
     return speicher;
   }

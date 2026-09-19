@@ -98,6 +98,21 @@ describe('Lesen aus secrets.json', () => {
 });
 
 describe('Kontenspeicher', () => {
+  it('startet ohne Konten nur bei ausdrücklich erlaubtem offenem Betrieb', () => {
+    for (const pfad of [neueDatei(), neueDatei({ tuya: {} })]) {
+      assert.throws(() => Kontenspeicher.ladenFuerServer(pfad), /Keine Anmeldung/);
+      assert.equal(Kontenspeicher.ladenFuerServer(pfad, true), null);
+    }
+  });
+
+  it('öffnet bei beschädigten oder leeren Anmeldedaten keinen Zugriff', () => {
+    for (const inhalt of ['{ kaputt', 'null', '[]', '{"auth":{}}', '{"auth":{"benutzer":[]}}']) {
+      const pfad = neueDatei();
+      writeFileSync(pfad, inhalt);
+      assert.throws(() => Kontenspeicher.ladenFuerServer(pfad, true));
+      assert.equal(readFileSync(pfad, 'utf8'), inhalt);
+    }
+  });
   it('legt an, findet wieder und meldet an', () => {
     const pfad = neueDatei();
     const speicher = Kontenspeicher.ladenOderNeu(pfad);

@@ -93,6 +93,13 @@ function messwerte(lage: {
 }
 
 describe('Umrechnung Leistung zu Ladestrom', () => {
+  it('plant bei 230 V je Phase keinen dreiphasigen Ladestrom oberhalb des Überschusses', () => {
+    const m = { ...messwerte({ pv: 8000, hausOhneAuto: 500, ev: 4140 }),
+      evStromA: 6, evSpannungV: 230, evPhasen: 3 as const };
+    const ziel = berechneLadeziel(m, parameter());
+    assert.ok(ziel.zielA > 0 && ziel.zielA <= 10, `${ziel.zielA} A`);
+    assert.ok(ziel.zielA * 690 <= 7500);
+  });
   it('rundet immer ab, niemals auf', () => {
     // 7000 W wären 10,1 A. Aufgerundet auf 11 A wären es 7620 W - die fehlenden
     // 620 W kämen aus dem Netz.

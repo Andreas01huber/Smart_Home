@@ -42,6 +42,7 @@ export interface SourceMapping {
 }
 
 export interface ResolutionOptions {
+  readonly expectedBatterySources?: readonly ConnectorId[];
   readonly disagreementThreshold?: number;
   readonly disagreementFloorW?: number;
 }
@@ -118,12 +119,17 @@ export function resolveSnapshot(
 
   // --- Batterien: physisch getrennt, zusammenführen --------------------
   const batteries = readings.flatMap((reading) => reading.batteries);
+  const missingBatteries = (options.expectedBatterySources ?? [])
+    .filter((id) => !batteries.some((b) => b.provenance.connectorId === id));
+  unavailable.push(...missingBatteries.map((id) => `battery:${id}`));
 
   // --- Hausverbrauch: gemessen oder berechnet --------------------------
   let house: PowerMetric;
   let derivedConsumptionNegative = false;
   if (mapping.houseConsumptionW === 'derived') {
-    const derived = deriveConsumption(solar, gridImport, gridExport, batteries);
+    const derived = missingBatteries.length > 0
+      ? { metric: MISSING_METRIC, wasNegative: false }
+      : deriveConsumption(solar, gridImport, gridExport, batteries);
     house = derived.metric;
     derivedConsumptionNegative = derived.wasNegative;
     if (house.valueW === null) unavailable.push('houseConsumptionW');
@@ -166,7 +172,7 @@ function pickMetric(
 /**
  * Summiert eine Größe über mehrere Connectoren. Jeder Connector darf einen
  * physisch eigenen Beitrag liefern (z. B. je ein Wechselrichter). Fehlende
- * Beiträge werden übersprungen; fehlen alle, ist das Ergebnis null.
+ * Beiträge machen die Gesamtsumme unbekannt; eine Teilsumme wäre irreführend.
  */
 function sumMetric(
   byConnector: Map<ConnectorId, ConnectorReading>,
@@ -180,7 +186,7 @@ function sumMetric(
 
   for (const connectorId of connectorIds) {
     const metric = byConnector.get(connectorId)?.[key] ?? null;
-    if (metric === null || metric.valueW === null) continue;
+    if (metric === null || metric.valueW === null || !Number.isFinite(metric.valueW)) return MISSING_METRIC;
     sum += metric.valueW;
     contributors++;
     quality = worseQuality(quality, metric.provenance.quality);
@@ -230,6 +236,9 @@ function deriveConsumption(
     gridExport.provenance.quality,
   );
   for (const battery of batteries) {
+    if (battery.chargeW === null || battery.dischargeW === null) {
+      return { metric: MISSING_METRIC, wasNegative: false };
+    }
     charge += battery.chargeW ?? 0;
     discharge += battery.dischargeW ?? 0;
     quality = worseQuality(quality, battery.provenance.quality);

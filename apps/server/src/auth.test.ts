@@ -77,6 +77,8 @@ describe('Keks', () => {
 describe('Ziel nach der Anmeldung', () => {
   it('lässt eigene Pfade durch', () => {
     assert.equal(sicheresZiel('/verlauf'), '/verlauf');
+    assert.equal(sicheresZiel('/\\example.org'), '/');
+    assert.equal(sicheresZiel('/\n/example.org'), '/');
     assert.equal(sicheresZiel('/kosten?monat=8'), '/kosten?monat=8');
   });
 

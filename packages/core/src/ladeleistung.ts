@@ -54,6 +54,16 @@ export interface Ladeanschluss {
 /** Dreiphasig an 400 V — der übliche Anschluss einer 11-kW-Wallbox. */
 export const LADEANSCHLUSS_STANDARD: Ladeanschluss = { phasen: 3, spannungV: 400 };
 
+/** phase_a misst gegen N; Ladeanschluss erwartet dreiphasig die Spannung zwischen Phasen. */
+export function anschlussAusPhasenmessung(
+  spannungGegenN: number | null | undefined,
+  phasen: 1 | 3 | null | undefined,
+): Ladeanschluss | null {
+  if (spannungGegenN == null || !Number.isFinite(spannungGegenN) || spannungGegenN <= 0) return null;
+  if (phasen !== 1 && phasen !== 3) return null;
+  return { phasen, spannungV: spannungGegenN * (phasen === 3 ? Math.sqrt(3) : 1) };
+}
+
 /**
  * Leistungsfaktor.
  *

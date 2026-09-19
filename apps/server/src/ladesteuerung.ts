@@ -34,6 +34,7 @@
 
 import {
   anschlussName,
+  anschlussAusPhasenmessung,
   berechneLadeziel,
   beruhige,
   bewaehrtW,
@@ -228,7 +229,11 @@ export class Ladesteuerung {
   private letzterFehler: string | null = null;
   private fehlerzahl = 0;
   private gesperrtBis = 0;
+  /** Ein kleinerer Sollwert darf eine Sperre nach einem höheren Fehlversuch überholen. */
+  private fehlgeschlagenA: number | null = null;
   private laeuft = false;
+  private erneutRegeln = false;
+  private warAngesteckt: boolean | null = null;
   private grenzen = { minA: 6, maxA: 16, schrittA: 1 };
   private letzterZustand: Ladezustand | null = null;
   private naechsteRegelungAt = 0;
@@ -329,11 +334,17 @@ export class Ladesteuerung {
    * der Dienst ohne laufenden Messtakt getaktet wird.
    */
   private merkeNachfrage(leistungW: number, angesteckt: boolean | null): void {
+    if (angesteckt === false && this.warAngesteckt === true && this.laeuft) this.erneutRegeln = true;
+    if (angesteckt !== null) this.warAngesteckt = angesteckt;
     if (leistungW > LAEDT_AB_W) {
       this.angeboteOhneLadung = 0;
       this.fordertNicht = false;
     }
     if (angesteckt === false) {
+      if (this.betriebsart !== 'intelligent') {
+        this.setzeBetriebsartStill('intelligent', 0);
+        if (this.laeuft) this.erneutRegeln = true;
+      }
       this.angeboteOhneLadung = 0;
       this.fordertNicht = false;
       this.naechsterVersuchAt = 0;
@@ -511,6 +522,7 @@ export class Ladesteuerung {
         : this.manuellA;
     if (this.betriebsart === art && gewuenschtA === this.manuellA) return;
     this.setzeBetriebsartStill(art, gewuenschtA);
+    if (this.laeuft) this.erneutRegeln = true;
     // Nicht bis zum nächsten Zyklus warten: Wer den Knopf drückt, will es sehen.
     void this.zyklus();
   }
@@ -544,6 +556,7 @@ export class Ladesteuerung {
   setzeGestoppt(an: boolean): void {
     if (this.gestoppt === an) return;
     this.gestoppt = an;
+    if (this.laeuft) this.erneutRegeln = true;
     console.log(
       an
         ? '[Laderegelung] Laden von Hand beendet.'
@@ -630,6 +643,7 @@ export class Ladesteuerung {
     anschluss: Anschlussinfo;
     fordertNicht: boolean;
     gestoppt: boolean;
+    letzterFehler: string | null;
     haushaltMaxA: number;
   } {
     const e = this.letzte;
@@ -650,6 +664,7 @@ export class Ladesteuerung {
       anschluss: this.anschlussInfo(),
       fordertNicht: this.fordertNicht,
       gestoppt: this.gestoppt,
+      letzterFehler: this.letzterFehler,
       haushaltMaxA: this.config.ueberschuss.haushaltMaxA,
     };
   }
@@ -694,14 +709,19 @@ export class Ladesteuerung {
    * ohne den ganzen Messwertsatz aufzubauen.
    */
   private speicherzustand(state: EngineState): SpeicherZustand[] {
-    return state.resolution.snapshot.batteries.map((b) => ({
-      id: b.deviceId,
-      name: b.displayName,
-      socPercent: b.socPercent,
-      ladenW: b.chargeW,
-      entladenW: b.dischargeW,
-      bewaehrtEntladenW: bewaehrtW(this.gedaechtnis, b.deviceId),
-    }));
+    return state.resolution.snapshot.batteries.map((b) => {
+      const frisch = b.provenance.quality === 'live'
+        && b.provenance.ageMs + Math.max(0, Date.now() - state.polledAt.getTime())
+          <= this.config.ueberschuss.maxMessalterSekunden * 1000;
+      return {
+        id: b.deviceId,
+        name: b.displayName,
+        socPercent: frisch ? b.socPercent : null,
+        ladenW: frisch ? b.chargeW : null,
+        entladenW: frisch ? b.dischargeW : null,
+        bewaehrtEntladenW: bewaehrtW(this.gedaechtnis, b.deviceId),
+      };
+    });
   }
 
   /**
@@ -729,12 +749,17 @@ export class Ladesteuerung {
     // also im ganz normalen Ruhezustand. Echte Nichterreichbarkeit prüft
     // ohnehin `wallboxErreichbar` separat.
     const wallboxLaeuft = (ev?.chargePowerW ?? 0) > LAEDT_AB_W;
-    const alter = [
-      snap.gridImportW.provenance.ageMs,
-      snap.solarProductionW.provenance.ageMs,
-      wallboxLaeuft ? (ev?.provenance.ageMs ?? 0) : 0,
-    ].filter((a) => Number.isFinite(a));
-    const messalterMs = alter.length > 0 ? Math.max(...alter) : Number.POSITIVE_INFINITY;
+    const benoetigt = [
+      snap.gridImportW.provenance, snap.gridExportW.provenance,
+      snap.solarProductionW.provenance, snap.houseConsumptionW.provenance,
+      ...snap.batteries.map((b) => b.provenance),
+      ...(wallboxLaeuft && ev ? [ev.provenance] : []),
+    ];
+    const seitPollMs = Math.max(0, Date.now() - state.polledAt.getTime());
+    const unbrauchbar = state.resolution.unavailable.length > 0
+      || benoetigt.some((p) => p.quality !== 'live' || !Number.isFinite(p.ageMs));
+    const messalterMs = unbrauchbar ? Number.POSITIVE_INFINITY
+      : Math.max(...benoetigt.map((p) => p.ageMs)) + seitPollMs;
 
     return {
       pvW: snap.solarProductionW.valueW,
@@ -817,18 +842,15 @@ export class Ladesteuerung {
       // Zurückrechnen. Fehlt der Datenpunkt, greift die alte Herleitung aus
       // Leistung und eingestelltem Strom.
       const erkannt =
-        messwerte.evSpannungV != null
-        && messwerte.evSpannungV > 0
-        && (messwerte.evPhasen === 1 || messwerte.evPhasen === 3)
-          ? { phasen: messwerte.evPhasen, spannungV: messwerte.evSpannungV }
-          : laedtWirklich
+        anschlussAusPhasenmessung(messwerte.evSpannungV, messwerte.evPhasen)
+          ?? (laedtWirklich
             ? gemessenerAnschluss(
                 messwerte.evLeistungW,
                 messwerte.evStromA,
                 this.anschluss,
                 this.hoechsteLadeleistungW,
               )
-            : this.anschluss;
+            : this.anschluss);
       if (erkannt.phasen !== this.anschluss.phasen) {
         if (this.datenverzeichnis !== null) {
           merkeDose(this.datenverzeichnis, {
@@ -956,7 +978,7 @@ export class Ladesteuerung {
           zustand: 'gestoppt',
           zielA: 0,
           zielLeistungW: 0,
-          grund: 'Laden von Hand beendet. Zum Weiterladen "Laden fortsetzen" drücken.',
+          grund: 'Ladestopp angefordert. Zum Weiterladen "Laden fortsetzen" drücken.',
         };
       }
 
@@ -999,7 +1021,7 @@ export class Ladesteuerung {
       // Schieberegler bewegt, will die Änderung sehen und nicht neunzig
       // Sekunden Beobachtungszeit abwarten; nach einer Pause wären es sogar
       // zwei Minuten.
-      const ergebnis = vonHand
+      const ergebnis = vonHand || this.gestoppt || entscheidung.zustand === 'pausiert-messwerte'
         ? sofort(entscheidung.zielA, this.historie, Date.now())
         : beruhige({
             wunschA: entscheidung.zielA,
@@ -1035,7 +1057,8 @@ export class Ladesteuerung {
       }
 
       // Nach einem Tuya-Fehler wird nicht sofort weitergehämmert.
-      if (Date.now() < this.gesperrtBis) {
+      const dringlicher = this.fehlgeschlagenA !== null && ergebnis.stromA < this.fehlgeschlagenA;
+      if (Date.now() < this.gesperrtBis && !dringlicher) {
         this.notiere(
           messwerte,
           entscheidung,
@@ -1058,6 +1081,12 @@ export class Ladesteuerung {
           gesetzt = 0;
         } else {
           gesetzt = await this.wallbox.setzeLadestrom(ergebnis.stromA);
+          // Ein Stopp/Moduswechsel/Abstecken während der Cloud-Anfrage darf
+          // nicht anschließend noch eine veraltete Einschaltfreigabe auslösen.
+          if (this.erneutRegeln) {
+            this.historie = { ...this.historie, gesetztA: UNBEKANNT_A };
+            return;
+          }
           // Nach einer Pause muss erst wieder eingeschaltet werden. Der Strom
           // zuerst, damit das Fahrzeug nicht kurz mit dem alten Wert anläuft.
           if (this.ladenAn !== true) {
@@ -1073,6 +1102,7 @@ export class Ladesteuerung {
         this.letzterFehler = null;
         this.fehlerzahl = 0;
         this.gesperrtBis = 0;
+        this.fehlgeschlagenA = null;
         this.notiere(
           messwerte,
           entscheidung,
@@ -1085,6 +1115,8 @@ export class Ladesteuerung {
         // Historie NICHT fortschreiben: Der Sollwert gilt erst als gesetzt,
         // wenn die Wallbox ihn angenommen hat. Sonst glaubt die Regelung an
         // einen Wert, den das Gerät nie gesehen hat.
+        if (dringlicher) this.fehlerzahl = 0;
+        this.fehlgeschlagenA = ergebnis.stromA;
         this.fehlerzahl += 1;
         this.letzterFehler = error instanceof Error ? error.message : String(error);
         // Ein misslungener Stopp wird schneller wiederholt als eine misslungene
@@ -1108,6 +1140,10 @@ export class Ladesteuerung {
       );
     } finally {
       this.laeuft = false;
+      if (this.erneutRegeln) {
+        this.erneutRegeln = false;
+        await this.zyklus();
+      }
     }
   }
 

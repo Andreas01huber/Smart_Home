@@ -19,6 +19,13 @@ function ordner(): string {
 }
 
 describe('Dosengedächtnis', () => {
+  it('verwirft den alten dreiphasig gespeicherten 230-V-Wert', () => {
+    const dir = ordner();
+    merkeDose(dir, { phasen: 3, spannungV: 230, erkanntAm: '' });
+    assert.equal(ladeDose(dir), null);
+    merkeDose(dir, { phasen: 3, spannungV: 398.4, erkanntAm: '' });
+    assert.equal(ladeDose(dir)?.spannungV, 398.4);
+  });
   it('schreibt und liest die erkannte Dose', () => {
     const dir = ordner();
     merkeDose(dir, { phasen: 1, spannungV: 231.4, erkanntAm: '2026-09-08T21:00:00.000Z' });

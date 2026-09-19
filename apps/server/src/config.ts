@@ -162,6 +162,8 @@ const UEBERSCHUSS_STANDARD: UeberschussConfig = {
 };
 
 export interface AppConfig {
+  /** Bewusster Betrieb ohne Anmeldung; standardmäßig nicht erlaubt. */
+  readonly allowUnauthenticatedAccess?: boolean;
   readonly port: number;
   /**
    * Netzwerk-Interface, auf dem der Server lauscht.
@@ -261,6 +263,7 @@ export function loadConfig(path = resolve(process.cwd(), 'config.json')): AppCon
 
   return {
     secretsPfad,
+    allowUnauthenticatedAccess: record['allowUnauthenticatedAccess'] === true,
     ueberschuss,
     port: typeof record['port'] === 'number' ? record['port'] : DEFAULTS.port,
     host: typeof record['host'] === 'string' ? record['host'] : DEFAULTS.host,

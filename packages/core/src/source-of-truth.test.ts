@@ -45,6 +45,23 @@ const MAPPING: SourceMapping = {
 };
 
 describe('resolveSnapshot — Doppelzählung ausschließen (4L)', () => {
+  test('gibt eine fehlende PV-Quelle nicht als vollständige Summe aus', () => {
+    const result = resolveSnapshot([
+      reading('fronius-local', { solar: 4000, import: 0, export: 1000 }),
+      reading('zweite-pv', { solar: null }),
+    ], { ...MAPPING, solarProductionW: ['fronius-local', 'zweite-pv'], houseConsumptionW: 'derived' });
+    assert.equal(result.snapshot.solarProductionW.valueW, null);
+    assert.equal(result.snapshot.houseConsumptionW.valueW, null);
+    assert.ok(result.unavailable.includes('solarProductionW'));
+  });
+
+  test('berechnet keinen Hausverbrauch, wenn ein erwarteter Speicher fehlt', () => {
+    const result = resolveSnapshot([
+      reading('fronius-local', { solar: 4000, import: 0, export: 1000 }),
+    ], { ...MAPPING, houseConsumptionW: 'derived' }, { expectedBatterySources: ['victron-modbus'] });
+    assert.equal(result.snapshot.houseConsumptionW.valueW, null);
+    assert.ok(result.unavailable.includes('battery:victron-modbus'));
+  });
   test('addiert überlappende Messungen niemals', () => {
     const result = resolveSnapshot(
       [

@@ -19,6 +19,8 @@ export interface EngineState {
 export class EnergyEngine {
   private state: EngineState | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private pollLaeuft = false;
+  private readonly bekannteSpeicherquellen = new Set<string>();
   private readonly listeners = new Set<(state: EngineState) => void>();
 
   constructor(
@@ -47,6 +49,8 @@ export class EnergyEngine {
   }
 
   private async poll(): Promise<void> {
+    if (this.pollLaeuft) return;
+    this.pollLaeuft = true;
     const startedAt = Date.now();
 
     try {
@@ -70,7 +74,22 @@ export class EnergyEngine {
         );
       });
 
-      const resolution = resolveSnapshot(readings, this.config.sourceMapping);
+      for (const reading of readings) {
+        for (const battery of reading.batteries) this.bekannteSpeicherquellen.add(battery.provenance.connectorId);
+      }
+      const quellen = [
+        ['fronius-local', this.config.sources.fronius],
+        ['fronius-gen24', this.config.sources.froniusGen24],
+        ['victron-modbus', this.config.sources.victron],
+      ] as const;
+      for (const [id, quelle] of quellen) {
+        if (quelle?.enabled && (quelle.batteryDisplayName || (quelle.usableCapacityWh ?? 0) > 0)) {
+          this.bekannteSpeicherquellen.add(id);
+        }
+      }
+      const resolution = resolveSnapshot(readings, this.config.sourceMapping, {
+        expectedBatterySources: [...this.bekannteSpeicherquellen],
+      });
 
       this.state = {
         resolution,
@@ -103,6 +122,8 @@ export class EnergyEngine {
         'Messzyklus übersprungen (unerwarteter Fehler):',
         error instanceof Error ? error.message : error,
       );
+    } finally {
+      this.pollLaeuft = false;
     }
   }
 }

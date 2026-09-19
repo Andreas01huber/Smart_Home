@@ -14,6 +14,7 @@ import {
   formatLadestrom, formatLadeleistung, dosenText, umsteckText,
 } from './format.js';
 import { buildScene, fitScene, createSkyGate, sceneViewBox, pickSceneLayout } from './scene.js';
+import { bindeLadestromUebernahme, sendeLadebefehl } from './ev-bedienung.js';
 
 // ── Abgelaufene Sitzung ───────────────────────────────────────────────
 /**
@@ -1701,6 +1702,8 @@ let evSchieberA = null;
  * beantworten.
  */
 let evNachfrage = false;
+let evBefehlLaeuft = false;
+let evBefehlFehler = '';
 let evStats = null;         // Antwort von /api/ev/stats
 let evStatsRange = 'month'; // day | week | month | year | total
 let evOpenSessionId = null; // aufgeklappter Ladevorgang in der Liste
@@ -1823,7 +1826,9 @@ function regelKopfMarkup(ev) {
   // Das kommt vor: gegen Ende eines Ladevorgangs, bei Abfahrtszeit im Auto,
   // oder wenn das Fahrzeug selbst eine Pause macht.
   const fordertNicht = laedt && ev.state === 'connected' && (ev.powerW ?? 0) < 100;
-  const titel = fordertNicht
+  const titel = r.gestoppt
+    ? (r.gesetztA === 0 && !r.letzterFehler ? 'Ladestopp gesendet' : 'Stopp angefordert')
+    : fordertNicht
     ? 'Freigegeben — Fahrzeug lädt gerade nicht'
     : laedt && art === 'manuell'
       ? 'Lädt mit festem Ladestrom'
@@ -1943,7 +1948,7 @@ function betriebsartMarkup(ev) {
       <div class="ev-arten" role="group" aria-label="Betriebsart">${knoepfe}</div>
       ${nachfrage}
       ${regler}
-      <p class="ev-betrieb-text">${esc(gestoppt ? 'Das Laden ist von Hand beendet. Die eingestellte Betriebsart gilt wieder, sobald du fortsetzt.' : erklaerung)}</p>
+      <p class="ev-betrieb-text">${esc(gestoppt ? 'Ein Ladestopp ist angefordert. Die eingestellte Betriebsart gilt wieder, sobald du fortsetzt.' : erklaerung)}</p>
       ${dosenHinweis(ev)}
       ${umsteckHinweis(ev)}
       ${beendenMarkup(gestoppt)}
@@ -2353,6 +2358,8 @@ function renderEvDetail() {
   const currentOrLast = evSessions?.current ?? (evSessions?.sessions ?? [])[0] ?? null;
   body.innerHTML =
     evLiveMarkup(ev) +
+    (evBefehlFehler ? `<p class="notice" role="alert">${esc(evBefehlFehler)}</p>` : '') +
+    (evBefehlLaeuft ? '<p role="status">Befehl wird übermittelt …</p>' : '') +
     (currentOrLast
       ? sessionMarkup(currentOrLast, evSessions?.current ? 'Laufender Ladevorgang' : 'Letzter Ladevorgang')
       : '') +
@@ -2441,9 +2448,8 @@ function renderEvDetail() {
       });
     });
     // Erst beim Loslassen wird gestellt.
-    schieber.addEventListener('change', () => {
-      void sendeBetriebsart('manuell', Number(schieber.value));
-    });
+    bindeLadestromUebernahme(schieber, () => evNachfrage,
+      (ampere) => sendeBetriebsart('manuell', ampere));
   }
 
   // Zeitraum-Umschalter
@@ -2461,6 +2467,10 @@ function renderEvDetail() {
       renderEvDetail();
     });
   });
+  body.querySelectorAll('.ev-art, #ev-schieber, #ev-stopp, #ev-bestaetigen').forEach((x) => {
+    x.disabled = evBefehlLaeuft;
+  });
+  if (wisch) wisch.setAttribute('aria-disabled', String(evBefehlLaeuft));
 }
 
 async function loadEvSessions() {
@@ -2565,47 +2575,35 @@ function verdrahteWisch(el) {
   });
 }
 
-async function sendeUndZeige(pfad, koerper, sofort) {
-  // Zuerst die Anzeige umstellen, dann erst fragen. Die Antwort des Servers
-  // braucht ein paar hundert Millisekunden, und in dieser Zeit soll der Knopf
-  // nicht aussehen, als haette man ihn nicht getroffen. Widerspricht der Server
-  // spaeter, gewinnt seine Antwort — sie wird unten drueber geschrieben.
-  if (sofort && lastLive?.ev?.regelung) {
-    lastLive.ev.regelung = { ...lastLive.ev.regelung, ...sofort };
-    renderEvDetail();
-  }
-  const bedienung = document.querySelectorAll('.ev-art, #ev-schieber, #ev-stopp');
-  bedienung.forEach((x) => { x.disabled = true; });
+async function sendeUndZeige(pfad, koerper) {
+  if (evBefehlLaeuft) return;
+  evBefehlLaeuft = true;
+  evBefehlFehler = '';
+  renderEvDetail();
   try {
-    const antwort = await fetch(pfad, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(koerper),
-    });
-    const kurz = await antwort.json();
+    const kurz = await sendeLadebefehl(pfad, koerper);
     if (kurz && typeof kurz === 'object' && lastLive?.ev) {
       lastLive.ev.regelung = kurz;
       evRegelung = { ...(evRegelung ?? {}), ...kurz };
     }
-    renderEvDetail();
     // Das Protokoll im Hintergrund nachziehen, ohne die Anzeige aufzuhalten.
     void loadEvRegelung();
   } catch (err) {
     console.error(err);
-    bedienung.forEach((x) => { x.disabled = false; });
+    evBefehlFehler = err instanceof Error ? err.message : 'Befehl konnte nicht bestätigt werden.';
+  } finally {
+    evBefehlLaeuft = false;
+    renderEvDetail();
   }
 }
 
 function sendeBetriebsart(art, ampere) {
   const koerper = ampere === null || ampere === undefined ? { art } : { art, ampere };
-  return sendeUndZeige('/api/ev/betriebsart', koerper, {
-    betriebsart: art,
-    ...(typeof ampere === 'number' ? { manuellA: ampere } : {}),
-  });
+  return sendeUndZeige('/api/ev/betriebsart', koerper);
 }
 
 function sendeStopp(an) {
-  return sendeUndZeige('/api/ev/stopp', { an }, { gestoppt: an });
+  return sendeUndZeige('/api/ev/stopp', { an });
 }
 
 async function loadEvRegelung() {

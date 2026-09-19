@@ -61,6 +61,7 @@
 
 import {
   gemessenerAnschluss,
+  anschlussAusPhasenmessung,
   ladeleistungAusStromW,
   type Ladeanschluss,
 } from './ladeleistung.ts';
@@ -414,12 +415,7 @@ export function berechneLadeziel(
   // Die Eichung weiter unten prüft dabei mit: 10 084 W bei 6 A wären 970 V, das
   // liegt weit ausserhalb jeder Netzspannung. Solche Paare fallen durch, und es
   // bleibt bei der Umrechnung mit der Nennspannung.
-  const gemessen =
-    typeof messwerte.evSpannungV === 'number'
-    && messwerte.evSpannungV > 0
-    && (messwerte.evPhasen === 1 || messwerte.evPhasen === 3)
-      ? { phasen: messwerte.evPhasen, spannungV: messwerte.evSpannungV }
-      : null;
+  const gemessen = anschlussAusPhasenmessung(messwerte.evSpannungV, messwerte.evPhasen);
   const anschluss =
     gemessen ?? gemessenerAnschluss(gemeldetesAuto, messwerte.evStromA, parameter.anschluss);
   // Nur wenn wirklich ein Ladestrom eingestellt ist. Steht dort 0 oder nichts,
@@ -474,6 +470,9 @@ export function berechneLadeziel(
   const einspeisung = zahl(messwerte.netzeinspeisungW);
   if (netzbezug === null || einspeisung === null || messwerte.evAngesteckt === null) {
     return leer('pausiert-messwerte', 'Netzzähler liefert keine Werte — Laden pausiert.');
+  }
+  if (!Number.isFinite(messwerte.messalterMs)) {
+    return leer('pausiert-messwerte', 'Messwerte fehlen oder sind unzuverlässig — Laden pausiert.');
   }
   if (messwerte.messalterMs > parameter.maxMessalterMs) {
     const sekunden = Math.round(messwerte.messalterMs / 1000);

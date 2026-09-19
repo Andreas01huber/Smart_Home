@@ -11,9 +11,9 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { extname, join, normalize, resolve } from 'node:path';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import { networkInterfaces } from 'node:os';
 
 import {
@@ -45,7 +45,7 @@ import { Hausverbrauch, type HausAnteil } from './hausverbrauch.ts';
 import { EnergyAccumulator, localDate } from './history.ts';
 import { ChargeSessionLog } from './ev-log.ts';
 import { Ladesteuerung } from './ladesteuerung.ts';
-import { readBody } from './http-util.ts';
+import { readBody, mitHttpFehlergrenze } from './http-util.ts';
 
 const PUBLIC_DIR = resolve(import.meta.dirname, '..', 'public');
 
@@ -456,7 +456,7 @@ async function serveStatic(
   const requested = pathname === '/' ? '/index.html' : pathname;
   // Pfad-Traversal verhindern: normalisieren und auf PUBLIC_DIR einschränken.
   const candidate = join(PUBLIC_DIR, normalize(requested).replace(/^(\.\.[/\\])+/, ''));
-  if (!candidate.startsWith(PUBLIC_DIR) || !existsSync(candidate)) {
+  if (!candidate.startsWith(PUBLIC_DIR + sep) || !existsSync(candidate) || !(await stat(candidate)).isFile()) {
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
     response.end('Nicht gefunden');
     return;
@@ -546,6 +546,12 @@ function lanAddresses(): string[] {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  // Vor Messung, Persistenz und Ladebefehlen prüfen: Auth-Fehler dürfen keinen
+  // teilweise laufenden, ungeschützten Server hinterlassen.
+  const konten = Kontenspeicher.ladenFuerServer(config.secretsPfad, config.allowUnauthenticatedAccess);
+  const sitzungen = konten === null ? null : new Sitzungsspeicher(
+    resolve(process.cwd(), 'data', 'sitzungen.json'), konten.sessionSecret,
+  );
   const { connectors, wallbox } = buildConnectors(config);
 
   if (connectors.length === 0) {
@@ -619,23 +625,9 @@ async function main(): Promise<void> {
   // Sie muss sich Fehlversuche über Anfragen hinweg merken.
   const throttle = new LoginThrottle();
 
-  // Konten und angemeldete Geräte. `null` heisst: In secrets.json steht kein
-  // Konto, der Server läuft offen wie früher.
-  const konten = Kontenspeicher.laden(config.secretsPfad);
-  const sitzungen =
-    konten === null
-      ? null
-      : new Sitzungsspeicher(
-          resolve(process.cwd(), 'data', 'sitzungen.json'),
-          konten.sessionSecret,
-        );
+  const server = createServer(mitHttpFehlergrenze(async (request, response, url) => {
 
-  const server = createServer((request, response) => {
-    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
-
-    // Vor allem anderen. Ohne Anmeldedaten in secrets.json bleibt der Server
-    // offen wie bisher — für den reinen Heimnetzbetrieb gewollt, siehe Hinweis
-    // beim Start.
+    // Offener Betrieb ist nur nach ausdrücklicher Konfiguration möglich.
     let ich: Benutzer | null = null;
     let sitzungId: string | null = null;
     if (konten !== null && sitzungen !== null) {
@@ -895,8 +887,8 @@ async function main(): Promise<void> {
       }
     }
 
-    void serveStatic(url.pathname, response);
-  });
+    await serveStatic(url.pathname, response);
+  }));
 
   server.listen(config.port, config.host, () => {
     console.log('');
@@ -954,4 +946,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown);
 }
 
-void main();
+void main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : 'Serverstart fehlgeschlagen');
+  process.exitCode = 1;
+});

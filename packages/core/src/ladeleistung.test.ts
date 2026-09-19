@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 
 import {
   anschlussName,
+  anschlussAusPhasenmessung,
   gemessenerAnschluss,
   LADEANSCHLUSS_HAUSHALT,
   ladeleistungAusStromW,
@@ -22,6 +23,13 @@ import {
 const EINPHASIG: Ladeanschluss = { phasen: 1, spannungV: 230 };
 
 describe('Ladestrom zu Ladeleistung', () => {
+  it('übersetzt die Spannung einer Phase korrekt für ein- und dreiphasiges Laden', () => {
+    const drei = anschlussAusPhasenmessung(230, 3)!;
+    assert.ok(Math.abs(ladeleistungAusStromW(16, drei)! - 11040) < 0.01);
+    assert.equal(ladeleistungAusStromW(16, anschlussAusPhasenmessung(230, 1)!), 3680);
+    assert.equal(anschlussAusPhasenmessung(Infinity, 3), null);
+    assert.equal(anschlussAusPhasenmessung(230, null), null);
+  });
   it('trifft die beiden bekannten Punkte der Anlage', () => {
     const bei16 = ladeleistungAusStromW(16);
     const bei6 = ladeleistungAusStromW(6);

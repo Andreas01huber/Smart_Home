@@ -40,6 +40,7 @@ interface Befehl {
 
 class WallboxAttrappe {
   readonly befehle: Befehl[] = [];
+  readonly versuche: Befehl[] = [];
   fehlerBeimSenden: string | null = null;
 
   async ladestromGrenzen(): Promise<{ minA: number; maxA: number; schrittA: number }> {
@@ -51,12 +52,14 @@ class WallboxAttrappe {
   }
 
   async setzeLadestrom(ampere: number): Promise<number> {
+    this.versuche.push({ art: 'strom', wert: ampere });
     if (this.fehlerBeimSenden) throw new Error(this.fehlerBeimSenden);
     this.befehle.push({ art: 'strom', wert: ampere });
     return ampere;
   }
 
   async setzeLaden(an: boolean): Promise<void> {
+    this.versuche.push({ art: 'schalter', wert: an });
     if (this.fehlerBeimSenden) throw new Error(this.fehlerBeimSenden);
     this.befehle.push({ art: 'schalter', wert: an });
   }
@@ -149,6 +152,8 @@ class EngineAttrappe {
     laden?: number;
     schalterAn?: boolean | null;
     evAlterMs?: number;
+    spannungV?: number;
+    phasen?: 1 | 3;
     offline?: boolean;
   }): void {
     const entladen = lage.entladen ?? 0;
@@ -168,6 +173,8 @@ class EngineAttrappe {
         stromA: lage.stromA ?? null,
         schalterAn: lage.schalterAn ?? null,
         alterMs: lage.evAlterMs ?? 0,
+        spannungV: lage.spannungV ?? null,
+        phasen: lage.phasen ?? null,
         ...(lage.offline === true ? { offline: true } : {}),
       }),
     };
@@ -244,6 +251,107 @@ function aufbau(ueber: Partial<AppConfig['ueberschuss']> = {}): {
 
 /** So viele Freigaben ohne Ladung, bis die Regelung aufgibt (siehe Dienst). */
 const VERSUCHE = 3;
+
+describe('Regressionsschutz der Ladebefehle', () => {
+  it('nutzt 230 V Phasenspannung dreiphasig als rund 690 W pro Ampere', async () => {
+    const a = aufbau();
+    a.engine.setze({ pv: 8000, hausOhneAuto: 500, ev: 4140, stromA: 6, spannungV: 230, phasen: 3 });
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().anschluss.wattProAmpere, 690);
+    assert.ok(a.steuerung.zustand().zielA <= 10);
+    assert.ok(a.steuerung.zustand().zielA * 690 <= 7500);
+    assert.ok(a.wallbox.befehle.some((b) => b.art === 'strom' && Number(b.wert) <= 10));
+  });
+
+  it('stoppt von Hand ohne die 30 Sekunden Beobachtungszeit', async () => {
+    const a = aufbau({ pausierenNachSekunden: 30 });
+    a.engine.setze({ pv: 12000, hausOhneAuto: 500, ev: 11085, stromA: 16, schalterAn: true });
+    await a.zyklus();
+    a.wallbox.befehle.length = 0;
+    a.steuerung.setzeGestoppt(true);
+    await a.zyklus();
+    assert.deepEqual(a.wallbox.befehle, [{ art: 'schalter', wert: false }]);
+  });
+
+  it('merkt einen Stopp während einer laufenden Cloud-Anfrage vor', async () => {
+    const a = aufbau({ pausierenNachSekunden: 30 });
+    a.engine.setze({ pv: 12000, hausOhneAuto: 500, ev: 0, stromA: 6, schalterAn: false });
+    let freigeben!: (ampere: number) => void;
+    a.wallbox.setzeLadestrom = () => new Promise<number>((resolve) => { freigeben = resolve; });
+    const laeuft = a.zyklus();
+    a.steuerung.setzeGestoppt(true);
+    freigeben(16);
+    await laeuft;
+    assert.deepEqual(a.wallbox.befehle, [{ art: 'schalter', wert: false }]);
+    assert.equal(a.steuerung.zustand().gesetztA, 0);
+  });
+
+  it('beendet Handbetrieb auch beim kurzen Abstecken zwischen Regelzyklen', async () => {
+    const a = aufbau();
+    a.steuerung.start();
+    try {
+      a.steuerung.setzeBetriebsart('manuell', 16);
+      a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, angesteckt: false });
+      a.engine.melde();
+      assert.equal(a.steuerung.zustand().betriebsart, 'intelligent');
+      a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, angesteckt: true });
+      await a.zyklus();
+      assert.equal(a.steuerung.zustand().zielA, 0);
+      assert.equal(a.wallbox.befehle.some((b) => b.art === 'schalter' && b.wert === true), false);
+    } finally { a.steuerung.stop(); }
+  });
+
+  it('lässt einen Stopp eine Erhöhungs-Fehlersperre überholen, aber wiederholt Fehler nicht endlos', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const a = aufbau();
+    a.steuerung.setzeBetriebsart('manuell', 16);
+    a.wallbox.fehlerBeimSenden = 'Cloud fehlt';
+    for (let i = 0; i < 5; i++) {
+      t.mock.timers.tick(300001);
+      a.engine.setze({ pv: 12000, hausOhneAuto: 500, ev: 4140, stromA: 6 });
+      await a.zyklus();
+    }
+    assert.equal(a.wallbox.versuche.length, 5);
+    a.steuerung.setzeGestoppt(true);
+    await a.zyklus();
+    assert.deepEqual(a.wallbox.versuche.at(-1), { art: 'schalter', wert: false });
+    const anzahl = a.wallbox.versuche.length;
+    await a.zyklus();
+    assert.equal(a.wallbox.versuche.length, anzahl, 'Stopp-Fehler muss einen begrenzten Wiederholabstand behalten');
+    a.wallbox.fehlerBeimSenden = null;
+    t.mock.timers.tick(30001);
+    a.engine.setze({ pv: 12000, hausOhneAuto: 500, ev: 4140, stromA: 6 });
+    await a.zyklus();
+    assert.deepEqual(a.wallbox.befehle, [{ art: 'schalter', wert: false }]);
+  });
+
+  for (const art of ['speicher', 'netzExport', 'unbekanntesAlter', 'fehlendeQuelle', 'eingefrorenerPoll'] as const) {
+    it(`schaltet bei unsicheren Messwerten sofort ab: ${art}`, async () => {
+      const a = aufbau({ pausierenNachSekunden: 30 });
+      a.engine.setze({ pv: 12000, hausOhneAuto: 500, ev: 11085, stromA: 16 });
+      await a.zyklus();
+      a.wallbox.befehle.length = 0;
+      const s = a.engine.state!;
+      const snap = s.resolution.snapshot;
+      if (art === 'speicher') {
+        a.engine.state = { ...s, resolution: { ...s.resolution, snapshot: { ...snap,
+          batteries: snap.batteries.map((b) => ({ ...b, provenance: { ...b.provenance, quality: 'offline' } })),
+        } } };
+      } else if (art === 'fehlendeQuelle') {
+        a.engine.state = { ...s, resolution: { ...s.resolution, unavailable: ['battery:missing'] } };
+      } else if (art === 'eingefrorenerPoll') {
+        a.engine.state = { ...s, polledAt: new Date(Date.now() - 60000) };
+      } else {
+        a.engine.state = { ...s, resolution: { ...s.resolution, snapshot: { ...snap,
+          gridExportW: { ...snap.gridExportW, provenance: { ...prov, ageMs: art === 'netzExport' ? 60000 : Infinity } },
+        } } };
+      }
+      await a.zyklus();
+      assert.equal(a.steuerung.zustand().zustand, 'pausiert-messwerte');
+      assert.deepEqual(a.wallbox.befehle, [{ art: 'schalter', wert: false }]);
+    });
+  }
+});
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -397,6 +505,7 @@ describe('Fehler und Betriebsarten', () => {
     await zyklus();
 
     assert.equal(steuerung.zustand().letzterFehler, 'permission deny');
+    assert.equal(steuerung.kurz().letzterFehler, 'permission deny');
     // Der Sollwert gilt NICHT als gesetzt — sonst würde nie wieder versucht.
     assert.notEqual(steuerung.zustand().gesetztA, 0);
   });

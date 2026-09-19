@@ -73,6 +73,7 @@ export function verifyPassword(password: string, stored: string): boolean {
  */
 export function sicheresZiel(roh: string | undefined): string {
   if (!roh || !roh.startsWith('/') || roh.startsWith('//')) return '/';
+  if (/[\\\u0000-\u0020\u007f]/.test(roh)) return '/';
   if (roh.startsWith('/login')) return '/';
   return roh;
 }

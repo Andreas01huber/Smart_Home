@@ -9,6 +9,13 @@ fuehrt Schritt fuer Schritt durch die Einrichtung eines Dauer-Servers im Heimnet
 
 ## Starten
 
+Vor dem ersten Start mit `npm run passwort` ein Konto einrichten. Ohne gültige
+Anmeldung startet der Server standardmäßig nicht; beschädigte Zugangsdaten
+werden nicht mehr als Freigabe für einen offenen Betrieb behandelt.
+Ein bewusst offener lokaler Betrieb muss ausdrücklich über
+`allowUnauthenticatedAccess: true` in `config.json` gewählt werden. Diese Option
+umgeht keine beschädigte oder vorhandene ungültige Anmeldekonfiguration.
+
 Doppelklick auf **SmartHome** auf dem Desktop.
 Das Fenster startet den Server, der Browser öffnet sich nach wenigen Sekunden
 von selbst auf <http://localhost:4173>. Beenden mit `Strg+C` im Fenster.

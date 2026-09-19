@@ -31,6 +31,10 @@ export function ladeDose(datenverzeichnis: string): Dosengedaechtnis | null {
     const o = roh as Record<string, unknown>;
     if (o['phasen'] !== 1 && o['phasen'] !== 3) return null;
     if (typeof o['spannungV'] !== 'number' || !Number.isFinite(o['spannungV'])) return null;
+    // Alte Versionen konnten phase_a (ca. 230 V) als dreiphasigen Anschluss
+    // speichern. Diesen widersprüchlichen Wert nicht erneut zum Regeln nutzen.
+    const nennspannung = o['phasen'] === 3 ? 400 : 230;
+    if (Math.abs(o['spannungV'] - nennspannung) > nennspannung * 0.15) return null;
     return {
       phasen: o['phasen'],
       spannungV: o['spannungV'],
