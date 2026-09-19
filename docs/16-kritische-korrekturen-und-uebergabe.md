@@ -38,12 +38,22 @@ an `config.json`, `secrets.json` oder produktiven Laufzeitdaten.
 
 ## Für Claude offen
 
-1. Historie: nur gültige Messintervalle integrieren, Abdeckung und Lücken
+1. ~~Historie: nur gültige Messintervalle integrieren, Abdeckung und Lücken
    ausweisen; Liveanzeige und Ladeprotokoll auf dieselbe geprüfte Leistung
-   stellen. Unbekannte Wallboxleistung nicht als gemessene Null ausweisen.
-2. Persistenzdateien unabhängig laden und bei Beschädigung erhalten;
-   Backup/Wiederherstellung und dauerhaften Sitzungswiderruf bei Schreibfehlern
-   absichern.
+   stellen. Unbekannte Wallboxleistung nicht als gemessene Null ausweisen.~~
+   **Erledigt** (`4b47a33`): `bilanzwertW` lässt nur aktuell gemeldete Werte in
+   die Bilanz, jeder Tag weist `coveredSeconds`/`gapSeconds` aus (in `dayView`
+   und `collectorHealth`), und Anzeige, Tagesbilanz und Ladeprotokoll bekommen
+   dieselbe geprüfte Ladeleistung samt gemeinsamer Schwelle `LADEN_AB_W`.
+   Unbekannte Wallboxleistung erscheint als Strich.
+2. ~~Persistenzdateien unabhängig laden und bei Beschädigung erhalten;
+   dauerhaften Sitzungswiderruf bei Schreibfehlern absichern.~~
+   **Erledigt** (`6d5df8d`): jede Datei wird einzeln gelesen,
+   `bewahreBeschaedigt()` legt Unlesbares beiseite statt es zu überschreiben,
+   und ein Abmelden wird notfalls durch Löschen der Sitzungsdatei bzw. Sperren
+   aller Sitzungen erzwungen. **Offen bleibt** eine echte
+   Backup-/Wiederherstellungsfunktion — die gibt es bisher gar nicht, und wo
+   sie hinschreibt, ist eine Entscheidung für den Betreiber.
 3. Tarife historisieren, Tagesgrenzen aufteilen und Quellen-/Senkenaufteilung
    bei Netzladung der Speicher korrigieren.
 4. Deploy: Vorbereitung vor Dienststopp, Rollback, geeigneter Healthcheck;
