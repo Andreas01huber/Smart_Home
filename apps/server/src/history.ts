@@ -416,6 +416,7 @@ export class EnergyAccumulator {
       return {
         date, isToday, hasData: false, hasSeries: false,
         tagBeginnMs: grenzen.beginnMs, tagEndeMs: grenzen.endeMs,
+        zeitzone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       };
     }
 
@@ -432,6 +433,7 @@ export class EnergyAccumulator {
       // anderen Zeitzone ergäbe das einen anderen Tag.
       tagBeginnMs: grenzen.beginnMs,
       tagEndeMs: grenzen.endeMs,
+      zeitzone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       coverage: abdeckung,
       letzteErfassung: isToday && this.letzteErfassungMs !== null
         ? new Date(this.letzteErfassungMs).toISOString()

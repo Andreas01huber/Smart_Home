@@ -15,6 +15,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { networkInterfaces } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 import {
   checkEnergyBalance,
@@ -293,6 +294,12 @@ function serializeState(
 
   return {
     polledAt: state.polledAt.toISOString(),
+    // Kalendertag und Zeitzone der ANLAGE. Ein Browser in einer anderen
+    // Zeitzone soll "heute" nicht anders verstehen als die Tagesbilanz.
+    anlage: {
+      datum: localDate(state.polledAt),
+      zeitzone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
     pollDurationMs: state.pollDurationMs,
     solar: metric(snapshot.solarProductionW),
     house: metric(snapshot.houseConsumptionW),
@@ -455,6 +462,9 @@ function serializeEv(
     state: charger.state,
     vehicleConnected: charger.vehicleConnected,
     powerW: charger.chargePowerW,
+    // Unveränderte Geräterückmeldung zusätzlich zur geprüften Bilanzleistung.
+    wallboxPowerW: charger.chargePowerW,
+    measuredAt: charger.provenance.measuredAt.toISOString(),
     // Die genauen Messwerte des Geräts: Spannung an der Dose, tatsächlich
     // fliessender Strom, Zahl der liefernden Phasen. Alles aus `phase_a` und
     // damit gemessen — nicht aus der Einstellung gerechnet.
@@ -603,22 +613,47 @@ function lanAddresses(): string[] {
   return result;
 }
 
-async function main(): Promise<void> {
-  const config = loadConfig();
+/** Was ein Serverstart braucht. Alles Übrige leitet er daraus ab. */
+export interface Startoptionen {
+  readonly config: AppConfig;
+  /** Wohin Historie, Sitzungen und Ladeprotokoll geschrieben werden. */
+  readonly datenverzeichnis: string;
+  /**
+   * Datenquellen und Wallbox von aussen — für den Fixture-Server mit
+   * simulierten Geräten. Ohne Angabe werden sie aus der Konfiguration gebaut.
+   */
+  readonly quellen?: { connectors: ManagedConnector[]; wallbox: TuyaEvseConnector | null };
+  /**
+   * Wird vor jeder Anfrage gefragt; `true` heisst "bereits beantwortet". Nur
+   * für Test- und Fixture-Betrieb (Verzögerungen, Fehlerantworten).
+   */
+  readonly vorbehandlung?: (
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+  ) => Promise<boolean>;
+}
+
+export interface LaufenderServer {
+  readonly server: ReturnType<typeof createServer>;
+  /** Geordnet beenden: Messung anhalten, alles speichern, Verbindungen schliessen. */
+  stoppe(): Promise<void>;
+}
+
+export async function starteServer(o: Startoptionen): Promise<LaufenderServer> {
+  const { config, datenverzeichnis } = o;
   // Vor Messung, Persistenz und Ladebefehlen prüfen: Auth-Fehler dürfen keinen
   // teilweise laufenden, ungeschützten Server hinterlassen.
   const konten = Kontenspeicher.ladenFuerServer(config.secretsPfad, config.allowUnauthenticatedAccess);
   const sitzungen = konten === null ? null : new Sitzungsspeicher(
-    resolve(process.cwd(), 'data', 'sitzungen.json'), konten.sessionSecret,
+    resolve(datenverzeichnis, 'sitzungen.json'), konten.sessionSecret,
   );
-  const { connectors, wallbox } = buildConnectors(config);
+  const { connectors, wallbox } = o.quellen ?? buildConnectors(config);
 
   if (connectors.length === 0) {
-    console.error(
+    throw new Error(
       'Keine Datenquelle aktiviert. Bitte in config.json mindestens eine Quelle auf "enabled": true setzen.',
     );
-    process.exitCode = 1;
-    return;
   }
 
   const byId = new Map<string, ManagedConnector>();
@@ -637,13 +672,13 @@ async function main(): Promise<void> {
     'victron-modbus': config.sources.victron?.displayName ?? 'Victron',
   };
   const accumulator = new EnergyAccumulator({
-    dataDir: resolve(process.cwd(), 'data'),
+    dataDir: datenverzeichnis,
     pvSources,
     names,
     tariff: config.tariff,
   });
   // Ladeprotokoll: erkennt Sessions selbst und speichert sie dauerhaft.
-  const evLog = new ChargeSessionLog(resolve(process.cwd(), 'data'));
+  const evLog = new ChargeSessionLog(datenverzeichnis);
 
   // Ein Abonnement für beide, damit sie garantiert mit derselben geprüften
   // Ladeleistung rechnen — zwei getrennte Aufrufe hatten je ihre eigene.
@@ -661,7 +696,7 @@ async function main(): Promise<void> {
     engine,
     wallbox,
     config,
-    resolve(process.cwd(), 'data'),
+    datenverzeichnis,
   );
   // Erst die Erfahrung des Tages übernehmen, dann anfangen zu regeln: Was die
   // Speicher können, steht im aufgezeichneten Verlauf und muss nach einem
@@ -678,9 +713,6 @@ async function main(): Promise<void> {
     ),
   );
 
-  engine.start();
-  ladesteuerung.start();
-
   const sendJson = (response: ServerResponse, status: number, payload: unknown): void => {
     response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
     response.end(JSON.stringify(payload));
@@ -691,6 +723,7 @@ async function main(): Promise<void> {
   const throttle = new LoginThrottle();
 
   const server = createServer(mitHttpFehlergrenze(async (request, response, url) => {
+    if (o.vorbehandlung && (await o.vorbehandlung(request, response, url))) return;
 
     // Offener Betrieb ist nur nach ausdrücklicher Konfiguration möglich.
     let ich: Benutzer | null = null;
@@ -955,8 +988,10 @@ async function main(): Promise<void> {
           return;
         }
         try {
-          const neu = accumulator.tarife.setze(roh);
-          sendJson(response, 200, { ...neu, verlauf: accumulator.tarife.verlauf(), darfAendern: true });
+          accumulator.tarife.setze(roh);
+          // GET und PUT haben denselben Vertrag: aktuell gültiger Tarif,
+          // nicht ein eventuell erst für nächsten Monat geplanter Eintrag.
+          sendJson(response, 200, { ...accumulator.tarife.aktuell(), verlauf: accumulator.tarife.verlauf(), darfAendern: true });
         } catch (error) {
           if (error instanceof TypeError) {
             sendJson(response, 400, { error: error.message });
@@ -975,63 +1010,97 @@ async function main(): Promise<void> {
     await serveStatic(url.pathname, response);
   }));
 
-  server.listen(config.port, config.host, () => {
-    console.log('');
-    console.log('  SmartHome läuft.');
-    console.log('');
-    console.log(`  Auf diesem PC:   http://localhost:${config.port}`);
-    if (config.host === '0.0.0.0') {
-      const lanIps = lanAddresses();
-      if (lanIps.length > 0) {
-        console.log('');
-        console.log('  Auf dem Handy (gleiches WLAN), Adresse im Browser eingeben:');
-        for (const ip of lanIps) console.log(`     http://${ip}:${config.port}`);
-      }
-    }
-    console.log('');
-    console.log(`  Quellen:     ${connectors.map((c) => c.displayName).join(', ')}`);
-    console.log('');
-    if (konten !== null) {
-      const namen = konten
-        .alle()
-        .map((b) => (b.rolle === 'admin' ? `${b.username} (Admin)` : b.username))
-        .join(', ');
-      console.log(`  Anmeldung:   aktiv - ${konten.anzahl()} Konto/Konten: ${namen}`);
-      console.log(`  Verwaltung:  http://localhost:${config.port}/admin`);
-    } else {
-      // Deutlich, aber ohne Abbruch: Im Heimnetz hinter dem Router ist das in
-      // Ordnung. Über einen Tunnel ins Internet ist es das nicht.
-      console.log('  ACHTUNG: Keine Anmeldung eingerichtet - die App ist für jeden');
-      console.log('           erreichbar, der die Adresse kennt. Einrichten mit:');
-      console.log('              npm run passwort');
-    }
-    console.log('');
-    console.log('  Beenden: dieses Fenster schließen.');
-    console.log('');
-  });
-
-  let stopping = false;
-  const shutdown = (): void => {
-    if (stopping) return;
-    stopping = true;
-    engine.stop();
-    ladesteuerung.stop();
-    accumulator.persist();
-    evLog.persist();
-    sitzungen?.persist();
-    server.close(() => process.exit(0));
-    // Ohne das Folgende endete der Vorgang nie, sobald irgendwo ein Dashboard
-    // offen war: server.close() wartet auf jede bestehende Verbindung, und ein
-    // Event-Stream bleibt absichtlich beliebig lange bestehen.
-    server.closeAllConnections();
-    // Letzte Sicherung, falls doch etwas hängen bleibt.
-    setTimeout(() => process.exit(0), 2000).unref();
+  let stopping: Promise<void> | null = null;
+  /**
+   * Geordnet beenden.
+   *
+   * Erst die Messung anhalten, dann alles speichern, dann die Verbindungen
+   * schliessen. Ein offener Ereignisstrom wird aktiv beendet — server.close()
+   * allein wartete sonst beliebig lange auf ihn.
+   */
+  const stoppe = (): Promise<void> => {
+    stopping ??= new Promise<void>((fertig) => {
+      engine.stop();
+      ladesteuerung.stop();
+      accumulator.persist();
+      evLog.persist();
+      sitzungen?.persist();
+      server.close(() => fertig());
+      server.closeAllConnections();
+    });
+    return stopping;
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+
+  await new Promise<void>((bereit, fehler) => {
+    server.once('error', fehler);
+    server.listen(config.port, config.host, () => {
+      server.off('error', fehler);
+      bereit();
+    });
+  });
+  meldeStart(config, connectors, konten);
+  // Ein belegter Port darf weder Messung noch Laderegelung im Hintergrund
+  // zurücklassen. Erst nach erfolgreichem Listen starten.
+  engine.start();
+  ladesteuerung.start();
+  return { server, stoppe };
 }
 
-void main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : 'Serverstart fehlgeschlagen');
-  process.exitCode = 1;
-});
+function meldeStart(
+  config: AppConfig,
+  connectors: readonly ManagedConnector[],
+  konten: Kontenspeicher | null,
+): void {
+  console.log('');
+  console.log('  SmartHome läuft.');
+  console.log('');
+  console.log(`  Auf diesem PC:   http://localhost:${config.port}`);
+  if (config.host === '0.0.0.0') {
+    const lanIps = lanAddresses();
+    if (lanIps.length > 0) {
+      console.log('');
+      console.log('  Auf dem Handy (gleiches WLAN), Adresse im Browser eingeben:');
+      for (const ip of lanIps) console.log(`     http://${ip}:${config.port}`);
+    }
+  }
+  console.log('');
+  console.log(`  Quellen:     ${connectors.map((c) => c.displayName).join(', ')}`);
+  console.log('');
+  if (konten !== null) {
+    const namen = konten
+      .alle()
+      .map((b) => (b.rolle === 'admin' ? `${b.username} (Admin)` : b.username))
+      .join(', ');
+    console.log(`  Anmeldung:   aktiv - ${konten.anzahl()} Konto/Konten: ${namen}`);
+    console.log(`  Verwaltung:  http://localhost:${config.port}/admin`);
+  } else {
+    console.log('  ACHTUNG: Anmeldung ist per allowUnauthenticatedAccess abgeschaltet -');
+    console.log('           die App ist für jeden erreichbar, der die Adresse kennt.');
+  }
+  console.log('');
+  console.log('  Beenden: Strg+C (speichert vorher alles).');
+  console.log('');
+}
+
+async function main(): Promise<void> {
+  const laufend = await starteServer({
+    config: loadConfig(),
+    datenverzeichnis: resolve(process.cwd(), 'data'),
+  });
+  const beenden = (): void => {
+    // Letzte Stufe, nur für diesen Prozess: Hängt das geordnete Beenden länger
+    // als zehn Sekunden, wird hart beendet.
+    setTimeout(() => process.exit(1), 10_000).unref();
+    void laufend.stoppe().then(() => process.exit(0));
+  };
+  process.on('SIGINT', beenden);
+  process.on('SIGTERM', beenden);
+}
+
+// Nur als Programm starten, nicht beim Import (Fixture-Server, Tests).
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  void main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : 'Serverstart fehlgeschlagen');
+    process.exitCode = 1;
+  });
+}

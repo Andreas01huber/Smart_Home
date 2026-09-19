@@ -1,3 +1,17 @@
+.lade-zugang { display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: 100%; padding: .85rem 1rem; margin-bottom: 1rem; min-height: 56px; text-align: left; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-left: 4px solid var(--ev); border-radius: var(--radius-sm); cursor: pointer; font: inherit; }
+.lade-zugang strong { display: block; margin-bottom: .2rem; }
+#ev-kurzstatus { color: var(--text-dim); font-size: .9rem; }
+.ev-stopp { display: block; min-height: 48px; width: 100%; margin-top: 1rem; padding: .75rem 1rem; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font: inherit; font-weight: 650; cursor: pointer; }
+.ev-stopp.an { background: var(--accent-strong); color: var(--on-accent); }
+.ev-stopp:disabled { opacity: .6; cursor: wait; }
+.abdeckung-zeile { color: var(--text-dim); font-size: .875rem; line-height: 1.6; margin: 0 0 1rem; }
+.abdeckung-zeile:empty { display: none; }
+.lade-fehler { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; padding: 1rem; border: 1px solid var(--warn-text); border-radius: var(--radius-sm); color: var(--warn-text); background: var(--surface); }
+.lade-fehler button { min-height: 44px; }
+button.legend-item { font: inherit; color: inherit; background: none; border: 0; padding: .5rem .25rem; min-height: 44px; }
+.tarif-verlauf { margin-top: 1rem; color: var(--text-dim); font-size: .875rem; line-height: 1.6; }
+.tarif-verlauf summary { cursor: pointer; padding: .5rem 0; }
+.setting-actions { flex-wrap: wrap; }
 :root {
   --bg: #eef1f6;
   --bg-2: #e4e9f1;

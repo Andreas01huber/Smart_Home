@@ -114,8 +114,8 @@ export class Tarifverlauf {
         grundlage: datum >= offen.bekanntSeit ? 'bekannt' : 'angenommen',
       };
     }
-    const fruehester = datiert[0];
-    if (fruehester) return { tarif: nurTarif(fruehester), gueltigAb: fruehester.gueltigAb, grundlage: 'angenommen' };
+    // Ein künftig gültiger erster Eintrag verändert die bisherige Annahme
+    // für heute und ältere Tage nicht rückwirkend.
     return { tarif: this.vorgabe, gueltigAb: null, grundlage: 'angenommen' };
   }
 

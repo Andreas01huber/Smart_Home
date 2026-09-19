@@ -1,8 +1,18 @@
 /** Eine Vorschau verändert nur die Anzeige, niemals die Wallbox. */
-export function bindeLadestromUebernahme(schieber, istVorschau, uebernehmen) {
+export function bindeLadestromUebernahme(schieber, istVorschau, uebernehmen, optionen) {
   schieber.addEventListener('change', () => {
     if (!istVorschau()) void uebernehmen(Number(schieber.value));
-  });
+  }, optionen);
+}
+
+/** Reglerbewegungen bleiben Vorschau; nur eine ausdrückliche Bestätigung sendet. */
+export function bindeLadestromBestaetigung(button, schieber, uebernehmen, optionen) {
+  button.addEventListener('click', () => {
+    const ampere = Number(schieber.value);
+    if (!Number.isFinite(ampere) || !Number.isInteger(ampere)
+      || ampere < Number(schieber.min) || ampere > Number(schieber.max)) return;
+    void uebernehmen(ampere);
+  }, optionen);
 }
 
 /** Nur erfolgreiche, vollständige Steuerantworten dürfen den UI-Zustand ersetzen. */
