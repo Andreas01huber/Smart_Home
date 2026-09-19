@@ -110,13 +110,20 @@ export function ladezustand(r, ev) {
   const laedt = leistung !== null && leistung > LAEDT_AB_W;
   const angesteckt = ev?.vehicleConnected ?? geraet?.angesteckt ?? null;
 
-  if (r.zustand === 'gestoert' || ev?.state === 'offline') {
+  // Was die Wallbox JETZT meldet, geht vor. Das Urteil der Regelung stammt
+  // aus ihrer letzten Prüfung und kann eine Wiederkehr noch nicht kennen.
+  if (ev?.state === 'offline' || (r.zustand === 'gestoert' && (ev == null || ev.state === 'not-connected'))) {
     return { titel: 'Wallbox nicht erreichbar', text: r.grund ?? '', ton: 'fehler' };
+  }
+  if (r.zustand === 'gestoert') {
+    return { titel: 'Regelung gestört', text: r.grund ?? '', ton: 'fehler' };
   }
   if (ev?.state === 'fault') {
     return { titel: 'Störung an der Wallbox', text: ev.faultText ?? r.grund ?? '', ton: 'fehler' };
   }
-  if (angesteckt === false || r.zustand === 'nicht-verbunden') {
+  // Meldet die Wallbox ein gestecktes Auto, zählt das, auch wenn die letzte
+  // Regelprüfung noch keins kannte.
+  if (angesteckt === false || (r.zustand === 'nicht-verbunden' && angesteckt !== true)) {
     const naechstes = r.betriebsart === 'manuell'
       ? `Beim nächsten Anstecken: Manuell · ${r.manuellA} A`
       : r.betriebsart === 'intelligent'

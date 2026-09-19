@@ -104,6 +104,19 @@ describe('Ladezustand in Worten — Wunsch, Befehl, Gerät, Messung getrennt', (
   const ev = (powerW: number | null, extra: Record<string, unknown> = {}) =>
     ({ state: 'connected', vehicleConnected: true, powerW, ...extra });
 
+  it('eine erreichbare Wallbox heisst nicht "nicht erreichbar", auch wenn die letzte Regelprüfung gestört war', () => {
+    const gestoert = { ...basis, zustand: 'gestoert', grund: 'Keine Antwort der Cloud.' };
+    assert.equal(ladezustand(gestoert, ev(0)).titel, 'Regelung gestört');
+    assert.equal(ladezustand(gestoert, ev(0, { state: 'offline' })).titel, 'Wallbox nicht erreichbar');
+    assert.equal(ladezustand(gestoert, null).titel, 'Wallbox nicht erreichbar');
+  });
+
+  it('ein gerade angestecktes Auto gilt als angesteckt, bevor die Regelung es geprüft hat', () => {
+    const alt = { ...basis, zustand: 'nicht-verbunden' };
+    assert.notEqual(ladezustand(alt, ev(0)).titel, 'Kein Auto angesteckt');
+    assert.equal(ladezustand(alt, ev(0, { vehicleConnected: false })).titel, 'Kein Auto angesteckt');
+  });
+
   it('HTTP-Erfolg ist kein Laden: freigegeben ohne Stromaufnahme', () => {
     const z = ladezustand({ ...basis, befehl: { schalter: true, status: 'angenommen' } }, ev(0));
     assert.match(z.titel, /Freigegeben/);

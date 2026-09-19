@@ -964,15 +964,12 @@ function buildNow(d) {
       <div class="breakdown">
         <div class="breakdown-row"><span>Fahrzeug</span><b data-f="ev-plug">—</b></div>
         <div class="breakdown-row"><span>Akkustand</span><b data-f="ev-soc">—</b></div>
-        <div class="breakdown-row"><span>Lädt gerade mit</span><b data-f="ev-power">—</b></div>
         <div class="breakdown-row"><span>Ladevorgang</span><b data-f="ev-session">—</b></div>
-        <div class="breakdown-row"><span>Gesamt geladen</span><b data-f="ev-total">—</b></div>
-        <div class="breakdown-row"><span>Max. Ladestrom</span><b data-f="ev-cur">—</b></div>
-        <div class="breakdown-row"><span>Temperatur</span><b data-f="ev-temp">—</b></div>
+        <div class="breakdown-row"><span>Eingestellt</span><b data-f="ev-cur">—</b></div>
       </div>
       <div class="card-actions">
         <span class="card-more">Details ansehen ›</span>
-        <button class="connect-btn" id="ev-connect" type="button" title="Nur die Datenverbindung zum Ladegerät herstellen — startet keinen Ladevorgang">Verbinden</button>
+        <button class="connect-btn" id="ev-connect" type="button" title="Fragt das Ladegerät erneut ab — startet keinen Ladevorgang">Erneut abfragen</button>
       </div>
       <p data-f="ev-meta" class="meta"></p>
     </div>`);
@@ -1120,12 +1117,9 @@ function updateEv(root, ev) {
       : ev.vehicleConnected === false ? 'Nicht angeschlossen'
       : '—');
   // Der Ladestand kann vom Ladegerät nicht kommen (IEC 61851, kein Datenkanal).
-  setF(root, 'ev-soc', ev.socPercent == null ? 'nicht verfügbar' : formatSoc(ev.socPercent));
+  setF(root, 'ev-soc', ev.socPercent == null ? 'vom Ladegerät nicht übermittelt' : formatSoc(ev.socPercent));
   setF(root, 'ev-session', ev.sessionEnergyWh == null ? '—' : formatEnergy(ev.sessionEnergyWh));
-  setF(root, 'ev-total', ev.totalEnergyWh == null ? '—' : formatEnergy(ev.totalEnergyWh));
-  setF(root, 'ev-power', formatLadeleistung(ev));
   setF(root, 'ev-cur', formatLadestrom(ev));
-  setF(root, 'ev-temp', ev.temperatureC == null ? '—' : `${ev.temperatureC} °C`);
   setF(root, 'ev-brand', ev.configured ? 'Aimiler Ladegerät' : 'Wallbox nicht eingerichtet');
   setClassText(root, 'ev-meta', metaClass(ev.quality ?? 'unknown'),
     ev.configured ? `Quelle: ${SOURCE_LABEL[ev.source] ?? ev.source ?? 'Wallbox'} · ${ev.ageLabel ?? ''}` : '');
@@ -1143,12 +1137,11 @@ function updateEv(root, ev) {
   const dotEl = root.querySelector('[data-f="ev-dot"]');
   if (dotEl && dotEl.getAttribute('class') !== dotCls) dotEl.setAttribute('class', dotCls);
 
-  // Verbinden-Knopf: zeigt den Zustand der DATENVERBINDUNG, nicht des Ladens.
+  // Abfrage-Knopf: zeigt den Zustand der DATENVERBINDUNG, nicht des Ladens.
   const connect = el('ev-connect');
   if (connect && !connect.disabled) {
     const online = ev.configured && ev.state !== 'offline' && ev.state !== 'not-connected';
-    const label = online ? 'Verbunden' : 'Verbinden';
-    if (connect.textContent !== label) connect.textContent = label;
+    if (connect.textContent !== 'Erneut abfragen') connect.textContent = 'Erneut abfragen';
     connect.classList.toggle('ok', online);
   }
 }
@@ -1663,6 +1656,16 @@ function renderStatus(d) {
     if (text.dataset.short !== short) text.dataset.short = short;
   };
   if (real.length === 0) setStatus('warn', 'Keine Quelle', 'Keine Quelle');
+  // Ein Gateway kann antworten, während ein Speicher dahinter fehlt. Dann
+  // wäre „Alle Systeme online“ gelogen.
+  // Ebenso die Wallbox: Die Cloud antwortet, das Gerät dahinter nicht.
+  else if (problems === 0 && d.ev?.configured && d.ev.state === 'offline') {
+    setStatus('warn', 'Wallbox nicht erreichbar', 'Wallbox offline');
+  }
+  else if (problems === 0 && d.storageAggregate && d.storageAggregate.verfuegbar < d.storageAggregate.erwartet) {
+    const fehlt = d.storageAggregate.erwartet - d.storageAggregate.verfuegbar;
+    setStatus('warn', `${fehlt} Speicher ohne Daten`, `${fehlt} Speicher fehlt`);
+  }
   else if (problems === 0) setStatus('ok', 'Alle Systeme online', 'Online');
   else if (problems < real.length) setStatus('warn', `${problems} Gerät${problems > 1 ? 'e' : ''} offline`, `${problems} offline`);
   else setStatus('bad', 'Verbindungsprobleme', 'Probleme');
@@ -1680,8 +1683,8 @@ function renderStatus(d) {
     const contact = x.lastSuccessAt ? `Letzter Kontakt: ${formatClock(x.lastSuccessAt)}` : (x.status === 'not_configured' ? 'Noch nicht eingerichtet' : 'Noch kein Kontakt');
     const canReconnect = x.reconnectable && (x.status === 'offline' || x.status === 'error' || x.status === 'stale');
     const btn = busy
-      ? `<button class="reconnect-btn" disabled><span class="mini-spinner"></span>Verbindung …</button>`
-      : canReconnect ? `<button class="reconnect-btn" data-id="${esc(x.connectorId)}">Neu verbinden</button>` : '';
+      ? `<button class="reconnect-btn" disabled><span class="mini-spinner"></span>Frage ab …</button>`
+      : canReconnect ? `<button class="reconnect-btn" data-id="${esc(x.connectorId)}">Erneut abfragen</button>` : '';
     return `
       <div class="source-row">
         <div class="s-main">
@@ -1776,7 +1779,7 @@ function renderLive(d) {
     if (selectedDate === vorher && selectedDate !== anlagenDatum) void loadDay(anlagenDatum);
     else syncDateUI();
   }
-  el('flow-updated').textContent = `aktualisiert ${new Date(d.polledAt).toLocaleTimeString('de-DE')}`;
+  aktualisiereFrische();
   renderFlow(d);
   renderKpis(d, lastToday);
   renderNow(d);
@@ -1786,22 +1789,103 @@ function renderLive(d) {
 }
 
 // ── Data fetching ─────────────────────────────────────────────────────
+/**
+ * Verbindung und Frische der Live-Werte.
+ *
+ * Zwei getrennte Fragen: Steht die Verbindung zur App (SSE), und kommen neue
+ * Messungen? Der Server schickt alle 10 s einen Puls ohne Messwerte. Bleibt
+ * auch der aus, ist der Strom tot — selbst wenn der Browser ihn für offen hält —
+ * und wird neu aufgebaut. Bleiben nur Messungen aus, ist die App verbunden,
+ * aber die Werte sind nicht mehr aktuell.
+ *
+ * In beiden Fällen stehen die Werte als „zuletzt bekannt“ da, ihr Alter läuft
+ * weiter, und die Flussanimationen stehen still: Eine laufende Animation
+ * behauptet einen Fluss, den gerade niemand misst. Ob einzelne Geräte
+ * antworten, zeigt davon unabhängig die Gerätezeile.
+ */
+const GETRENNT_NACH_MS = 25_000;
+const VERALTET_NACH_MS = 30_000;
+let sse = null;
+let letzteNachrichtMs = 0;
+let letzteMessungMs = 0;
+let letzterMesszeitpunkt = null;
+let appGetrennt = false;
+
 function connectSSE() {
+  sse?.close();
   const ev = new EventSource('/api/events');
-  ev.addEventListener('message', (e) => { try { renderLive(JSON.parse(e.data)); } catch (err) { console.error(err); } });
+  sse = ev;
+  letzteNachrichtMs = Date.now();
+  ev.addEventListener('message', (e) => {
+    letzteNachrichtMs = Date.now();
+    const warGetrennt = appGetrennt;
+    appGetrennt = false;
+    try {
+      const d = JSON.parse(e.data);
+      // Eine Änderung der Regelung schickt den letzten Messstand erneut — das
+      // ist keine neue Messung und darf das Alter nicht zurücksetzen.
+      if (d.polledAt !== letzterMesszeitpunkt) {
+        letzterMesszeitpunkt = d.polledAt;
+        letzteMessungMs = Date.now();
+      }
+      renderLive(d);
+    } catch (err) { console.error(err); }
+    // Nach einer Unterbrechung auch die Tagessummen neu holen.
+    if (warGetrennt) void refreshTodayKpis();
+  });
+  ev.addEventListener('puls', () => { letzteNachrichtMs = Date.now(); });
   ev.addEventListener('error', () => {
-    el('status-dot').className = 'dot bad';
-    const t = el('status-text');
-    t.textContent = 'Keine Verbindung';
-    t.dataset.short = 'Getrennt';
+    appGetrennt = true;
+    aktualisiereFrische();
     // Ein EventSource verrät den Statuscode nicht — eine abgelaufene Sitzung
     // sieht darin genauso aus wie ein Netzausfall. Eine gewöhnliche Anfrage
     // hinterher klärt das: Ist es die Sitzung, schickt zurAnmeldung() weiter,
-    // sonst bleibt es bei „Keine Verbindung" und der EventSource versucht es
+    // sonst bleibt es bei der Unterbrechung und der EventSource versucht es
     // von selbst wieder.
     fetch('/api/snapshot').catch(() => {});
   });
 }
+
+function formatAlter(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  return formatLuecke(s);
+}
+
+/** Sekündlich und bei jeder Nachricht: Alter, Kennzeichnung, Wächter. */
+function aktualisiereFrische() {
+  const jetzt = Date.now();
+  if (sse && jetzt - letzteNachrichtMs > GETRENNT_NACH_MS) {
+    // Offen, aber stumm: neu verbinden. Der erste Zustand danach ist vollständig.
+    appGetrennt = true;
+    connectSSE();
+  }
+  const alterMs = letzteMessungMs ? jetzt - letzteMessungMs : null;
+  // Die Abfrage kann frisch sein, obwohl die Geräte nur alte Werte liefern.
+  // Dann ist „aktualisiert vor 1 s“ eine Behauptung, die nicht stimmt.
+  const kern = lastLive ? [lastLive.solar, lastLive.gridImport, lastLive.house].map((m) => m?.quality) : [];
+  const messwerteAlt = kern.length > 0 && kern.every((q) => q !== 'live');
+  const veraltet = appGetrennt || messwerteAlt || (alterMs !== null && alterMs > VERALTET_NACH_MS);
+  document.body.classList.toggle('live-veraltet', veraltet);
+
+  const label = el('flow-updated');
+  if (label) {
+    const uhrzeit = lastLive ? new Date(lastLive.polledAt).toLocaleTimeString('de-DE') : null;
+    const text = uhrzeit === null ? (appGetrennt ? 'keine Verbindung' : '')
+      : messwerteAlt && !appGetrennt ? `Messwerte veraltet · abgefragt ${uhrzeit}`
+      : veraltet ? `zuletzt bekannt ${uhrzeit} · vor ${formatAlter(alterMs ?? 0)}`
+      : `aktualisiert ${uhrzeit} · vor ${formatAlter(alterMs ?? 0)}`;
+    if (label.textContent !== text) label.textContent = text;
+    label.classList.toggle('veraltet', veraltet);
+  }
+  if (appGetrennt) {
+    el('status-dot').className = 'dot bad';
+    const t = el('status-text');
+    if (t.textContent !== 'App-Verbindung unterbrochen') t.textContent = 'App-Verbindung unterbrochen';
+    t.dataset.short = 'Getrennt';
+  }
+}
+setInterval(aktualisiereFrische, 1000);
 /** Nur die jeweils letzte Tagesabfrage zählt — siehe api.js. */
 const tagesAbfrage = letzteAnfrage();
 const heuteAbfrage = letzteAnfrage();
@@ -2413,6 +2497,32 @@ function evHistoryMarkup() {
  * Bewusst ganz unten und eingeklappt: Im Alltag will man es nicht sehen. Wenn
  * das Auto aber nicht lädt, obwohl die Sonne scheint, steht hier die Antwort.
  */
+let evTechnikOffen = false;
+/**
+ * Was die Karte nicht mehr zeigt: Datenquelle, Gerätegrenze, Temperatur und
+ * Zählerstand. Nützlich zur Fehlersuche, für die tägliche Bedienung nicht.
+ */
+function evTechnikMarkup(ev) {
+  if (!ev?.configured) return '';
+  const r = ev.regelung;
+  const grenze = r?.maxA ? `${r.maxA} A${r.anschluss?.phasen === 1 && r.haushaltMaxA && r.haushaltMaxA < r.maxA ? ` (an der Haushaltsdose ${r.haushaltMaxA} A)` : ''}` : '—';
+  const zeile = (name, wert) => `<div class="breakdown-row"><span>${esc(name)}</span><b>${esc(wert)}</b></div>`;
+  return `
+    <div class="detail-section">
+      <details id="ev-technik" class="ev-technik"${evTechnikOffen ? ' open' : ''}>
+        <summary>Ladegerät</summary>
+        <div class="breakdown">
+          ${zeile('Datenquelle', `${SOURCE_LABEL[ev.source] ?? ev.source ?? 'Wallbox'} · ${ev.ageLabel ?? ''}`)}
+          ${zeile('Eingestellter Ladestrom', ev.maxCurrentA == null ? '—' : `${ev.maxCurrentA} A`)}
+          ${zeile('Gerätegrenze', grenze)}
+          ${zeile('Gemessene Leistung', formatLadeleistung(ev))}
+          ${zeile('Temperatur', ev.temperatureC == null ? '—' : `${ev.temperatureC} °C`)}
+          ${zeile('Zählerstand gesamt', ev.totalEnergyWh == null ? '—' : formatEnergy(ev.totalEnergyWh))}
+        </div>
+      </details>
+    </div>`;
+}
+
 function regelProtokollMarkup() {
   const r = evRegelung;
   if (!r || r.modus === 'aus') return '';
@@ -2515,7 +2625,8 @@ function renderEvDetail() {
       : '') +
     evStatsMarkup() +
     evHistoryMarkup() +
-    regelProtokollMarkup();
+    regelProtokollMarkup() +
+    evTechnikMarkup(ev);
   aktualisiereDialogDom(body, vorlage.content);
   evBedienungListener?.abort();
   evBedienungListener = new AbortController();
@@ -2529,6 +2640,9 @@ function renderEvDetail() {
   }
 
   if (scrollVorher > 0) body.scrollTop = scrollVorher;
+
+  const technik = body.querySelector('#ev-technik');
+  if (technik) binde(technik, 'toggle', () => { evTechnikOffen = technik.open; });
 
   // Aufgeklappt bleibt aufgeklappt, auch über den nächsten Messwert hinaus.
   const regelDetails = body.querySelector('#regel-details');
@@ -2742,7 +2856,7 @@ function closeEvDetail() {
 
 /** Verbindet die Datenquelle neu — startet KEINEN Ladevorgang. */
 async function evConnect(btn) {
-  if (btn) { btn.disabled = true; btn.textContent = 'Verbinde …'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Frage ab …'; }
   try {
     await fetch('/api/devices/ev-charger/reconnect', { method: 'POST' });
   } catch (err) { console.error('Verbinden fehlgeschlagen', err); }

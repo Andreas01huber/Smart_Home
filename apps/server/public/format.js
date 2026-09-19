@@ -123,7 +123,7 @@ export function formatLadestrom(ev) {
   const grenze = r.anschluss?.phasen === 1 && r.haushaltMaxA
     ? Math.min(r.maxA, r.haushaltMaxA)
     : r.maxA;
-  return `${ev.maxCurrentA} A von ${grenze} A`;
+  return `${ev.maxCurrentA} A · Grenze ${grenze} A`;
 }
 
 /** Gemessene Ladeleistung. Eine Messung, keine Rechnung. */

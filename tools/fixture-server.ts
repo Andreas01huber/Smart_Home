@@ -19,6 +19,7 @@
  *   POST /__fixture/stoerung  {langsam, fehler}
  *        langsam: { "/api/history/day": 3000 }   Pfad -> Verzögerung in ms
  *        fehler:  ["/api/ev/stats"]              Pfade, die mit 500 antworten
+ *        stumm:   true                          /api/events bleibt offen, sendet nichts
  *   GET  /__fixture/befehle              was die Wallbox-Attrappe empfangen hat
  */
 
@@ -377,7 +378,7 @@ async function main(): Promise<void> {
   const config = konfiguration(port, dir);
   if (!args.includes('--leer')) saeHistorie(dir, ['fronius-local', 'fronius-gen24']);
 
-  const stoerung: { langsam: Record<string, number>; fehler: string[] } = { langsam: {}, fehler: [] };
+  const stoerung: { langsam: Record<string, number>; fehler: string[]; stumm: boolean } = { langsam: {}, fehler: [], stumm: false };
 
   const laufend = await starteServer({
     config,
@@ -411,10 +412,17 @@ async function main(): Promise<void> {
         const roh = await lies();
         stoerung.langsam = (roh['langsam'] as Record<string, number>) ?? {};
         stoerung.fehler = (roh['fehler'] as string[]) ?? [];
+        stoerung.stumm = roh['stumm'] === true;
         return json(200, stoerung);
       }
       if (url.pathname === '/__fixture/befehle') return json(200, wallbox);
 
+      if (stoerung.stumm && url.pathname === '/api/events') {
+        // Offen, aber stumm: wie eine hängende Zwischenstation.
+        response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' });
+        response.flushHeaders();
+        return true;
+      }
       if (stoerung.fehler.includes(url.pathname)) return json(500, { error: 'Fixture: absichtlicher Serverfehler' });
       const ms = stoerung.langsam[url.pathname];
       if (ms) {

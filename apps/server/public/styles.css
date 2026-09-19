@@ -1720,3 +1720,12 @@ main {
 @media (max-width: 760px) {
   .update-hinweis { bottom: calc(4.5rem + env(safe-area-inset-bottom)); }
 }
+
+/* Live-Werte nicht mehr aktuell (app.js, aktualisiereFrische): Flüsse stehen
+   still, die Zeitangabe sagt „zuletzt bekannt“ und trägt ein Warnzeichen. */
+body.live-veraltet .flow-overlay path.active,
+body.live-veraltet .sc-flows path.active,
+body.live-veraltet .card.ev.is-charging .card-icon { animation-play-state: paused; }
+body.live-veraltet .flow-overlay, body.live-veraltet .sc-flows { opacity: .45; }
+.flow-updated.veraltet { color: var(--warn-text); font-weight: 600; }
+.flow-updated.veraltet::before { content: "\26A0\FE0E  "; }

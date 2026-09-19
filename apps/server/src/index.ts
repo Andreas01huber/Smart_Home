@@ -53,6 +53,9 @@ import { schreibstatus } from './persist.ts';
 
 const PUBLIC_DIR = resolve(import.meta.dirname, '..', 'public');
 
+/** Abstand des SSE-Pulses; der Browser gilt nach dem Zweieinhalbfachen ohne Nachricht als getrennt. */
+const SSE_PULS_MS = 10_000;
+
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -119,7 +122,8 @@ function buildConnectors(config: AppConfig): {
     );
   }
 
-  // Wallbox / EV-Ladegerät (Tuya, ausschliesslich lesend). Ohne Zugangsdaten
+  // Wallbox / EV-Ladegerät (Tuya). Liest immer; stellt den Ladestrom, sobald die
+  // Regelung aktiv ist (siehe Ladesteuerung). Ohne Zugangsdaten
   // wird sie übersprungen und erscheint als "nicht eingerichtet".
   const ev = config.sources.evCharger;
   if (ev?.enabled === true && ev.accessId && ev.accessSecret && ev.deviceId) {
@@ -609,7 +613,19 @@ function handleEvents(
     const zustand = engine.current();
     if (zustand !== null) send(zustand);
   }) ?? null;
+  // Puls ohne Messwerte: Ein Messzyklus darf bis zur Quellenfrist dauern, und
+  // eine stumme, aber offene Verbindung sähe für den Browser sonst genauso aus
+  // wie eine hängende. Mit dem Puls kann er beides unterscheiden.
+  const puls = setInterval(() => {
+    if (response.writableEnded || response.destroyed) return;
+    try {
+      response.write(`event: puls\ndata: ${JSON.stringify({ jetzt: new Date().toISOString() })}\n\n`);
+    } catch {
+      unsubscribe?.();
+    }
+  }, SSE_PULS_MS);
   unsubscribe = () => {
+    clearInterval(puls);
     vomMessen();
     vonRegelung?.();
   };
