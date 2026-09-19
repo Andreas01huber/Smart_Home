@@ -9,6 +9,7 @@ import {
   productionSinks,
   computeCosts,
   aggregateStorage,
+  coverage,
   type EnergyTotals,
 } from './accounting.ts';
 
@@ -23,6 +24,33 @@ describe('autarkyPercent', () => {
   });
   test('ohne Verbrauch kein Wert', () => {
     assert.equal(autarkyPercent(emptyTotals()), null);
+  });
+});
+
+describe('coverage', () => {
+  test('Anteil der wirklich gemessenen Zeit', () => {
+    const c = coverage(totals({ coveredSeconds: 300, gapSeconds: 100 }));
+    assert.equal(c.percent, 75);
+    assert.equal(c.coveredSeconds, 300);
+    assert.equal(c.gapSeconds, 100);
+  });
+
+  test('ohne jede Zeit wird nichts behauptet', () => {
+    // Ein frischer Tag hat noch keine Abdeckung — und 0 % wäre genauso falsch
+    // wie 100 %.
+    assert.equal(coverage(emptyTotals()).percent, null);
+  });
+
+  test('alte Tage ohne diese Zahlen ergeben keinen erfundenen Wert', () => {
+    // Aufzeichnungen von vor der Einführung kennen die Felder nicht. Sie
+    // kommen als undefined aus der Datei und dürfen nicht zu NaN führen.
+    const alt = { ...emptyTotals() } as Record<string, unknown>;
+    delete alt['coveredSeconds'];
+    delete alt['gapSeconds'];
+    const c = coverage(alt as unknown as EnergyTotals);
+    assert.equal(c.percent, null);
+    assert.equal(c.coveredSeconds, 0);
+    assert.equal(c.gapSeconds, 0);
   });
 });
 

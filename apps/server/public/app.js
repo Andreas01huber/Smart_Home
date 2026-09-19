@@ -2039,7 +2039,6 @@ function umsteckHinweis(ev) {
  * Sonne, Haus, Speicher, Netz, und was daraus für das Auto übrig bleibt.
  */
 function evLiveMarkup(ev) {
-  const chargerOnline = ev.configured && ev.state !== 'offline' && ev.state !== 'not-connected';
   const charging = ev.state === 'charging';
   const r = ev.regelung;
   const live = lastLive ?? {};
@@ -2049,7 +2048,7 @@ function evLiveMarkup(ev) {
     <div class="detail-section">
       ${regelKopfMarkup(ev)}
       <div class="detail-grid">
-        ${tile('Ladeleistung', charging ? formatLadeleistung(ev) : (chargerOnline ? '0 W' : '—'), !charging, charging ? 'ok' : '')}
+        ${tile('Ladeleistung', formatLadeleistung(ev), !charging, charging ? 'ok' : '')}
         ${tile('Ladestrom', formatLadestrom(ev), !charging)}
         ${tile('Möglich wären', r ? formatPower(Math.max(0, r.verfuegbarW)) : '—', !r)}
         ${tile('Netz', netzW >= 0 ? `${formatPower(netzW)} Bezug` : `${formatPower(-netzW)} Einspeisung`, true, netzW > 100 ? 'bad' : 'ok')}

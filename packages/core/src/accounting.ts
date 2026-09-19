@@ -19,6 +19,16 @@ export interface EnergyTotals {
   readonly batteryChargeWh: Readonly<Record<string, number>>;
   readonly batteryDischargeWh: Readonly<Record<string, number>>;
   readonly evChargeWh: number;
+  /**
+   * Sekunden, die wirklich mit aktuellen Messwerten integriert wurden.
+   *
+   * Ohne diese Zahl liest sich eine Tagessumme immer gleich zuversichtlich —
+   * ob die Quellen den ganzen Tag gemeldet haben oder nur halb. Erst Abdeckung
+   * und Lücke zusammen sagen, wie belastbar die Summe ist.
+   */
+  readonly coveredSeconds: number;
+  /** Sekunden, in denen nicht integriert werden konnte (Ausfall, Neustart). */
+  readonly gapSeconds: number;
 }
 
 export function emptyTotals(): EnergyTotals {
@@ -31,6 +41,32 @@ export function emptyTotals(): EnergyTotals {
     batteryChargeWh: {},
     batteryDischargeWh: {},
     evChargeWh: 0,
+    coveredSeconds: 0,
+    gapSeconds: 0,
+  };
+}
+
+/** Wie lückenlos ein Zeitraum gemessen wurde. `null` = noch nichts bekannt. */
+export interface Abdeckung {
+  readonly coveredSeconds: number;
+  readonly gapSeconds: number;
+  readonly percent: number | null;
+}
+
+/**
+ * Abdeckung eines Zeitraums.
+ *
+ * Verträgt Altbestand: Tage, die vor der Einführung dieser Zahlen aufgezeichnet
+ * wurden, haben keine — sie bekommen `null` statt einer erfundenen 100 %.
+ */
+export function coverage(totals: EnergyTotals): Abdeckung {
+  const coveredSeconds = totals.coveredSeconds ?? 0;
+  const gapSeconds = totals.gapSeconds ?? 0;
+  const gesamt = coveredSeconds + gapSeconds;
+  return {
+    coveredSeconds,
+    gapSeconds,
+    percent: gesamt > 0 ? clampPercent((coveredSeconds / gesamt) * 100) : null,
   };
 }
 

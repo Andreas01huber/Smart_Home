@@ -28,10 +28,10 @@ describe('localDate / shiftDate', () => {
 });
 
 // ── Helfer zum Bauen synthetischer Engine-Zustände ────────────────────
-function metric(valueW: number | null): PowerMetric {
+function metric(valueW: number | null, quality: 'live' | 'stale' | 'offline' = 'live'): PowerMetric {
   return {
     valueW,
-    provenance: { connectorId: 'x', deviceId: 'x', measuredAt: new Date(), ageMs: 0, quality: 'live' },
+    provenance: { connectorId: 'x', deviceId: 'x', measuredAt: new Date(), ageMs: 0, quality },
   };
 }
 function battery(deviceId: string, name: string, soc: number, chargeW: number, dischargeW: number): BatterySnapshot {
@@ -45,15 +45,27 @@ function battery(deviceId: string, name: string, soc: number, chargeW: number, d
 function state(opts: {
   at: Date; pv: number | null; house: number | null; gi: number | null; ge: number | null;
   inv?: Record<string, number>; batteries?: BatterySnapshot[];
+  /** Qualität der PV-Messung — für den Fall einer eingefrorenen Quelle. */
+  pvQualitaet?: 'live' | 'stale' | 'offline';
+  ev?: number | null;
 }): EngineState {
   const snapshot: EnergySnapshot = {
     timestamp: opts.at,
-    solarProductionW: metric(opts.pv),
+    solarProductionW: metric(opts.pv, opts.pvQualitaet ?? 'live'),
     houseConsumptionW: metric(opts.house),
     gridImportW: metric(opts.gi),
     gridExportW: metric(opts.ge),
     batteries: opts.batteries ?? [],
-    evCharger: null,
+    evCharger:
+      opts.ev === undefined
+        ? null
+        : ({
+            deviceId: 'ev', displayName: 'Wallbox', state: 'charging',
+            vehicleConnected: true, chargePowerW: opts.ev, sessionEnergyWh: null,
+            totalEnergyWh: null, maxCurrentA: 16, temperatureC: null,
+            vehicleSocPercent: null, faultText: null,
+            provenance: { connectorId: 'ev', deviceId: 'ev', measuredAt: opts.at, ageMs: 0, quality: 'live' },
+          } as EnergySnapshot['evCharger']),
   };
   const readings: ConnectorReading[] = Object.entries(opts.inv ?? {}).map(([id, w]) => ({
     connectorId: id, timestamp: opts.at,
@@ -130,6 +142,75 @@ describe('EnergyAccumulator — Speicherung & Aggregation', () => {
     const vic = v.batteries.find((b: any) => b.deviceId === 'victron:0');
     assert.ok(fron.chargeWh > 0 && fron.dischargeWh === 0);
     assert.ok(vic.dischargeWh > 0 && vic.chargeWh === 0);
+  });
+
+  test('eine eingefrorene Quelle erzeugt keine Energie mehr', () => {
+    // Der eigentliche Fehler: Eine Quelle, die ihren letzten Wert weitermeldet,
+    // lief ungebremst in die Tagessumme. Aus 3600 W, die längst nicht mehr
+    // flossen, wurden so über eine Viertelstunde 900 Wh reine Erfindung.
+    const acc = makeAcc();
+    const d = new Date(2026, 7, 19, 12, 0, 0);
+    acc.integrate(state({ at: d, pv: 3600, house: 500, gi: 0, ge: 0, pvQualitaet: 'stale' }));
+    acc.integrate(state({
+      at: new Date(2026, 7, 19, 12, 0, 10),
+      pv: 3600, house: 500, gi: 0, ge: 0, pvQualitaet: 'stale',
+    }));
+    const v: any = acc.dayView(localDate(d));
+    assert.equal(v.totals.productionWh, 0, 'veralteter PV-Wert wurde integriert');
+    // Der Hauszähler misst weiter — was gemessen wurde, zählt auch.
+    assert.ok(v.totals.houseConsumptionWh > 0, 'gemessener Hausverbrauch ging verloren');
+  });
+
+  test('weist Abdeckung und Lücken aus', () => {
+    const acc = makeAcc();
+    const d = new Date(2026, 7, 19, 12, 0, 0);
+    acc.integrate(state({ at: d, pv: 1000, house: 500, gi: 0, ge: 0 }));
+    // Zehn vollständig gemessene Sekunden.
+    acc.integrate(state({ at: new Date(2026, 7, 19, 12, 0, 10), pv: 1000, house: 500, gi: 0, ge: 0 }));
+    // Zehn Sekunden mit eingefrorener PV: gemessen, aber nicht vollständig.
+    acc.integrate(state({
+      at: new Date(2026, 7, 19, 12, 0, 20),
+      pv: 1000, house: 500, gi: 0, ge: 0, pvQualitaet: 'offline',
+    }));
+    const v: any = acc.dayView(localDate(d));
+    assert.ok(Math.abs(v.coverage.coveredSeconds - 10) < 0.001, `${v.coverage.coveredSeconds} s abgedeckt`);
+    assert.ok(Math.abs(v.coverage.gapSeconds - 10) < 0.001, `${v.coverage.gapSeconds} s Lücke`);
+    assert.ok(Math.abs(v.coverage.percent - 50) < 0.001, `${v.coverage.percent} %`);
+  });
+
+  test('eine lange Pause zählt als Lücke, nicht als gemessene Zeit', () => {
+    // Neustart, schlafender Rechner, Netzausfall: Der Schritt wird auf die
+    // zulässige Länge gekappt. Bisher verschwand der Rest spurlos.
+    const acc = makeAcc();
+    const d = new Date(2026, 7, 19, 12, 0, 0);
+    acc.integrate(state({ at: d, pv: 1000, house: 500, gi: 0, ge: 0 }));
+    acc.integrate(state({ at: new Date(2026, 7, 19, 12, 10, 0), pv: 1000, house: 500, gi: 0, ge: 0 }));
+    const v: any = acc.dayView(localDate(d));
+    // 600 s verstrichen, 15 s davon integriert.
+    assert.ok(v.coverage.gapSeconds > 580, `nur ${v.coverage.gapSeconds} s als Lücke gezählt`);
+    assert.ok(v.coverage.percent < 5, `${v.coverage.percent} % Abdeckung behauptet`);
+  });
+
+  test('zählt Wallbox-Leistung erst ab der gemeinsamen Schwelle', () => {
+    // Bilanz und Ladeprotokoll müssen dieselbe Schwelle benutzen, sonst weisen
+    // sie für denselben Tag verschiedene Kilowattstunden aus.
+    const acc = makeAcc();
+    const d = new Date(2026, 7, 19, 12, 0, 0);
+    acc.integrate(state({ at: d, pv: 0, house: 500, gi: 0, ge: 0, ev: 20 }));
+    acc.integrate(state({ at: new Date(2026, 7, 19, 12, 0, 10), pv: 0, house: 500, gi: 0, ge: 0, ev: 20 }));
+    const v: any = acc.dayView(localDate(d));
+    assert.equal(v.totals.evChargeWh, 0, 'Grundrauschen der Wallbox wurde als Ladung gezählt');
+  });
+
+  test('nimmt die geprüfte Ladeleistung, wenn sie übergeben wird', () => {
+    // Die Wallbox meldet über die Cloud 2000 W, der Hauszähler weiss es besser:
+    // Es fliesst nichts. Dann darf auch nichts in der Bilanz stehen.
+    const acc = makeAcc();
+    const d = new Date(2026, 7, 19, 12, 0, 0);
+    acc.integrate(state({ at: d, pv: 0, house: 500, gi: 0, ge: 0, ev: 2000 }), 0);
+    acc.integrate(state({ at: new Date(2026, 7, 19, 12, 0, 10), pv: 0, house: 500, gi: 0, ge: 0, ev: 2000 }), 0);
+    const v: any = acc.dayView(localDate(d));
+    assert.equal(v.totals.evChargeWh, 0, 'der ungeprüfte Cloud-Wert wurde integriert');
   });
 
   test('Neustart stellt den heutigen Zwischenstand wieder her', () => {

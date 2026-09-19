@@ -421,3 +421,32 @@ describe('Migration: Bruchstücke zusammenführen', () => {
     assert.deepEqual(fuehreZusammen([]), []);
   });
 });
+
+describe('Ladeprotokoll — geprüfte Ladeleistung', () => {
+  it('nimmt die übergebene Leistung statt der gemeldeten', () => {
+    // Der Fall vom 8.9.: Die Tuya-Cloud meldete unverändert 2007 W, während der
+    // Hauszähler für das ganze Haus 1203 W zeigte. Die Anzeige rechnete das
+    // längst heraus, das Protokoll integrierte weiter — für denselben Tag
+    // standen so zwei verschiedene Kilowattstunden in der App.
+    const log = new ChargeSessionLog(tempDir());
+    const ev = charger({ connected: true, powerW: 2000 });
+    for (let m = 0; m <= 10; m++) log.integrate(tick({ at: at(m), ev }), 0);
+
+    const laufend = log.current();
+    assert.ok(laufend, 'keine Session offen');
+    assert.equal(laufend.energyWh, 0, 'der ungeprüfte Cloud-Wert wurde integriert');
+    assert.equal(laufend.chargingSeconds, 0);
+  });
+
+  it('weist unbekannte Leistung als Lücke aus, nicht als null Watt', () => {
+    const log = new ChargeSessionLog(tempDir());
+    const ev = charger({ connected: true, powerW: null, state: 'connected' });
+    for (let m = 0; m <= 5; m++) log.integrate(tick({ at: at(m), ev }));
+
+    const laufend = log.current();
+    assert.ok(laufend, 'keine Session offen');
+    assert.equal(laufend.hasGaps, true, 'unbekannte Leistung wurde nicht als Lücke vermerkt');
+    assert.equal(laufend.energyWh, 0);
+    assert.ok(laufend.connectedSeconds > 0, 'die Steckzeit zählt trotzdem');
+  });
+});

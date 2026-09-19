@@ -18,9 +18,13 @@ import { resolve } from 'node:path';
 import {
   aggregateStorage,
   autarkyPercent,
+  bilanzwertW,
   computeCosts,
   consumptionSources,
+  coverage,
   emptyTotals,
+  istAktuell,
+  LADEN_AB_W,
   productionSinks,
   selfConsumptionPercent,
   totalBatteryChargeWh,
@@ -61,6 +65,8 @@ interface MutableTotals {
   batteryChargeWh: Record<string, number>;
   batteryDischargeWh: Record<string, number>;
   evChargeWh: number;
+  coveredSeconds: number;
+  gapSeconds: number;
 }
 
 const MAX_DT_SECONDS = 15;
@@ -107,7 +113,12 @@ export class EnergyAccumulator {
     setInterval(() => this.persistIfDirty(), 120_000).unref();
   }
 
-  integrate(state: EngineState): void {
+  /**
+   * @param evLeistungW Am Hauszähler geprüfte Ladeleistung. Fehlt sie, gilt der
+   *   Wert der Wallbox — beide Wege stehen im Aufrufer nebeneinander, damit
+   *   Bilanz und Ladeprotokoll nicht je ihre eigene Zahl bekommen.
+   */
+  integrate(state: EngineState, evLeistungW?: number | null): void {
     const now = state.polledAt.getTime();
     const date = localDate(state.polledAt);
     if (date !== this.currentDate) this.rollover(date);
@@ -116,21 +127,47 @@ export class EnergyAccumulator {
     this.lastIntegrationAt = now;
     if (previous === null) return;
 
-    const dtSeconds = Math.min(MAX_DT_SECONDS, (now - previous) / 1000);
-    if (dtSeconds <= 0) return;
+    const verstrichenS = (now - previous) / 1000;
+    if (verstrichenS <= 0) return;
+    const dtSeconds = Math.min(MAX_DT_SECONDS, verstrichenS);
+    // Was über den längsten zulässigen Schritt hinausgeht, war nachweislich
+    // keine Messung: Neustart, Netzausfall, schlafender Rechner. Bisher wurde
+    // es stillschweigend weggeschnitten und fehlte danach nirgends.
+    this.today.gapSeconds += verstrichenS - dtSeconds;
     const hours = dtSeconds / 3600;
 
     const snap = state.resolution.snapshot;
+    this.dirty = true;
 
-    addEnergy(this.today, 'productionWh', snap.solarProductionW.valueW, hours);
-    addEnergy(this.today, 'houseConsumptionWh', snap.houseConsumptionW.valueW, hours);
-    addEnergy(this.today, 'gridImportWh', snap.gridImportW.valueW, hours);
-    addEnergy(this.today, 'gridExportWh', snap.gridExportW.valueW, hours);
+    // Die vier Grundgrössen der Bilanz. Jede zählt für sich — ein Zähler, der
+    // misst, soll nicht deshalb fehlen, weil ein anderer gerade schweigt; der
+    // Netzbezug ist die Grundlage der Abrechnung und wird tatsächlich bezahlt.
+    //
+    // Was NICHT mehr zählt, ist ein eingefrorener Wert: `bilanzwertW` liefert
+    // nur, was aktuell gemeldet wurde. Bisher lief eine Quelle, die ihren
+    // letzten Wert weitermeldete, ungebremst in die Tagessumme.
+    const pvW = bilanzwertW(snap.solarProductionW);
+    const hausW = bilanzwertW(snap.houseConsumptionW);
+    const bezugW = bilanzwertW(snap.gridImportW);
+    const einspeisungW = bilanzwertW(snap.gridExportW);
+
+    // Vollständig gemessen heisst: alle vier. Nur solche Intervalle zählen als
+    // Abdeckung, alles andere ist eine ausgewiesene Lücke — sonst läse sich
+    // eine Tagessumme aus halben Messungen so zuversichtlich wie eine ganze.
+    const vollstaendig =
+      pvW !== null && hausW !== null && bezugW !== null && einspeisungW !== null;
+    if (vollstaendig) this.today.coveredSeconds += dtSeconds;
+    else this.today.gapSeconds += dtSeconds;
+
+    addEnergy(this.today, 'productionWh', pvW, hours);
+    addEnergy(this.today, 'houseConsumptionWh', hausW, hours);
+    addEnergy(this.today, 'gridImportWh', bezugW, hours);
+    addEnergy(this.today, 'gridExportWh', einspeisungW, hours);
 
     for (const reading of state.readings) {
       if (!this.pvSources.includes(reading.connectorId)) continue;
-      const w = reading.solarProductionW?.valueW ?? null;
-      if (w !== null && Number.isFinite(w) && w >= 0) {
+      const w = bilanzwertW(reading.solarProductionW);
+      if (w !== null && w >= 0) {
         this.today.perInverterWh[reading.connectorId] =
           (this.today.perInverterWh[reading.connectorId] ?? 0) + w * hours;
       }
@@ -139,14 +176,22 @@ export class EnergyAccumulator {
     // Wallbox: eigene Energiesumme. Sie wird NICHT zum Hausverbrauch addiert —
     // dort ist sie physikalisch bereits enthalten (Wallbox hängt hinter dem
     // Hauszähler). Hier nur separat mitgeschrieben, um sie ausweisen zu können.
-    const evW = snap.evCharger?.chargePowerW ?? null;
-    if (evW !== null && Number.isFinite(evW) && evW > 0) {
+    //
+    // Anders als bei den Quellen oben zählt hier nicht das Alter des Werts: Die
+    // Wallbox meldet über Tuya nur bei Änderung, ein unveränderter Wert ist
+    // also alt und trotzdem richtig. Was zählt, ist die Schwelle — dieselbe wie
+    // im Ladeprotokoll, sonst weisen beide für denselben Tag andere kWh aus.
+    const evW = evLeistungW === undefined ? (snap.evCharger?.chargePowerW ?? null) : evLeistungW;
+    if (evW !== null && Number.isFinite(evW) && evW > LADEN_AB_W) {
       this.today.evChargeWh += evW * hours;
     }
 
     for (const battery of snap.batteries) {
       this.batteryNames[battery.deviceId] = battery.displayName;
       this.batteryCaps[battery.deviceId] = battery.usableCapacityWh;
+      // Ein Speicher, der sich gerade nicht meldet, lädt nicht nachweislich
+      // weiter mit seinem letzten Wert.
+      if (!istAktuell(battery.provenance)) continue;
       if (battery.chargeW !== null && battery.chargeW > 0) {
         this.today.batteryChargeWh[battery.deviceId] =
           (this.today.batteryChargeWh[battery.deviceId] ?? 0) + battery.chargeW * hours;
@@ -157,7 +202,6 @@ export class EnergyAccumulator {
       }
     }
 
-    this.dirty = true;
     this.maybeAppendSeries(state, now);
   }
 
@@ -281,6 +325,9 @@ export class EnergyAccumulator {
       hasData: true,
       hasSeries: series.length > 1,
       quality,
+      // Wie lückenlos dieser Tag gemessen wurde. Ohne das liest sich eine
+      // Tagessumme aus zwei Messstunden wie eine aus vierundzwanzig.
+      coverage: coverage(totals),
       totals,
       derived: this.derive(totals),
       inverters: Object.keys(totals.perInverterWh).map((id) => ({
@@ -313,6 +360,7 @@ export class EnergyAccumulator {
       startedAt: this.startedAt.toISOString(),
       lastMeasurementAt: this.lastIntegrationAt ? new Date(this.lastIntegrationAt).toISOString() : null,
       currentDate: this.currentDate,
+      coverageToday: coverage(toReadonly(this.today)),
       pointsToday: this.series.length,
       seriesIntervalSeconds: SERIES_INTERVAL_MS / 1000,
       // Nur abgeschlossene Tage zählen, nicht der laufende (heutige) Tag.
@@ -490,6 +538,8 @@ function freshTotals(): MutableTotals {
     batteryChargeWh: {},
     batteryDischargeWh: {},
     evChargeWh: 0,
+    coveredSeconds: 0,
+    gapSeconds: 0,
   };
 }
 
@@ -513,6 +563,8 @@ function toReadonly(t: MutableTotals): EnergyTotals {
     batteryChargeWh: { ...t.batteryChargeWh },
     batteryDischargeWh: { ...t.batteryDischargeWh },
     evChargeWh: t.evChargeWh,
+    coveredSeconds: t.coveredSeconds,
+    gapSeconds: t.gapSeconds,
   };
 }
 
@@ -526,6 +578,9 @@ function toMutable(t: EnergyTotals): MutableTotals {
     batteryChargeWh: { ...t.batteryChargeWh },
     batteryDischargeWh: { ...t.batteryDischargeWh },
     evChargeWh: t.evChargeWh,
+    // Tage aus der Zeit vor der Abdeckungsrechnung haben diese Felder nicht.
+    coveredSeconds: t.coveredSeconds ?? 0,
+    gapSeconds: t.gapSeconds ?? 0,
   };
 }
 
@@ -577,5 +632,7 @@ function addTotals(a: EnergyTotals, b: EnergyTotals): EnergyTotals {
     batteryChargeWh: mergeRecord(a.batteryChargeWh, b.batteryChargeWh),
     batteryDischargeWh: mergeRecord(a.batteryDischargeWh, b.batteryDischargeWh),
     evChargeWh: a.evChargeWh + b.evChargeWh,
+    coveredSeconds: (a.coveredSeconds ?? 0) + (b.coveredSeconds ?? 0),
+    gapSeconds: (a.gapSeconds ?? 0) + (b.gapSeconds ?? 0),
   };
 }

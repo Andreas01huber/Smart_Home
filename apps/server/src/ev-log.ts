@@ -41,6 +41,8 @@ import {
   addSplit,
   attributeEvEnergy,
   emptySplit,
+  gemesseneLadeleistungW,
+  LADEN_AB_W,
   splitTotalWh,
   type ChargeSession,
   type ChargeSessionEnd,
@@ -51,8 +53,14 @@ import type { EngineState } from './engine.ts';
 import { localDate } from './history.ts';
 import { writeJsonAtomic } from './persist.ts';
 
-/** Ab dieser Leistung gilt ein Ladevorgang als aktiv (unter 6 A ist nichts). */
-const CHARGING_THRESHOLD_W = 50;
+/**
+ * Ab dieser Leistung gilt ein Ladevorgang als aktiv.
+ *
+ * Kommt aus `@energy/core` und nicht als eigene Zahl hierher: Tagesbilanz und
+ * Ladeprotokoll müssen dieselbe Schwelle benutzen, sonst weisen sie für
+ * denselben Tag verschiedene Kilowattstunden aus.
+ */
+const CHARGING_THRESHOLD_W = LADEN_AB_W;
 /** Längster Zeitschritt, der integriert wird — schützt vor Lücken/Neustarts. */
 const MAX_DT_SECONDS = 60;
 /** Sessions unterhalb dieser Energie sind Fehlanschlüsse, kein Ladevorgang. */
@@ -105,8 +113,13 @@ export class ChargeSessionLog {
     setInterval(() => this.persistIfDirty(), 60_000).unref();
   }
 
-  /** Wird bei jedem Messzyklus aufgerufen. */
-  integrate(state: EngineState): void {
+  /**
+   * Wird bei jedem Messzyklus aufgerufen.
+   *
+   * @param evLeistungW Am Hauszähler geprüfte Ladeleistung. Fehlt sie, gilt der
+   *   Wert der Wallbox.
+   */
+  integrate(state: EngineState, evLeistungW?: number | null): void {
     const snap = state.resolution.snapshot;
     const ev = snap.evCharger;
     const now = state.polledAt.getTime();
@@ -145,9 +158,12 @@ export class ChargeSessionLog {
     session.lastSeenAt = now;
     if (ev.faultText !== null) session.faultText = ev.faultText;
 
-    const powerW = ev.chargePowerW;
-    if (powerW === null || !Number.isFinite(powerW)) {
+    const powerW = gemesseneLadeleistungW(
+      evLeistungW === undefined ? ev.chargePowerW : evLeistungW,
+    );
+    if (powerW === null) {
       // Ladegerät liefert die Leistung gerade nicht — Lücke offen ausweisen.
+      // Unbekannt ist ausdrücklich nicht dasselbe wie gemessene null Watt.
       session.hasGaps = true;
       this.dirty = true;
       return;

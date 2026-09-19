@@ -217,12 +217,27 @@ function hausOhneAutoMetrik(snapshot: EnergySnapshot, anteil: HausAnteil): unkno
  * Übrig bleibt der Fall, dass beide Werte zusammenpassen: Dann ist der Anteil
  * identisch mit dem gemeldeten, und es ändert sich nichts.
  */
+/**
+ * Die eine Ladeleistung, auf die sich alles stützt.
+ *
+ * Anzeige, Tagesbilanz und Ladeprotokoll müssen dieselbe Zahl benutzen. Taten
+ * sie nicht: Die Anzeige nahm den am Hauszähler geprüften Anteil, Bilanz und
+ * Protokoll den rohen Wert der Tuya-Cloud. Am 8.9. stand deshalb in der
+ * Ansicht ein stehendes Auto, während das Protokoll weiter 2007 W integrierte.
+ *
+ * `null` heisst unbekannt — nicht null Watt.
+ */
+function geprueftAutoW(snapshot: EnergySnapshot, anteil: HausAnteil): number | null {
+  // Ohne brauchbare Aufteilung bleibt es beim Wert der Wallbox — lieber der
+  // unsichere Messwert als eine erfundene Null.
+  if (anteil.wattW === null) return snapshot.evCharger?.chargePowerW ?? null;
+  return anteil.autoW;
+}
+
 function evAusZaehler(snapshot: EnergySnapshot, anteil: HausAnteil): Record<string, unknown> {
   const charger = snapshot.evCharger;
   if (charger === null) return {};
   const gemeldet = charger.chargePowerW;
-  // Ohne brauchbare Aufteilung bleibt es beim Wert der Wallbox — lieber der
-  // unsichere Messwert als eine erfundene Null.
   if (anteil.wattW === null) return {};
   const laedt = anteil.autoW > 200;
   return {
@@ -583,11 +598,17 @@ async function main(): Promise<void> {
     names,
     tariff: config.tariff,
   });
-  engine.subscribe((state) => accumulator.integrate(state));
-
   // Ladeprotokoll: erkennt Sessions selbst und speichert sie dauerhaft.
   const evLog = new ChargeSessionLog(resolve(process.cwd(), 'data'));
-  engine.subscribe((state) => evLog.integrate(state));
+
+  // Ein Abonnement für beide, damit sie garantiert mit derselben geprüften
+  // Ladeleistung rechnen — zwei getrennte Aufrufe hatten je ihre eigene.
+  engine.subscribe((state) => {
+    const anteil = hausUndAuto(state.resolution.snapshot);
+    const autoW = geprueftAutoW(state.resolution.snapshot, anteil);
+    accumulator.integrate(state, autoW);
+    evLog.integrate(state, autoW);
+  });
 
   // Überschussregelung. Stellt den Ladestrom so, dass das Auto nur Sonne und
   // freigegebene Speicherleistung nimmt. Im Modus "beobachten" (Vorgabe)

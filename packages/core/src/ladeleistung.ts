@@ -65,6 +65,36 @@ export function anschlussAusPhasenmessung(
 }
 
 /**
+ * Ab dieser gemessenen Leistung fliesst wirklich Ladestrom.
+ *
+ * Darunter liegt das Grundrauschen der Wallbox-Elektronik. Die Zahl steht hier
+ * und nicht je Aufrufer, weil Tagesbilanz und Ladeprotokoll sonst über
+ * denselben Tag verschiedene Kilowattstunden ausweisen — genau das war der
+ * Fall, als die Bilanz alles über 0 W zählte und das Protokoll erst ab 50 W.
+ */
+export const LADEN_AB_W = 50;
+
+/**
+ * Die gemessene Ladeleistung, sofern die Wallbox überhaupt eine meldet.
+ *
+ * `null` heisst "unbekannt" und ist streng von 0 W zu unterscheiden: Eine
+ * Wallbox, die gerade nichts meldet, lädt nicht nachweislich mit null Watt —
+ * man weiss es schlicht nicht. Wer daraus eine gemessene Null macht, schreibt
+ * eine Behauptung in die Historie.
+ */
+export function gemesseneLadeleistungW(leistungW: number | null | undefined): number | null {
+  return typeof leistungW === 'number' && Number.isFinite(leistungW) && leistungW >= 0
+    ? leistungW
+    : null;
+}
+
+/** Fliesst gerade Ladestrom? `null`, solange die Leistung unbekannt ist. */
+export function laedtGerade(leistungW: number | null | undefined): boolean | null {
+  const watt = gemesseneLadeleistungW(leistungW);
+  return watt === null ? null : watt > LADEN_AB_W;
+}
+
+/**
  * Leistungsfaktor.
  *
  * Siehe Kopf der Datei: Bei einem Fahrzeug-Ladegerät mit PFC ist 1 der richtige

@@ -5,7 +5,7 @@
  * ausgegeben. Er wird angezeigt und als veraltet markiert.
  */
 
-import type { DataQuality, Provenance, ConnectorId } from './model.ts';
+import type { DataQuality, PowerMetric, Provenance, ConnectorId } from './model.ts';
 
 /** Ab wann ein Wert nicht mehr als live gilt, je Connector. */
 export interface StalenessPolicy {
@@ -78,6 +78,29 @@ export function provenance(
     ageMs,
     quality: classifyAge(ageMs, policyFor(connectorId)),
   };
+}
+
+/** Ist dieser Messpunkt aktuell genug, um als Messung durchzugehen? */
+export function istAktuell(provenance: Provenance): boolean {
+  return provenance.quality === 'live';
+}
+
+/**
+ * Der Wert eines Messpunkts, sofern er in eine Energiebilanz eingehen darf.
+ *
+ * Eine Bilanz integriert Leistung über Zeit, und ein eingefrorener Wert erzeugt
+ * dabei Energie, die nie geflossen ist: Meldet eine Quelle ihre letzten 3000 W
+ * noch eine Viertelstunde weiter, stehen danach 750 Wh in der Tagessumme, für
+ * die es keine einzige Messung gibt. Im Zweifel ist eine ausgewiesene Lücke
+ * richtiger als eine erfundene Kilowattstunde.
+ *
+ * `null` heisst deshalb "nicht verwertbar" — unbekannt, veraltet oder von einer
+ * Quelle, die als offline gilt. Nicht "null Watt".
+ */
+export function bilanzwertW(metric: PowerMetric | null | undefined): number | null {
+  if (!metric || !istAktuell(metric.provenance)) return null;
+  const watt = metric.valueW;
+  return watt !== null && Number.isFinite(watt) ? watt : null;
 }
 
 /** Menschenlesbares Alter für die Oberfläche, z. B. "vor 2 Sekunden". */
