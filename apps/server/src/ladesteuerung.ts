@@ -60,14 +60,15 @@ import type { TuyaEvseConnector } from '@energy/connectors';
 
 import { ladeanschlussAus, type AppConfig } from './config.ts';
 import { ladeDose, merkeDose } from './wallbox-speicher.ts';
+import { ladeLademodus, merkeLademodus } from './lademodus-speicher.ts';
 import type { EnergyEngine, EngineState } from './engine.ts';
 
 /**
  * Wie geladen wird — die Entscheidung des Menschen, nicht der Regelung.
  *
  * `intelligent`  Nur, was Sonne und freigegebene Speicherleistung hergeben.
- *                Die Vorgabe, und der einzige Zustand, in dem die Regel "das
- *                Auto verursacht keinen Netzbezug" gilt.
+ *                Regelziel: Netzbezug durch das Auto vermeiden. Wegen der
+ *                Cloudlatenz der Wallbox ist das ein Ziel, keine Garantie.
  * `manuell`      Ein fester Ladestrom, den ein Mensch eingestellt hat. Reicht
  *                die eigene Erzeugung nicht, kommt der Rest aus dem Netz.
  *
@@ -76,6 +77,39 @@ import type { EnergyEngine, EngineState } from './engine.ts';
  * kann wie der Schieberegler ganz rechts.
  */
 export type Betriebsart = 'intelligent' | 'manuell';
+
+/**
+ * Was mit dem letzten Steuerbefehl geschah — getrennt vom Wunsch und vom
+ * gemessenen Stromfluss.
+ *
+ *   uebermittelt  an die Cloud geschickt, Antwort steht aus
+ *   angenommen    die Cloud hat den Befehl angenommen (HTTP ok)
+ *   bestaetigt    das Gerät meldet den gesendeten Zustand zurück
+ *   fehlgeschlagen  die Cloud hat abgelehnt oder nicht geantwortet
+ *
+ * "angenommen" heisst ausdrücklich nicht "Auto lädt" — ob Strom fliesst,
+ * sagt nur die Messung.
+ */
+export interface Befehlsstand {
+  readonly schalter: boolean;
+  readonly stromA: number | null;
+  readonly gesendetAm: string;
+  readonly status: 'uebermittelt' | 'angenommen' | 'bestaetigt' | 'fehlgeschlagen';
+  readonly fehler: string | null;
+}
+
+/** Was die Wallbox zuletzt selbst meldete — nicht, was gesendet wurde. */
+export interface Geraetesicht {
+  readonly erreichbar: boolean;
+  readonly angesteckt: boolean | null;
+  readonly schalterAn: boolean | null;
+  /** Eingestellte Strombegrenzung laut Gerät. */
+  readonly stromA: number | null;
+  /** Gemessene Ladeleistung; `null` = unbekannt. */
+  readonly leistungW: number | null;
+  /** Alter der letzten Gerätemeldung. */
+  readonly alterMs: number | null;
+}
 
 /** Wie das Auto angesteckt ist, samt Klartext für die Oberfläche. */
 export interface Anschlussinfo {
@@ -125,8 +159,12 @@ export interface Steuerzustand {
   readonly letzterBefehlAt: string | null;
   readonly letzterFehler: string | null;
   readonly naechsteRegelungInS: number;
-  /** Gewaehlte Betriebsart — die Entscheidung des Menschen. */
-  readonly betriebsart: Betriebsart;
+  /** Gewählte Betriebsart — die Entscheidung des Menschen. `null` = noch keine Wahl. */
+  readonly betriebsart: Betriebsart | null;
+  /** Letzter Steuerbefehl und sein Status. */
+  readonly befehl: Befehlsstand | null;
+  /** Was die Wallbox selbst zuletzt meldete. */
+  readonly geraet: Geraetesicht | null;
   /** Eingestellter Ladestrom im Handbetrieb, in Ampere. */
   readonly manuellA: number;
   /** Nur noch für ältere Oberflächen: Handbetrieb auf dem Höchstwert. */
@@ -237,8 +275,19 @@ export class Ladesteuerung {
   private grenzen = { minA: 6, maxA: 16, schrittA: 1 };
   private letzterZustand: Ladezustand | null = null;
   private naechsteRegelungAt = 0;
-  /** Gewählte Betriebsart. Vorgabe ist `intelligent` — siehe `setzeBetriebsart`. */
-  private betriebsart: Betriebsart = 'intelligent';
+  /**
+   * Zuletzt bewusst gewählte Betriebsart; `null` = noch keine Wahl.
+   *
+   * Kommt aus `lademodus.json` und bleibt über Abstecken und Neustart
+   * erhalten. Ohne Wahl wird nicht geladen.
+   */
+  private betriebsart: Betriebsart | null = null;
+  /** Letzter Steuerbefehl samt Status — siehe `Befehlsstand`. */
+  private befehl: Befehlsstand | null = null;
+  /** Was die Wallbox zuletzt meldete. */
+  private geraet: Geraetesicht | null = null;
+  /** Wer über Zustandsänderungen sofort Bescheid wissen will (Ereignisstrom). */
+  private readonly beobachter = new Set<() => void>();
   /** Ladestrom im Handbetrieb. Erst gültig, wenn `betriebsart === 'manuell'`. */
   private manuellA = 0;
   /**
@@ -270,11 +319,12 @@ export class Ladesteuerung {
    */
   private hoechsteLadeleistungW = 0;
   /**
-   * Vom Menschen angehaltenes Laden.
+   * Vom Menschen pausiert.
    *
-   * Eigener Zustand und keine Betriebsart: Wer "Laden beenden" drückt, will
-   * genau das — und beim Fortsetzen dieselbe Betriebsart zurück, nicht die
-   * Vorgabe. Endet beim Abstecken.
+   * Eigener Zustand und keine Betriebsart: Beim Fortsetzen gilt wieder die
+   * gewählte Betriebsart. Übersteht Neustart und Browserwechsel und endet erst
+   * bei EINDEUTIGEM Abstecken — eine nicht erreichbare Wallbox ist kein
+   * Abstecken.
    */
   private gestoppt = false;
   /** Wann der nächste Versuch frühestens erlaubt ist, nachdem aufgegeben wurde. */
@@ -322,6 +372,14 @@ export class Ladesteuerung {
           + `(${Math.round(this.anschluss.spannungV)} V).`,
       );
     }
+    // Die zuletzt bewusst gewählte Einstellung. Fehlt sie oder ist sie
+    // beschädigt, bleibt es bei "keine Wahl" — und damit bei keinem Laden.
+    const modus = datenverzeichnis === null ? null : ladeLademodus(datenverzeichnis);
+    if (modus !== null) {
+      this.betriebsart = modus.betriebsart;
+      this.manuellA = modus.manuellA;
+      this.gestoppt = modus.pausiert;
+    }
   }
 
   /**
@@ -333,25 +391,29 @@ export class Ladesteuerung {
    * aufgerufen — der Messtakt ist schneller, der Zyklus läuft auch dann, wenn
    * der Dienst ohne laufenden Messtakt getaktet wird.
    */
-  private merkeNachfrage(leistungW: number, angesteckt: boolean | null): void {
-    if (angesteckt === false && this.warAngesteckt === true && this.laeuft) this.erneutRegeln = true;
-    if (angesteckt !== null) this.warAngesteckt = angesteckt;
+  private merkeNachfrage(leistungW: number, angesteckt: boolean | null, erreichbar: boolean): void {
+    // Nur eine erreichbare Wallbox kann ein Abstecken bezeugen. Offline oder
+    // ohne Aussage des Control Pilot ist das eine Datenlücke, kein Ereignis.
+    const abgesteckt = erreichbar && angesteckt === false;
+    if (abgesteckt && this.warAngesteckt === true && this.laeuft) this.erneutRegeln = true;
+    if (erreichbar && angesteckt !== null) this.warAngesteckt = angesteckt;
     if (leistungW > LAEDT_AB_W) {
       this.angeboteOhneLadung = 0;
       this.fordertNicht = false;
     }
-    if (angesteckt === false) {
-      if (this.betriebsart !== 'intelligent') {
-        this.setzeBetriebsartStill('intelligent', 0);
-        if (this.laeuft) this.erneutRegeln = true;
-      }
+    if (abgesteckt) {
       this.angeboteOhneLadung = 0;
       this.fordertNicht = false;
       this.naechsterVersuchAt = 0;
-      // Beim nächsten Mal kann eine andere Dose dran sein — und ein von Hand
-      // beendetes Laden soll nicht stillschweigend weitergelten.
+      // Beim nächsten Mal kann eine andere Dose dran sein.
       this.hoechsteLadeleistungW = 0;
-      this.gestoppt = false;
+      // Die Pause gilt für diesen Steckvorgang. Betriebsart und Ladestrom
+      // bleiben — sie sind die bewusste Wahl für das nächste Anstecken.
+      if (this.gestoppt) {
+        this.gestoppt = false;
+        this.speichereWahl();
+        this.melde();
+      }
     }
   }
 
@@ -474,7 +536,9 @@ export class Ladesteuerung {
       this.merkeNachfrage(
         snap.evCharger?.chargePowerW ?? 0,
         snap.evCharger?.vehicleConnected ?? null,
+        snap.evCharger !== null && snap.evCharger.state !== 'offline',
       );
+      this.merkeGeraet(snap.evCharger);
 
       if (this.config.ueberschuss.modus !== 'regeln' || this.laeuft) return;
       if (evLeistung <= LAEDT_AB_W) return;
@@ -494,16 +558,12 @@ export class Ladesteuerung {
   }
 
   /**
-   * Betriebsart wählen.
+   * Betriebsart wählen — auch ohne angestecktes Auto.
    *
-   * `autark` ist die Vorgabe und der einzige Zustand, in dem die Regel dieser
-   * Anlage gilt. Die beiden anderen sind ausdrückliche Entscheidungen eines
-   * Menschen, Netzstrom zu kaufen — sie werden deshalb auch deutlich angezeigt
-   * und enden von selbst, sobald das Fahrzeug abgesteckt wird. Sonst gälten sie
-   * stillschweigend für den nächsten Ladevorgang mit.
-   *
-   * Ein Neustart führt zurück auf `autark`. Das ist Absicht: Die sichere
-   * Betriebsart ist der Ruhezustand, nicht die zuletzt gewählte.
+   * Die Wahl gilt, bis sie geändert wird: über Abstecken, Neustart und andere
+   * Browser hinweg. Sie wird zuerst dauerhaft gespeichert und erst danach
+   * übernommen; scheitert das Speichern, wirft die Methode und nichts ändert
+   * sich — eine Wahl, die ein Neustart vergässe, soll nicht als erledigt gelten.
    */
   setzeBetriebsart(art: Betriebsart, ampere?: number): void {
     // Ohne Vorgabe übernimmt der Handbetrieb, was gerade eingestellt ist. Wer
@@ -521,13 +581,15 @@ export class Ladesteuerung {
         ? Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, Math.round(anfang)))
         : this.manuellA;
     if (this.betriebsart === art && gewuenschtA === this.manuellA) return;
+    this.speichereWahl({ betriebsart: art, manuellA: gewuenschtA });
     this.setzeBetriebsartStill(art, gewuenschtA);
+    this.melde();
     if (this.laeuft) this.erneutRegeln = true;
     // Nicht bis zum nächsten Zyklus warten: Wer den Knopf drückt, will es sehen.
     void this.zyklus();
   }
 
-  /** Wie `setzeBetriebsart`, aber ohne sofortigen Zyklus — für Aufrufe von innen. */
+  /** Wie `setzeBetriebsart`, aber ohne Speichern und Zyklus — für Aufrufe von innen. */
   private setzeBetriebsartStill(art: Betriebsart, ampere: number): void {
     this.betriebsart = art;
     this.manuellA = ampere;
@@ -543,27 +605,83 @@ export class Ladesteuerung {
   }
 
   /**
-   * Laden anhalten oder fortsetzen — der Knopf, der alles überstimmt.
+   * Laden pausieren oder fortsetzen — der Knopf, der alles überstimmt.
    *
-   * Anhalten wirkt in jeder Betriebsart: Auch wenn die Sonne scheint und der
-   * Handbetrieb 16 A vorgibt, bleibt die Wallbox aus. Beim Fortsetzen gilt
-   * wieder die eingestellte Betriebsart — nicht die Vorgabe, denn wer von Hand
-   * geladen hat, will nach der Pause wieder von Hand laden.
-   *
-   * Endet beim Abstecken: Der nächste Ladevorgang soll nicht stillschweigend
-   * angehalten sein.
+   * Pausieren wirkt in jeder Betriebsart und auch während eines laufenden
+   * Befehls: Der laufende Zyklus unterdrückt danach jede Einschaltfreigabe,
+   * und sofort folgt ein Zyklus mit dem Stopp. Beim Fortsetzen gilt wieder die
+   * gewählte Betriebsart. Die Pause wird gespeichert (Neustart, andere
+   * Browser) und endet erst bei eindeutigem Abstecken.
    */
   setzeGestoppt(an: boolean): void {
     if (this.gestoppt === an) return;
+    // Ohne gewählte Betriebsart gibt es nichts dauerhaft zu speichern — es wird
+    // dann ohnehin nicht geladen.
+    if (this.betriebsart !== null) this.speichereWahl({ pausiert: an });
     this.gestoppt = an;
+    this.melde();
     if (this.laeuft) this.erneutRegeln = true;
-    console.log(
-      an
-        ? '[Laderegelung] Laden von Hand beendet.'
-        : '[Laderegelung] Laden von Hand fortgesetzt.',
-    );
-    // Wer den Knopf drückt, will es sehen und nicht dreissig Sekunden warten.
+    console.log(an ? '[Laderegelung] Laden pausiert.' : '[Laderegelung] Laden fortgesetzt.');
     void this.zyklus();
+  }
+
+  /**
+   * Die aktuelle Wahl dauerhaft schreiben.
+   *
+   * Wirft bei Schreibfehlern. Ohne Datenverzeichnis (Tests) wird nur im
+   * Arbeitsspeicher gehalten.
+   */
+  private speichereWahl(
+    aenderung: Partial<{ betriebsart: Betriebsart; manuellA: number; pausiert: boolean }> = {},
+  ): void {
+    if (this.datenverzeichnis === null) return;
+    const betriebsart = aenderung.betriebsart ?? this.betriebsart;
+    if (betriebsart === null) return;
+    try {
+      merkeLademodus(this.datenverzeichnis, {
+        betriebsart,
+        manuellA: aenderung.manuellA ?? this.manuellA,
+        pausiert: aenderung.pausiert ?? this.gestoppt,
+        geaendertAm: new Date().toISOString(),
+      });
+    } catch (error) {
+      throw new Error(
+        `Lade-Einstellung konnte nicht gespeichert werden: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /** Beobachter für den Ereignisstrom. Gibt die Abmeldung zurück. */
+  abonniere(beobachter: () => void): () => void {
+    this.beobachter.add(beobachter);
+    return () => this.beobachter.delete(beobachter);
+  }
+
+  private melde(): void {
+    for (const b of this.beobachter) {
+      try { b(); } catch { /* ein toter Empfänger stört die übrigen nicht */ }
+    }
+  }
+
+  /** Gerätesicht fortschreiben und einen ausstehenden Befehl ggf. bestätigen. */
+  private merkeGeraet(ev: EngineState['resolution']['snapshot']['evCharger']): void {
+    const erreichbar = ev !== null && ev.state !== 'offline';
+    this.geraet = {
+      erreichbar,
+      angesteckt: erreichbar ? ev.vehicleConnected : null,
+      schalterAn: erreichbar ? ev.schalterAn : null,
+      stromA: erreichbar ? ev.maxCurrentA : null,
+      leistungW: erreichbar ? ev.chargePowerW : null,
+      alterMs: ev !== null && Number.isFinite(ev.provenance.ageMs) ? ev.provenance.ageMs : null,
+    };
+    const b = this.befehl;
+    if (b === null || (b.status !== 'angenommen' && b.status !== 'uebermittelt') || !erreichbar) return;
+    const schalterPasst = ev.schalterAn === b.schalter;
+    const stromPasst = !b.schalter || b.stromA === null || ev.maxCurrentA === b.stromA;
+    if (schalterPasst && stromPasst) {
+      this.befehl = { ...b, status: 'bestaetigt' };
+      this.melde();
+    }
   }
 
   /**
@@ -608,6 +726,8 @@ export class Ladesteuerung {
         Math.round((this.naechsteRegelungAt - Date.now()) / 1000),
       ),
       betriebsart: this.betriebsart,
+      befehl: this.befehl,
+      geraet: this.geraet,
       manuellA: this.manuellA,
       volladung: this.betriebsart === 'manuell' && this.manuellA >= this.grenzen.maxA,
       anschluss: this.anschlussInfo(),
@@ -635,7 +755,9 @@ export class Ladesteuerung {
     verfuegbarW: number;
     hausOhneAutoW: number | null;
     speicherbeitragW: number;
-    betriebsart: Betriebsart;
+    betriebsart: Betriebsart | null;
+    befehl: Befehlsstand | null;
+    geraet: Geraetesicht | null;
     manuellA: number;
     minA: number;
     maxA: number;
@@ -657,6 +779,8 @@ export class Ladesteuerung {
       hausOhneAutoW: e?.hausOhneAutoW ?? null,
       speicherbeitragW: Math.round(e?.speicherbeitragW ?? 0),
       betriebsart: this.betriebsart,
+      befehl: this.befehl,
+      geraet: this.geraet,
       manuellA: this.manuellA,
       minA: this.grenzen.minA,
       maxA: this.grenzen.maxA,
@@ -822,7 +946,8 @@ export class Ladesteuerung {
       // Strom, obwohl wir pausiert zu haben glauben, wird das Gedächtnis
       // verworfen und der Stopp erneut geschickt.
       const laedtWirklich = (messwerte.evLeistungW ?? 0) > LAEDT_AB_W;
-      this.merkeNachfrage(messwerte.evLeistungW ?? 0, messwerte.evAngesteckt);
+      this.merkeNachfrage(messwerte.evLeistungW ?? 0, messwerte.evAngesteckt, messwerte.wallboxErreichbar);
+      this.merkeGeraet(state.resolution.snapshot.evCharger);
 
       // ── An welcher Dose hängt das Auto? ─────────────────────────────────
       // Aus gesetztem Strom und gemessener Leistung folgt beides: die Art der
@@ -907,12 +1032,6 @@ export class Ladesteuerung {
 
       let entscheidung = berechneLadeziel(messwerte, this.parameter());
 
-      // Handbetrieb endet, sobald das Fahrzeug weg ist — sonst gälte er
-      // stillschweigend auch für den nächsten Ladevorgang.
-      if (this.betriebsart !== 'intelligent' && messwerte.evAngesteckt === false) {
-        this.setzeBetriebsartStill('intelligent', this.manuellA);
-      }
-
       // ── Nimmt das Fahrzeug überhaupt noch? ──────────────────────────────
       // Nach drei Freigaben ohne ein einziges Ampere ist der Fall klar: voll,
       // oder die im Auto eingestellte Ladegrenze ist erreicht. Weiter
@@ -939,9 +1058,11 @@ export class Ladesteuerung {
           zustand: 'fordert-nicht',
           zielA: 0,
           zielLeistungW: 0,
+          // "Akku voll" wäre eine Behauptung: Die Wallbox überträgt keinen
+          // Ladestand. Belegt ist nur, dass nichts angenommen wurde.
           grund:
-            'Das Fahrzeug nimmt keinen Strom mehr an — Akku voll oder die im '
-            + 'Auto eingestellte Ladegrenze erreicht. Laden beendet.',
+            'Das Fahrzeug nimmt derzeit keinen Strom an (möglich: Akku voll, '
+            + 'Ladegrenze oder Ladeplan im Auto). Neuer Versuch später.',
         };
       }
 
@@ -967,6 +1088,18 @@ export class Ladesteuerung {
             ? `Handbetrieb — ${Math.round(this.manuellA)} A gewünscht, an der `
               + `Haushaltssteckdose sind ${zielA} A die Dauergrenze.`
             : `Handbetrieb — fest auf ${zielA} A eingestellt, auch aus dem Netz.`,
+        };
+      }
+
+      // Ohne bewusste Wahl wird nicht geladen — auch nicht intelligent. Eine
+      // Wallbox, die gerade freigegeben ist, wird abgeschaltet.
+      if (this.betriebsart === null && messwerte.evAngesteckt === true) {
+        entscheidung = {
+          ...entscheidung,
+          zustand: 'wahl-fehlt',
+          zielA: 0,
+          zielLeistungW: 0,
+          grund: 'Noch kein Lademodus gewählt. Bitte "Intelligent" oder "Manuell" wählen.',
         };
       }
 
@@ -1010,6 +1143,7 @@ export class Ladesteuerung {
         entscheidung.zustand === 'laedt'
         || entscheidung.zustand === 'fordert-nicht'
         || entscheidung.zustand === 'gestoppt'
+        || entscheidung.zustand === 'wahl-fehlt'
         || entscheidung.zustand.startsWith('pausiert');
       if (!regelbar) {
         this.notiere(messwerte, entscheidung, netzW, false, entscheidung.grund, null);
@@ -1022,6 +1156,7 @@ export class Ladesteuerung {
       // Sekunden Beobachtungszeit abwarten; nach einer Pause wären es sogar
       // zwei Minuten.
       const ergebnis = vonHand || this.gestoppt || entscheidung.zustand === 'pausiert-messwerte'
+        || entscheidung.zustand === 'wahl-fehlt'
         ? sofort(entscheidung.zielA, this.historie, Date.now())
         : beruhige({
             wunschA: entscheidung.zielA,
@@ -1070,6 +1205,18 @@ export class Ladesteuerung {
         return;
       }
 
+      // Wunsch, Übermittlung, Bestätigung und Stromfluss sind vier Dinge. Hier
+      // beginnt die Übermittlung; bestätigt wird erst, wenn das Gerät den
+      // Zustand zurückmeldet (siehe `merkeGeraet`).
+      this.befehl = {
+        schalter: ergebnis.stromA > 0,
+        stromA: ergebnis.stromA > 0 ? ergebnis.stromA : null,
+        gesendetAm: new Date().toISOString(),
+        status: 'uebermittelt',
+        fehler: null,
+      };
+      this.melde();
+
       try {
         // Pause heisst abschalten, nicht "auf 6 A herunter". Der kleinste
         // Ladestrom sind gut 4 kW — ohne Sonne kämen die aus dem Netz, und
@@ -1098,6 +1245,9 @@ export class Ladesteuerung {
           }
         }
         this.historie = { ...ergebnis.historie, gesetztA: ergebnis.stromA };
+        if (this.befehl !== null && this.befehl.status === 'uebermittelt') {
+          this.befehl = { ...this.befehl, status: 'angenommen' };
+        }
         this.letzterBefehlAt = Date.now();
         this.letzterFehler = null;
         this.fehlerzahl = 0;
@@ -1119,6 +1269,9 @@ export class Ladesteuerung {
         this.fehlgeschlagenA = ergebnis.stromA;
         this.fehlerzahl += 1;
         this.letzterFehler = error instanceof Error ? error.message : String(error);
+        if (this.befehl !== null) {
+          this.befehl = { ...this.befehl, status: 'fehlgeschlagen', fehler: this.letzterFehler };
+        }
         // Ein misslungener Stopp wird schneller wiederholt als eine misslungene
         // Erhöhung — die eine Richtung kostet Netzstrom, die andere nur Zeit.
         const obergrenze =
@@ -1140,6 +1293,7 @@ export class Ladesteuerung {
       );
     } finally {
       this.laeuft = false;
+      this.melde();
       if (this.erneutRegeln) {
         this.erneutRegeln = false;
         await this.zyklus();

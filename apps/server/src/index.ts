@@ -47,6 +47,7 @@ import { EnergyAccumulator, localDate } from './history.ts';
 import { ChargeSessionLog } from './ev-log.ts';
 import { Ladesteuerung } from './ladesteuerung.ts';
 import { readBody, mitHttpFehlergrenze } from './http-util.ts';
+import { pruefeBetriebsartAnfrage, pruefeStoppAnfrage } from './ev-anfragen.ts';
 
 const PUBLIC_DIR = resolve(import.meta.dirname, '..', 'public');
 
@@ -555,6 +556,12 @@ function handleEvents(
   config: AppConfig,
   nochAngemeldet: () => boolean = () => true,
   regelung: () => ReturnType<Ladesteuerung['kurz']> | null = () => null,
+  /**
+   * Meldet Änderungen der Regelung (Wahl, Pause, Befehlsstatus), damit sie
+   * sofort ankommen und nicht erst mit der nächsten Messung. Es wird dabei der
+   * letzte Messstand mitgeschickt — neu gemessen wird dadurch nichts.
+   */
+  aufRegelung: ((beobachter: () => void) => () => void) | null = null,
 ): void {
   response.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -595,7 +602,15 @@ function handleEvents(
   const current = engine.current();
   if (current !== null) send(current);
 
-  unsubscribe = engine.subscribe(send);
+  const vomMessen = engine.subscribe(send);
+  const vonRegelung = aufRegelung?.(() => {
+    const zustand = engine.current();
+    if (zustand !== null) send(zustand);
+  }) ?? null;
+  unsubscribe = () => {
+    vomMessen();
+    vonRegelung?.();
+  };
   request.on('close', () => {
     unsubscribe?.();
     response.end();
@@ -787,6 +802,7 @@ export async function starteServer(o: Startoptionen): Promise<LaufenderServer> {
           ? undefined
           : () => sitzungen.gilt(kennung) && konten.nachId(konto?.id ?? '') !== null,
         () => ladesteuerung.kurz(),
+        (b) => ladesteuerung.abonniere(b),
       );
       return;
     }
@@ -878,52 +894,57 @@ export async function starteServer(o: Startoptionen): Promise<LaufenderServer> {
       return;
     }
 
-    // Laden anhalten oder fortsetzen — überstimmt jede Betriebsart.
+    // Lade-Schreibanfragen: streng geprüft (400 ohne Zustandsänderung) und erst
+    // nach dauerhaftem Speichern bestätigt (sonst 500, Zustand unverändert).
+    // Die Antwort ist der neue WUNSCH samt Befehlsstatus — ob Strom fliesst,
+    // meldet erst die nächste Messung.
+    const ladeAnfrage = async (
+      pruefe: (roh: unknown) => { ok: true; wert: unknown } | { ok: false; fehler: string },
+      ausfuehren: (wert: never) => unknown,
+    ): Promise<void> => {
+      let roh: unknown;
+      try {
+        roh = JSON.parse(await readBody(request, 1_000));
+      } catch {
+        sendJson(response, 400, { error: 'Ungültige Anfrage.' });
+        return;
+      }
+      const geprueft = pruefe(roh);
+      if (!geprueft.ok) {
+        sendJson(response, 400, { error: geprueft.fehler });
+        return;
+      }
+      try {
+        const extra = ausfuehren(geprueft.wert as never);
+        sendJson(response, 200, extra ?? ladesteuerung.kurz());
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : 'Einstellung konnte nicht übernommen werden.',
+        });
+      }
+    };
+
     if (url.pathname === '/api/ev/stopp' && request.method === 'POST') {
-      void readBody(request, 1_000)
-        .then((body) => {
-          ladesteuerung.setzeGestoppt((JSON.parse(body) as { an?: unknown }).an === true);
-          sendJson(response, 200, ladesteuerung.kurz());
-        })
-        .catch(() => sendJson(response, 400, { error: 'Ungültige Anfrage' }));
+      await ladeAnfrage(pruefeStoppAnfrage, (w: { an: boolean }) => {
+        ladesteuerung.setzeGestoppt(w.an);
+      });
       return;
     }
 
-    // Betriebsart wählen: autark, Handbetrieb mit festem Ladestrom, Volladung.
-    // Die beiden letzten kaufen bewusst Netzstrom — auf Wunsch des Menschen.
     if (url.pathname === '/api/ev/betriebsart' && request.method === 'POST') {
-      void readBody(request, 1_000)
-        .then((body) => {
-          const roh = JSON.parse(body) as { art?: unknown; ampere?: unknown };
-          // "volladung" gab es einmal als eigene Art. Eine noch
-          // zwischengespeicherte Oberfläche darf davon nichts merken: Sie
-          // landet im Handbetrieb, und der Ladestrom kommt vom Gerät.
-          const art = roh.art === 'manuell' || roh.art === 'volladung' ? 'manuell' : 'intelligent';
-          // Der Ladestrom wird hier NICHT gegen 6-16 A geprüft: Die echten
-          // Grenzen kennt nur das Gerät, und die Steuerung begrenzt selbst.
-          // Eine zweite Prüfung hier wäre eine zweite, womöglich falsche
-          // Wahrheit über die Hardware.
-          const ampere = typeof roh.ampere === 'number' && Number.isFinite(roh.ampere)
-            ? roh.ampere
-            : undefined;
-          ladesteuerung.setzeBetriebsart(art, ampere);
-          sendJson(response, 200, ladesteuerung.kurz());
-        })
-        .catch(() => sendJson(response, 400, { error: 'Ungültige Anfrage' }));
+      await ladeAnfrage(pruefeBetriebsartAnfrage, (w: { art: 'intelligent' | 'manuell'; ampere?: number }) => {
+        ladesteuerung.setzeBetriebsart(w.art, w.ampere);
+      });
       return;
     }
 
-    // Volladung erzwingen — bewusster Netzbezug auf Wunsch des Menschen.
-    // Bleibt erhalten, damit eine noch zwischengespeicherte ältere Oberfläche
-    // auf dem Handy nicht ins Leere greift.
+    // Alte Schnittstelle für zwischengespeicherte Oberflächen: "Volladung" ist
+    // Handbetrieb auf dem Höchstwert.
     if (url.pathname === '/api/ev/volladung' && request.method === 'POST') {
-      void readBody(request, 1_000)
-        .then((body) => {
-          const an = (JSON.parse(body) as { an?: unknown }).an === true;
-          ladesteuerung.setzeVolladung(an);
-          sendJson(response, 200, { volladung: an });
-        })
-        .catch(() => sendJson(response, 400, { error: 'Ungültige Anfrage' }));
+      await ladeAnfrage(pruefeStoppAnfrage, (w: { an: boolean }) => {
+        ladesteuerung.setzeVolladung(w.an);
+        return { volladung: w.an };
+      });
       return;
     }
 

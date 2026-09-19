@@ -13,3 +13,12 @@ export function bindeLadestromBestaetigung(
   uebernehmen: (ampere: number) => unknown,
   optionen?: AddEventListenerOptions,
 ): void;
+export function befehlsfolge(): {
+  beginne(): number;
+  beende(nummer: number): boolean;
+  readonly laeuft: boolean;
+};
+export function ladezustand(
+  r: Record<string, unknown> | null | undefined,
+  ev: Record<string, unknown> | null | undefined,
+): { titel: string; text: string; ton: 'ok' | 'neutral' | 'warn' | 'fehler' };

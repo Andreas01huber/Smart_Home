@@ -14,7 +14,7 @@ import {
   formatLadestrom, formatLadeleistung, dosenText, umsteckText,
 } from './format.js';
 import { buildScene, fitScene, createSkyGate, sceneViewBox, pickSceneLayout } from './scene.js';
-import { bindeLadestromBestaetigung, sendeLadebefehl } from './ev-bedienung.js';
+import { befehlsfolge, bindeLadestromBestaetigung, ladezustand, sendeLadebefehl } from './ev-bedienung.js';
 import { ApiFehler, holeJson, istUeberholt, letzteAnfrage } from './api.js';
 import { pruefeTarif, TARIF_GRENZEN } from './tarif-regeln.js';
 
@@ -1758,15 +1758,14 @@ function renderLive(d) {
   lastLive = d;
   const evKurz = el('ev-kurzstatus');
   if (evKurz) {
+    // Dieselbe Zustandslogik wie in der Ladeansicht — eine Stelle, ein Wortlaut.
     const ev = d.ev;
-    const art = ev?.regelung?.betriebsart === 'manuell' ? 'Manuell' : 'Intelligent';
-    const text = !ev?.configured ? 'Wallbox nicht eingerichtet'
-      : ev.state === 'offline' ? 'Wallbox nicht erreichbar'
-      : ev.vehicleConnected === false ? 'Kein Fahrzeug angesteckt'
-      : ev.vehicleConnected == null ? 'Anschlussstatus unbekannt'
-      : ev.state === 'charging' ? `${art} · ${formatPower(ev.powerW)}`
-      : `${art} · ${ev.regelung?.gestoppt ? 'Pause angefordert' : 'Angesteckt'}`;
-    evKurz.textContent = text;
+    const r = ev?.regelung;
+    const modus = r?.betriebsart === 'manuell' ? `Manuell ${r.manuellA} A`
+      : r?.betriebsart === 'intelligent' ? 'Intelligent' : 'kein Modus gewählt';
+    const z = ladezustand(r, ev);
+    const leistung = Number.isFinite(ev?.powerW) && ev.powerW > 100 ? ` · ${formatPower(ev.powerW)}` : '';
+    evKurz.textContent = !ev?.configured ? 'Wallbox nicht eingerichtet' : `${z.titel}${leistung} · ${modus}`;
   }
   // Tageswechsel der Anlage: Wer "heute" ansah, sieht jetzt bewusst den neuen
   // Tag. Wer einen Archivtag ausgewählt hat, bleibt dort.
@@ -1884,15 +1883,8 @@ let evProtokollOffen = false;
  * `null` heisst "noch nichts angefasst, nimm den Wert vom Server".
  */
 let evSchieberA = null;
-/**
- * Ob die Rückfrage vor dem Handbetrieb gerade offen steht.
- *
- * Wie `evSchieberA` ausserhalb der Ansicht: Die Seite wird alle zwei Sekunden
- * neu gebaut, und eine Rückfrage, die dabei verschwindet, kann niemand
- * beantworten.
- */
-let evNachfrage = false;
-let evBefehlLaeuft = false;
+/** Reihenfolge der Bedienbefehle — nur die neueste Antwort ersetzt die Anzeige. */
+const evBefehle = befehlsfolge();
 let evBefehlFehler = '';
 let evBefehlHinweis = '';
 let evStats = null;         // Antwort von /api/ev/stats
@@ -1987,58 +1979,18 @@ function ampereErklaerung(ev) {
  * kommt aus dem Regler selbst, nicht aus einer Übersetzungstabelle hier: Nur
  * dort ist bekannt, welche Zahl den Ausschlag gegeben hat.
  */
-const REGEL_KOPF = {
-  aus: 'Überschussregelung ist ausgeschaltet',
-  wartet: 'Wartet auf Freigabe',
-  'nicht-verbunden': 'Kein Fahrzeug angesteckt',
-  laedt: 'Lädt aus Sonne und Speicher',
-  gestoppt: 'Laden beendet',
-  'pausiert-leistung': 'Laden pausiert – zu wenig Überschuss',
-  'pausiert-speicher': 'Laden pausiert – Speicherreserve',
-  'pausiert-messwerte': 'Laden pausiert – Messwerte unsicher',
-  gestoert: 'Wallbox nicht erreichbar',
-  beendet: 'Ladevorgang beendet',
-  'fordert-nicht': 'Fahrzeug ist voll',
-};
-
 function regelKopfMarkup(ev) {
   const r = ev.regelung;
   if (!r) return '';
-  const laedt = r.zustand === 'laedt';
-  const pausiert = String(r.zustand).startsWith('pausiert');
-  const art = r.betriebsart ?? (r.volladung ? 'manuell' : 'intelligent');
-  // Im Handbetrieb ist "Lädt mit Überschuss" schlicht falsch — da wird
-  // notfalls Netzstrom gekauft. Und die Farbe darf dann nicht Grün sein:
-  // Grün heisst in dieser App "alles aus eigener Erzeugung".
-  // Die Regelung sagt "lädt", wenn sie freigegeben HAT. Ob das Fahrzeug die
-  // Freigabe auch annimmt, ist eine andere Frage — und die beantwortet nur die
-  // Wallbox. Steht dort Control-Pilot 9 V (angesteckt, fordert nicht) und
-  // fliesst nichts, dann lädt eben nichts, egal was die Rechnung freigibt.
-  // Das kommt vor: gegen Ende eines Ladevorgangs, bei Abfahrtszeit im Auto,
-  // oder wenn das Fahrzeug selbst eine Pause macht.
-  const fordertNicht = laedt && ev.state === 'connected' && (ev.powerW ?? 0) < 100;
-  const titel = r.gestoppt
-    ? (r.gesetztA === 0 && !r.letzterFehler ? 'Ladestopp gesendet' : 'Stopp angefordert')
-    : fordertNicht
-    ? 'Freigegeben — Fahrzeug lädt gerade nicht'
-    : laedt && art === 'manuell'
-      ? 'Lädt mit festem Ladestrom'
-      : (REGEL_KOPF[r.zustand] ?? 'Zustand unbekannt');
-  const klasse = fordertNicht || r.zustand === 'fordert-nicht' ? ''
-    : laedt && art === 'manuell' ? 'warn'
-    : laedt ? 'ok'
-    : pausiert || r.zustand === 'gestoert' ? 'warn' : '';
+  // Die Benennung steht in ev-bedienung.js und ist dort geprüft: Wunsch,
+  // Befehl, Gerätemeldung und gemessener Stromfluss werden getrennt gewertet.
+  const z = ladezustand(r, ev);
   const nurBeobachtet = r.modus === 'beobachten';
   return `
-    <div class="ev-kopf ${esc(klasse)}">
-      <span class="ev-kopf-titel">${esc(titel)}</span>
-      <span class="ev-kopf-grund">${esc(
-        fordertNicht
-          ? `Die Wallbox ist auf ${r.gesetztA > 0 ? `${r.gesetztA} A` : 'Laden'} freigegeben, das Fahrzeug fordert gerade keinen Strom. Sobald es wieder will, läuft es von selbst an.`
-          : (r.grund ?? ''),
-      )}</span>
+    <div class="ev-kopf ton-${esc(z.ton)}" role="status">
+      <span class="ev-kopf-titel">${esc(z.titel)}</span>
+      ${z.text ? `<span class="ev-kopf-grund">${esc(z.text)}</span>` : ''}
       ${nurBeobachtet ? `<span class="ev-kopf-hinweis">Beobachtungsmodus — die Wallbox wird noch nicht gestellt. Umschalten in config.json unter <code>ueberschussladen.modus</code>.</span>` : ''}
-      ${r.modus === 'aus' ? `<span class="ev-kopf-hinweis">Die Regelung ist abgeschaltet. Die Wallbox lädt mit ihrer eigenen Einstellung.</span>` : ''}
     </div>`;
 }
 
@@ -2065,39 +2017,28 @@ function herkunftMarkup(ev) {
 }
 
 /**
- * Die zwei Betriebsarten.
+ * Die zwei Betriebsarten — eine eindeutige Wahl, ohne Warndialog.
  *
- * Als Segmentschalter, weil sie einander ausschliessen: ein Rahmen, zwei
- * Felder, eines sichtbar aktiv. Zwei lose Knöpfe liessen offen, ob auch beide
- * gelten könnten.
- *
- * "Volladung" gab es einmal als dritte Art und ist entfallen — sie war nichts
- * anderes als Handbetrieb ganz rechts am Regler. Ein Knopf weniger für dieselbe
- * Fähigkeit.
- *
- * Der Handbetrieb kauft im Zweifel Netzstrom. Deshalb kommt man nicht mit einem
- * Fingertipp hinein: Erst erscheint die Frage, was das bedeutet, und erst die
- * Bestätigung schaltet um. Zurück in den intelligenten Betrieb geht es dagegen
- * sofort — die sichere Richtung braucht keine Rückfrage.
+ * Früher kam vor dem Handbetrieb jedes Mal eine Rückfrage. Jetzt ist die Wahl
+ * ein Segmentschalter, und der Handbetrieb trägt dauerhaft den Hinweis "bei
+ * Bedarf Netzstrom". Die Wahl gilt, bis sie geändert wird — auch nach dem
+ * Abstecken und nach einem Neustart — und lässt sich ohne Auto treffen.
  */
 const EV_ARTEN = [
-  { id: 'intelligent', name: 'Intelligentes Laden', kurz: 'Sonne + Speicher' },
-  { id: 'manuell', name: 'Manuelles Laden', kurz: 'Fester Ladestrom' },
+  { id: 'intelligent', name: 'Intelligent', kurz: 'Überschuss aus Sonne und Speicher' },
+  { id: 'manuell', name: 'Manuell', kurz: 'Fester Ladestrom · bei Bedarf Netzstrom' },
 ];
 
 function betriebsartMarkup(ev) {
   const r = ev.regelung;
   if (!r || r.modus === 'aus') return '';
-  const art = r.betriebsart ?? (r.volladung ? 'manuell' : 'intelligent');
+  const art = r.betriebsart ?? null;
   const minA = r.minA || 6;
   const maxA = r.maxA || 16;
   const schieber = evSchieberA ?? (r.manuellA >= minA ? r.manuellA : Math.round((minA + maxA) / 2));
   const dose = r.anschluss;
   const gestoppt = r.gestoppt === true;
 
-  // Der aktive Knopf traegt einen Haken und den vollen Akzentton. Vorher war
-  // er nur eine Spur heller als der andere — auf einem Telefon im Sonnenlicht
-  // sah man nicht, was gerade gilt.
   const haken = `<svg class="ev-art-haken" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const knoepfe = EV_ARTEN.map((a) => `
     <button type="button" class="ev-art${a.id === art ? ' aktiv' : ''}" data-art="${a.id}"
@@ -2105,46 +2046,28 @@ function betriebsartMarkup(ev) {
       <b>${a.id === art ? haken : ''}${a.name}</b><span>${a.kurz}</span>
     </button>`).join('');
 
-  // Die Rückfrage steht an der Stelle, an der sonst der Regler stünde — dort
-  // schaut man beim Umschalten ohnehin hin.
-  const nachfrage = evNachfrage ? `
-    <div class="ev-nachfrage">
-      <p><b>Von Hand laden?</b> Der eingestellte Ladestrom gilt dann fest — reicht
-      die eigene Erzeugung nicht, wird der Rest aus dem Netz gekauft. Endet beim
-      Abstecken und beim Neustart.</p>
-      <div class="ev-nachfrage-knoepfe">
-        <button type="button" class="btn-primary" id="ev-bestaetigen">Ladestrom bestätigen & manuell laden</button>
-        <button type="button" class="btn-schlicht" id="ev-abbrechen">Abbrechen</button>
-      </div>
-    </div>` : '';
-
-  // An der Haushaltsdose ist bei der dort zulaessigen Dauerstrom-Grenze Schluss.
-  // Einen Regler bis 16 A anzubieten und dann still auf 10 zu kappen waere ein
-  // Versprechen, das die App nicht haelt.
-  const reglerMaxA = Math.min(maxA, r.haushaltMaxA ?? maxA);
-  // Der Regler steht auch waehrend der Rueckfrage da. Wer wissen will, worauf
-  // er sich einlaesst, soll den Wert vorher sehen und einstellen koennen —
-  // nicht erst zusagen, dann nachsehen und wieder abbrechen muessen.
-  const reglerSichtbar = (art === 'manuell' || evNachfrage) && !gestoppt;
-  const regler = reglerSichtbar
-    ? reglerMarkup(Math.min(schieber, reglerMaxA), minA, reglerMaxA, dose, evNachfrage)
+  // Die Haushaltsgrenze gilt nur an einer einphasigen Dose — nicht pauschal.
+  const reglerMaxA = dose?.phasen === 1 ? Math.min(maxA, r.haushaltMaxA ?? maxA) : maxA;
+  const regler = art === 'manuell'
+    ? reglerMarkup(Math.min(schieber, reglerMaxA), minA, reglerMaxA, dose, schieber !== r.manuellA)
     : '';
+  const geaendert = art === 'manuell' && evSchieberA !== null && evSchieberA !== r.manuellA;
 
-  const erklaerung = art === 'intelligent'
-    ? 'Es wird nur geladen, was Sonne und Speicher hergeben. Das Auto verursacht keinen Netzbezug.'
-    : `Bestätigter Sollwert: ${r.manuellA ?? '—'} A. Reicht die eigene Erzeugung nicht, kommt der Rest aus dem Netz.`;
+  const erklaerung = art === null
+    ? 'Noch kein Lademodus gewählt — bis dahin wird nicht geladen.'
+    : art === 'intelligent'
+      ? 'Regelziel: Netzbezug durch das Auto vermeiden. Geladen wird mit dem Überschuss aus Sonne und freigegebenen Speichern; wegen der Cloud-Verzögerung der Wallbox ist das ein Ziel, keine Garantie.'
+      : `Fester Sollwert ${r.manuellA} A${dose?.phasen === 1 && r.manuellA > reglerMaxA ? ` (an dieser Dose wirksam ${reglerMaxA} A)` : ''}. Bei Bedarf wird Netzstrom verwendet.`;
 
   return `
-    <div class="ev-betrieb ${art === 'manuell' && !gestoppt ? 'netzstrom' : ''}${gestoppt ? ' gestoppt' : ''}">
-      <div class="ev-arten" role="group" aria-label="Betriebsart">${knoepfe}</div>
-      ${nachfrage}
+    <div class="ev-betrieb${gestoppt ? ' gestoppt' : ''}">
+      <div class="ev-arten" role="group" aria-label="Lademodus">${knoepfe}</div>
       ${regler}
-      ${reglerSichtbar && !evNachfrage ? '<button type="button" class="btn-primary ev-stopp" id="ev-ampere-bestaetigen">Ladestrom bestätigen</button>' : ''}
-      ${reglerSichtbar ? '<p class="ev-hinweis">Der Regler ändert nur die Auswahl. Erst mit Bestätigen wird sie übernommen. Die kW am Regler sind eine berechnete Vorschau.</p>' : ''}
-      <p class="ev-betrieb-text">${esc(gestoppt ? 'Ein Ladestopp ist angefordert. Die eingestellte Betriebsart gilt wieder, sobald du fortsetzt.' : erklaerung)}</p>
+      ${geaendert ? `<button type="button" class="btn-primary ev-bestaetigen" id="ev-ampere-bestaetigen">${esc(`${Math.min(schieber, reglerMaxA)} A übernehmen`)}</button>` : ''}
+      <p class="ev-betrieb-text">${esc(erklaerung)}</p>
       ${dosenHinweis(ev)}
       ${umsteckHinweis(ev)}
-      ${beendenMarkup(gestoppt)}
+      ${art === null ? '' : beendenMarkup(gestoppt)}
     </div>`;
 }
 
@@ -2421,17 +2344,23 @@ const EV_RANGES = [
 
 function evStatsMarkup() {
   const chips = EV_RANGES
-    .map(([key, label]) => `<button class="vt-btn ${evStatsRange === key ? 'active' : ''}" type="button" data-range="${key}">${label}</button>`)
+    .map(([key, label]) => `<button class="vt-btn ${evStatsRange === key ? 'active' : ''}" type="button" role="tab" aria-selected="${evStatsRange === key}" data-range="${key}">${label}</button>`)
     .join('');
   const s = evStats;
+  // Bei einem Fehler bleiben die zuletzt bestätigten Zahlen stehen, mit Hinweis.
+  const fehler = evStatsFehler
+    ? `<p class="notice" role="alert">${esc(evStatsFehler)} <button type="button" class="btn-schlicht" id="ev-stats-wiederholen">Erneut laden</button></p>`
+    : '';
   const body = s === null
-    ? `<p class="session-empty">Wird geladen …</p>`
-    : `<div class="detail-grid">
+    ? (fehler || `<p class="session-empty">Wird geladen …</p>`)
+    : `${fehler}${s.range !== evStatsRange ? '<p class="session-empty">Zeitraum wird geladen …</p>' : ''}
+       <div class="detail-grid">
          ${tile('Geladen', formatEnergy(s.energyWh))}
          ${tile('Ladevorgänge', String(s.sessionCount), true)}
          ${tile('Ladedauer', formatDuration(s.chargingSeconds), true)}
        </div>
        <div style="margin-top:0.9rem">${splitMarkup(s.split)}</div>
+       ${s.naeherungWh > 0 ? `<p class="card-more">${esc(formatEnergy(s.naeherungWh))} stammen aus älteren Ladevorgängen ohne Tagesaufteilung und sind ihrem Starttag zugerechnet (Näherung).</p>` : ''}
        ${statsChartMarkup(s.buckets)}`;
   return `
     <div class="detail-section">
@@ -2580,7 +2509,7 @@ function renderEvDetail() {
     evLiveMarkup(ev) +
     (evBefehlFehler ? `<p class="notice" role="alert">${esc(evBefehlFehler)}</p>` : '') +
     (evBefehlHinweis ? `<p class="notice" role="status">${esc(evBefehlHinweis)}</p>` : '') +
-    (evBefehlLaeuft ? '<p role="status">Befehl wird übermittelt …</p>' : '') +
+    (evBefehle.laeuft ? '<p class="notice" role="status">Wird übernommen …</p>' : '') +
     (currentOrLast
       ? sessionMarkup(currentOrLast, evSessions?.current ? 'Laufender Ladevorgang' : 'Letzter Ladevorgang')
       : '') +
@@ -2609,21 +2538,14 @@ function renderEvDetail() {
     });
   }
 
-  // Betriebsart umschalten
+  // Lademodus wählen — direkt, ohne Rückfrage. Der Handbetrieb übernimmt den
+  // zuletzt gewählten Strom; ändern lässt er sich danach am Regler.
   body.querySelectorAll('.ev-art').forEach((knopf) => {
     binde(knopf, 'click', () => {
       const art = knopf.getAttribute('data-art');
-      const jetzt = evRegelung?.betriebsart ?? 'intelligent';
+      const jetzt = lastLive?.ev?.regelung?.betriebsart ?? null;
       if (art === jetzt) return;
-      if (art === 'manuell') {
-        // In den Handbetrieb nur über die Rückfrage — dort wird Netzstrom
-        // gekauft, und das soll niemand mit einem Fingertipp auslösen.
-        evNachfrage = true;
-        renderEvDetail();
-        return;
-      }
-      evNachfrage = false;
-      void sendeBetriebsart('intelligent', null);
+      void sendeBetriebsart(art, art === 'manuell' ? evSchieberA : null);
     });
   });
 
@@ -2636,24 +2558,6 @@ function renderEvDetail() {
     });
   }
 
-
-  const bestaetigen = body.querySelector('#ev-bestaetigen');
-  if (bestaetigen) {
-    binde(bestaetigen, 'click', () => {
-      evNachfrage = false;
-      // Der Wert vom Regler gilt sofort mit — sonst müsste man erst
-      // umschalten und dann noch einmal schieben.
-      const eingabe = body.querySelector('#ev-schieber');
-      void sendeBetriebsart('manuell', eingabe ? Number(eingabe.value) : evSchieberA);
-    });
-  }
-  const abbrechen = body.querySelector('#ev-abbrechen');
-  if (abbrechen) {
-    binde(abbrechen, 'click', () => {
-      evNachfrage = false;
-      renderEvDetail();
-    });
-  }
 
   // Schieberegler für den Ladestrom
   const schieber = body.querySelector('#ev-schieber');
@@ -2687,6 +2591,8 @@ function renderEvDetail() {
       loadEvStats().then(renderEvDetail);
     });
   });
+  const statsNochmal = body.querySelector('#ev-stats-wiederholen');
+  if (statsNochmal) binde(statsNochmal, 'click', () => { loadEvStats().then(renderEvDetail); });
   // Ladevorgang auf-/zuklappen
   body.querySelectorAll('.session-row[data-session]').forEach((row) => {
     binde(row, 'click', () => {
@@ -2695,15 +2601,25 @@ function renderEvDetail() {
       renderEvDetail();
     });
   });
-  body.querySelectorAll('.ev-art, #ev-schieber, #ev-stopp, #ev-bestaetigen, #ev-ampere-bestaetigen').forEach((x) => {
-    x.disabled = evBefehlLaeuft;
+  // Während ein Befehl unterwegs ist, ruhen Moduswahl und Regler. Die
+  // Pause-Taste ausdrücklich NICHT: Ein Stopp muss jederzeit durchgehen.
+  body.querySelectorAll('.ev-art, #ev-schieber, #ev-ampere-bestaetigen').forEach((x) => {
+    x.disabled = evBefehle.laeuft;
   });
 }
 
+const evSitzungenAbfrage = letzteAnfrage();
+const evStatsAbfrage = letzteAnfrage();
+const evRegelungAbfrage = letzteAnfrage();
+let evStatsFehler = '';
+
+/** Ladevorgänge. Bei einem Fehler bleibt die zuletzt bestätigte Liste stehen. */
 async function loadEvSessions() {
   try {
-    evSessions = await (await fetch('/api/ev/sessions?limit=50')).json();
-  } catch (err) { console.error(err); evSessions = { current: null, sessions: [] }; }
+    evSessions = await evSitzungenAbfrage('/api/ev/sessions?limit=50');
+  } catch (err) {
+    if (!istUeberholt(err)) console.warn(err);
+  }
 }
 /**
  * Betriebsart an den Server schicken und die Ansicht sofort nachziehen.
@@ -2728,30 +2644,35 @@ async function loadEvSessions() {
  * dieser Stelle soll die App nichts behaupten, was noch nicht fliesst.
  */
 async function sendeUndZeige(pfad, koerper) {
-  if (evBefehlLaeuft) return;
-  evBefehlLaeuft = true;
+  // Ein Stopp darf auch während eines laufenden Befehls hinaus; nur die Antwort
+  // auf den jeweils neuesten Befehl ersetzt danach die Anzeige.
+  const nummer = evBefehle.beginne();
   evBefehlFehler = '';
   evBefehlHinweis = '';
   renderEvDetail();
+  let kurz = null;
+  let fehler = null;
   try {
-    const kurz = await sendeLadebefehl(pfad, koerper);
-    if (kurz && typeof kurz === 'object' && lastLive?.ev) {
+    kurz = await sendeLadebefehl(pfad, koerper);
+  } catch (err) {
+    fehler = err;
+  }
+  const neueste = evBefehle.beende(nummer);
+  if (neueste) {
+    if (fehler) {
+      // Die Anzeige behält den zuletzt bestätigten Zustand.
+      evBefehlFehler = fehler instanceof Error ? fehler.message : 'Befehl konnte nicht bestätigt werden.';
+    } else if (kurz && lastLive?.ev) {
       lastLive.ev.regelung = kurz;
       evRegelung = { ...(evRegelung ?? {}), ...kurz };
       if (koerper.art === 'manuell') {
         evSchieberA = null;
-        evBefehlHinweis = `Sollwert ${kurz.manuellA ?? koerper.ampere} A von der Regelung übernommen. Die tatsächlichen Ampere und kW oben stammen weiterhin aus der Geräterückmeldung.`;
+        evBefehlHinweis = `Sollwert ${kurz.manuellA ?? koerper.ampere} A gespeichert. Ob Strom fliesst, zeigt die nächste Messung.`;
       }
+      void loadEvRegelung();
     }
-    // Das Protokoll im Hintergrund nachziehen, ohne die Anzeige aufzuhalten.
-    void loadEvRegelung();
-  } catch (err) {
-    console.error(err);
-    evBefehlFehler = err instanceof Error ? err.message : 'Befehl konnte nicht bestätigt werden.';
-  } finally {
-    evBefehlLaeuft = false;
-    renderEvDetail();
   }
+  renderEvDetail();
 }
 
 function sendeBetriebsart(art, ampere) {
@@ -2764,21 +2685,56 @@ function sendeStopp(an) {
 }
 
 async function loadEvRegelung() {
+  evRegelungGeholtAt = Date.now();
   try {
-    evRegelung = await (await fetch('/api/ev/regelung')).json();
-    evRegelungGeholtAt = Date.now();
-  } catch (err) { console.error(err); }
+    evRegelung = await evRegelungAbfrage('/api/ev/regelung');
+  } catch (err) {
+    if (!istUeberholt(err)) console.warn(err);
+  }
 }
+/** Statistik des gewählten Zeitraums — nur die neueste Auswahl zählt. */
 async function loadEvStats() {
   try {
-    evStats = await (await fetch(`/api/ev/stats?range=${encodeURIComponent(evStatsRange)}&date=${todayStr()}`)).json();
-  } catch (err) { console.error(err); evStats = null; }
+    evStats = await evStatsAbfrage(`/api/ev/stats?range=${encodeURIComponent(evStatsRange)}&date=${todayStr()}`);
+    evStatsFehler = '';
+  } catch (err) {
+    if (istUeberholt(err)) return;
+    evStatsFehler = err instanceof ApiFehler ? err.message : 'Statistik konnte nicht geladen werden.';
+  }
+}
+
+/**
+ * Laufende Session und Statistik nachführen, solange die Ansicht offen ist.
+ *
+ * Nicht pro Messwert: höchstens alle 30 Sekunden, und nie zwei Läufe
+ * gleichzeitig. Die Live-Werte oben kommen ohnehin über den Ereignisstrom.
+ */
+let evNachfuehrenTimer = null;
+let evNachfuehrenLaeuft = false;
+function starteEvNachfuehren() {
+  if (evNachfuehrenTimer !== null) return;
+  evNachfuehrenTimer = setInterval(async () => {
+    if (el('ev-detail').hidden) {
+      clearInterval(evNachfuehrenTimer);
+      evNachfuehrenTimer = null;
+      return;
+    }
+    if (evNachfuehrenLaeuft) return;
+    evNachfuehrenLaeuft = true;
+    try {
+      await Promise.all([loadEvSessions(), loadEvStats()]);
+      renderEvDetail();
+    } finally {
+      evNachfuehrenLaeuft = false;
+    }
+  }, 30_000);
 }
 
 function openEvDetail() {
   oeffneDialog('ev-detail');
   renderEvDetail();
   Promise.all([loadEvSessions(), loadEvStats(), loadEvRegelung()]).then(renderEvDetail);
+  starteEvNachfuehren();
 }
 function closeEvDetail() {
   schliesseDialog('ev-detail');

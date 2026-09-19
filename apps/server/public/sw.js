@@ -6,7 +6,7 @@
  * veraltete Messwerte dürfen nicht als aktuell erscheinen (Anforderung 4P/53).
  */
 
-const CACHE = 'energie-shell-v72';
+const CACHE = 'energie-shell-v74';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/format.js', '/scene.js', '/ev-bedienung.js', '/api.js', '/tarif-regeln.js', '/favicon-64.png?v=20260827', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
@@ -44,10 +44,23 @@ function nurAusDemNetz(pfad) {
   );
 }
 
+/**
+ * Was überhaupt in den Cache darf: die App-Shell dieser Fassung und statische
+ * Grafiken/Schriften. Alles andere — Schnittstellen, Diagnose, Healthcheck,
+ * unbekannte Pfade — geht immer ins Netz. Vorher landete jede sonstige
+ * GET-Antwort im Cache und wurde danach als aktuell ausgeliefert.
+ */
+const SHELL_PFADE = new Set(SHELL.map((s) => s.split('?')[0]));
+function darfGecacht(pfad) {
+  return SHELL_PFADE.has(pfad) || pfad.startsWith('/assets/')
+    || /\.(png|svg|ico|webp|jpg|jpeg|woff2?)$/.test(pfad);
+}
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   // API, Anmeldung und Verwaltung immer aus dem Netz, niemals aus dem Cache.
   if (nurAusDemNetz(url.pathname)) return;
+  if (url.origin !== self.location.origin || !darfGecacht(url.pathname)) return;
   if (event.request.method !== 'GET') return;
 
   event.respondWith(

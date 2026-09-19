@@ -17,7 +17,10 @@
  *     erneut hinausgehen. Der Messwert gilt, nicht das Gedächtnis.
  */
 
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 
 import type {
@@ -229,7 +232,15 @@ function konfiguration(ueber: Partial<AppConfig['ueberschuss']> = {}): AppConfig
 }
 
 /** Baut Dienst, Engine und Wallbox und lässt so viele Zyklen laufen wie nötig. */
-function aufbau(ueber: Partial<AppConfig['ueberschuss']> = {}): {
+/**
+ *  wahl Die bewusste Wahl vor dem ersten Zyklus. `null` = wie nach einer
+ *   Erstinstallation ohne gespeicherte Einstellung.
+ */
+function aufbau(
+  ueber: Partial<AppConfig['ueberschuss']> = {},
+  wahl: 'intelligent' | 'manuell' | null = 'intelligent',
+  datenverzeichnis: string | null = null,
+): {
   engine: EngineAttrappe;
   wallbox: WallboxAttrappe;
   steuerung: Ladesteuerung;
@@ -241,7 +252,9 @@ function aufbau(ueber: Partial<AppConfig['ueberschuss']> = {}): {
     engine as unknown as EnergyEngine,
     wallbox as unknown as never,
     konfiguration(ueber),
+    datenverzeichnis,
   );
+  if (wahl !== null) steuerung.setzeBetriebsart(wahl);
   // `start()` würde einen Zeitgeber aufziehen. Der Test taktet selbst.
   const zyklus = async (): Promise<void> => {
     await (steuerung as unknown as { zyklus: () => Promise<void> }).zyklus();
@@ -286,18 +299,33 @@ describe('Regressionsschutz der Ladebefehle', () => {
     assert.equal(a.steuerung.zustand().gesetztA, 0);
   });
 
-  it('beendet Handbetrieb auch beim kurzen Abstecken zwischen Regelzyklen', async () => {
+  it('behält beim kurzen Abstecken die Wahl, hebt aber die Pause auf', async () => {
+    // Neue Produktentscheidung (Auftrag 17, Abschnitt 3): Die zuletzt gewählte
+    // Betriebsart gilt weiter; nur die Pause gilt pro Steckvorgang.
     const a = aufbau();
     a.steuerung.start();
     try {
       a.steuerung.setzeBetriebsart('manuell', 16);
+      a.steuerung.setzeGestoppt(true);
+      a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, angesteckt: true });
+      a.engine.melde();
       a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, angesteckt: false });
       a.engine.melde();
-      assert.equal(a.steuerung.zustand().betriebsart, 'intelligent');
-      a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, angesteckt: true });
-      await a.zyklus();
-      assert.equal(a.steuerung.zustand().zielA, 0);
-      assert.equal(a.wallbox.befehle.some((b) => b.art === 'schalter' && b.wert === true), false);
+      assert.equal(a.steuerung.zustand().betriebsart, 'manuell');
+      assert.equal(a.steuerung.zustand().manuellA, 16);
+      assert.equal(a.steuerung.zustand().gestoppt, false);
+    } finally { a.steuerung.stop(); }
+  });
+
+  it('hält eine Pause, wenn die Wallbox nur nicht erreichbar ist', async () => {
+    // Offline ist kein Abstecken — sonst hebe ein Cloud-Aussetzer die Pause auf.
+    const a = aufbau();
+    a.steuerung.start();
+    try {
+      a.steuerung.setzeGestoppt(true);
+      a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, angesteckt: false, offline: true });
+      a.engine.melde();
+      assert.equal(a.steuerung.zustand().gestoppt, true);
     } finally { a.steuerung.stop(); }
   });
 
@@ -438,7 +466,7 @@ describe('Handbetrieb auf dem Höchstwert (früher "Volladung")', () => {
     );
   });
 
-  it('endet von selbst, wenn das Fahrzeug abgesteckt wird', async () => {
+  it('bleibt über das Abstecken bestehen — es ist die gewählte Einstellung', async () => {
     const { engine, steuerung, zyklus } = aufbau();
     engine.setze({ pv: 0, hausOhneAuto: 800, ev: 11_085, stromA: 16 });
     steuerung.setzeVolladung(true);
@@ -448,11 +476,7 @@ describe('Handbetrieb auf dem Höchstwert (früher "Volladung")', () => {
     engine.setze({ pv: 0, hausOhneAuto: 800, ev: 0, angesteckt: false });
     await zyklus();
 
-    assert.equal(
-      steuerung.zustand().volladung,
-      false,
-      'Volladung darf nicht für den naechsten Ladevorgang weitergelten',
-    );
+    assert.equal(steuerung.zustand().volladung, true);
   });
 });
 
@@ -702,7 +726,7 @@ describe('Betriebsarten: autark, Handbetrieb, Volladung', () => {
     assert.equal(zweiter.wallbox.befehle.find((b) => b.art === 'strom')?.wert, 6);
   });
 
-  it('geht beim Abstecken von selbst auf autark zurück', async () => {
+  it('behält die gewählte Betriebsart beim Abstecken', async () => {
     const { engine, steuerung, zyklus } = aufbau();
     engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 0 });
     steuerung.setzeBetriebsart('manuell', 16);
@@ -711,11 +735,7 @@ describe('Betriebsarten: autark, Handbetrieb, Volladung', () => {
 
     engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, angesteckt: false });
     await zyklus();
-    assert.equal(
-      steuerung.zustand().betriebsart,
-      'intelligent',
-      'die Übersteuerung galt still für den nächsten Ladevorgang weiter',
-    );
+    assert.equal(steuerung.zustand().betriebsart, 'manuell');
   });
 
   it('wartet von Hand keine Beobachtungszeit ab', async () => {
@@ -828,7 +848,8 @@ describe('Fahrzeug nimmt die Freigabe nicht an', () => {
 
     assert.equal(a.steuerung.zustand().fordertNicht, true);
     assert.equal(a.steuerung.zustand().zustand, 'fordert-nicht');
-    assert.match(a.steuerung.zustand().grund, /nimmt keinen Strom/);
+    assert.match(a.steuerung.zustand().grund, /nimmt derzeit keinen Strom/);
+    assert.match(a.steuerung.zustand().grund, /möglich: Akku voll/);
 
     // Und vor allem: Es geht keine weitere Freigabe mehr hinaus. Genau das war
     // der Zustand an der Anlage — alle paar Minuten ein Schuetz, das gleich
@@ -1090,5 +1111,110 @@ describe('Alter des Wallbox-Werts', () => {
     await zyklus();
     assert.notEqual(steuerung.zustand().zustand, 'pausiert-messwerte');
     assert.ok(steuerung.zustand().zielA > 0, 'hat trotz Sonne und angestecktem Auto nicht geladen');
+  });
+});
+
+describe('Lademodus: bewusste Wahl, dauerhaft gespeichert', () => {
+  const ordner: string[] = [];
+  const neuerOrdner = (): string => {
+    const d = mkdtempSync(join(tmpdir(), 'lademodus-'));
+    ordner.push(d);
+    return d;
+  };
+  afterEach(() => {
+    for (const d of ordner.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it('lädt ohne gespeicherte Wahl nicht und schaltet eine freigegebene Wallbox ab', async () => {
+    const a = aufbau({}, null, neuerOrdner());
+    a.engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 4140, stromA: 6, schalterAn: true });
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().zustand, 'wahl-fehlt');
+    assert.equal(a.steuerung.zustand().betriebsart, null);
+    assert.deepEqual(a.wallbox.befehle, [{ art: 'schalter', wert: false }]);
+  });
+
+  it('behält Betriebsart, Strom und Pause über einen Neustart', async () => {
+    const dir = neuerOrdner();
+    const a = aufbau({}, null, dir);
+    a.steuerung.setzeBetriebsart('manuell', 10);
+    a.steuerung.setzeGestoppt(true);
+
+    const b = aufbau({}, null, dir);
+    const z = b.steuerung.zustand();
+    assert.equal(z.betriebsart, 'manuell');
+    assert.equal(z.manuellA, 10);
+    assert.equal(z.gestoppt, true);
+  });
+
+  it('eine beschädigte Einstellung löst keinen Start aus und bleibt erhalten', async () => {
+    const dir = neuerOrdner();
+    writeFileSync(join(dir, 'lademodus.json'), '{"version":1,"betriebsart":"manuell","manuellA":"viel"}');
+    const a = aufbau({}, null, dir);
+    a.engine.setze({ pv: 12_000, hausOhneAuto: 500, ev: 0, stromA: 6 });
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().zustand, 'wahl-fehlt');
+    assert.equal(a.wallbox.befehle.some((x) => x.art === 'schalter' && x.wert === true), false);
+    assert.ok(readdirSync(dir).some((d) => d.includes('beschaedigt')), 'Datei nicht aufbewahrt');
+  });
+
+  it('meldet keinen Erfolg, wenn nicht gespeichert werden kann — und ändert nichts', () => {
+    const dir = neuerOrdner();
+    const a = aufbau({}, 'intelligent', dir);
+    rmSync(dir, { recursive: true, force: true });
+    assert.throws(() => a.steuerung.setzeBetriebsart('manuell', 12), /nicht gespeichert/);
+    assert.equal(a.steuerung.zustand().betriebsart, 'intelligent');
+  });
+
+  it('die Wahl ist auch ohne angestecktes Auto möglich', async () => {
+    const a = aufbau({}, null, neuerOrdner());
+    a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, angesteckt: false });
+    a.steuerung.setzeBetriebsart('manuell', 10);
+    await a.zyklus();
+    assert.equal(a.steuerung.zustand().betriebsart, 'manuell');
+    assert.equal(a.wallbox.befehle.length, 0, 'ohne Auto darf nichts gesendet werden');
+  });
+});
+
+describe('Wunsch, Befehl, Gerätebestätigung und Stromfluss getrennt', () => {
+  it('durchläuft übermittelt → angenommen → bestätigt; Messung bleibt eigene Grösse', async () => {
+    const a = aufbau();
+    const beobachtet: string[] = [];
+    a.steuerung.abonniere(() => beobachtet.push(a.steuerung.kurz().befehl?.status ?? '—'));
+    a.steuerung.setzeBetriebsart('manuell', 10);
+    a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, stromA: 6, schalterAn: false });
+    await a.zyklus();
+
+    const k = a.steuerung.kurz();
+    assert.equal(k.befehl?.status, 'angenommen', 'HTTP-Erfolg ist noch keine Gerätebestätigung');
+    assert.equal(k.befehl?.stromA, 10);
+    assert.equal(k.geraet?.leistungW, 0, 'es fliesst noch nichts');
+    assert.ok(beobachtet.includes('uebermittelt'), 'Übermittlung wurde nicht sofort gemeldet');
+
+    // Das Gerät meldet den neuen Zustand zurück.
+    a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, stromA: 10, schalterAn: true });
+    a.steuerung.start();
+    try {
+      a.engine.melde();
+      assert.equal(a.steuerung.kurz().befehl?.status, 'bestaetigt');
+    } finally { a.steuerung.stop(); }
+  });
+
+  it('ein abgelehnter Befehl steht als fehlgeschlagen da', async () => {
+    const a = aufbau();
+    a.wallbox.fehlerBeimSenden = 'Cloud antwortet nicht';
+    a.steuerung.setzeBetriebsart('manuell', 10);
+    a.engine.setze({ pv: 0, hausOhneAuto: 500, ev: 0, stromA: 6, schalterAn: false });
+    await a.zyklus();
+    assert.equal(a.steuerung.kurz().befehl?.status, 'fehlgeschlagen');
+    assert.match(a.steuerung.kurz().befehl?.fehler ?? '', /Cloud antwortet nicht/);
+  });
+
+  it('meldet eine Pause sofort an Beobachter (Ereignisstrom)', () => {
+    const a = aufbau();
+    let meldungen = 0;
+    a.steuerung.abonniere(() => { meldungen += 1; });
+    a.steuerung.setzeGestoppt(true);
+    assert.ok(meldungen >= 1);
   });
 });

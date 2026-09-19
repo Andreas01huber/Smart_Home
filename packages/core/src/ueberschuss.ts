@@ -102,7 +102,14 @@ export type Ladezustand =
    * muss man in der Anzeige von einer Pause aus Leistungsmangel unterscheiden
    * können, sonst sucht man nach einem Problem, das keines ist.
    */
-  | 'gestoppt';
+  | 'gestoppt'
+  /**
+   * Noch keine bewusste Wahl zwischen intelligentem und manuellem Laden.
+   *
+   * Ohne Wahl wird nicht geladen — auch nicht "vorsichtshalber intelligent".
+   * Das gilt ebenso, wenn die gespeicherte Wahl beschädigt ist.
+   */
+  | 'wahl-fehlt';
 
 /** Ein Speicher, so wie ihn die Regelung braucht. */
 export interface SpeicherZustand {
