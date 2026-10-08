@@ -19,6 +19,7 @@ import { esc } from './html.ts';
 import type { Benutzer } from './benutzer.ts';
 import type { Sitzung } from './sitzungen.ts';
 import type { Schreibstatus } from './persist.ts';
+import type { Ereignis } from './ereignisse.ts';
 
 export interface AdminAnsicht {
   readonly ich: Benutzer;
@@ -32,6 +33,8 @@ export interface AdminAnsicht {
   readonly speicher?: readonly Schreibstatus[];
   /** Zustand der Sitzungsverwaltung (Sperre, Notfall-Marker). */
   readonly sitzungsbetrieb?: { readonly gesperrt: boolean; readonly notfallMarker: boolean };
+  /** Letzte Ereignisse (neueste zuerst) aus dem dauerhaften Protokoll. */
+  readonly ereignisse?: readonly Ereignis[];
 }
 
 const OK_TEXTE: Readonly<Record<string, string>> = {
@@ -389,6 +392,8 @@ ${kontoZeilen}
 
   ${speicherAbschnitt(ansicht)}
 
+  ${ereignisAbschnitt(ansicht)}
+
   <p class="fuss">
     Passwort vergessen und niemand kommt mehr in die Verwaltung? Auf dem Server-PC
     im Ordner der App <span class="mono">npm run passwort</span> ausfÃ¼hren â€” das
@@ -430,6 +435,32 @@ function speicherAbschnitt(ansicht: AdminAnsicht): string {
     ${liste.length === 0 ? '<p class="klein-dim">Seit dem Start wurde noch nichts gespeichert.</p>' : `
     <table>
       <thead><tr><th>Datei</th><th>Zuletzt gespeichert</th><th>Zustand</th></tr></thead>
+      <tbody>${zeilen}</tbody>
+    </table>`}
+  </section>`;
+}
+
+
+/**
+ * Ereignisse: was passiert ist, nicht was der Regler dachte. Überlebt
+ * Neustarts (data/ereignisse.jsonl) und ist deshalb die Spur für die
+ * Fehlersuche nach einem Vorfall.
+ */
+function ereignisAbschnitt(ansicht: AdminAnsicht): string {
+  const liste = ansicht.ereignisse ?? [];
+  const zeilen = liste.map((e) => `
+      <tr>
+        <td>${esc(new Date(e.zeit).toLocaleString('de-DE'))}</td>
+        <td class="mono">${esc(e.art)}</td>
+        <td>${esc(e.text)}</td>
+      </tr>`).join('');
+  return `
+  <section>
+    <h2>Ereignisse</h2>
+    <p class="unter">Befehle an die Wallbox, Stopps, Verbindungsabbrüche, Anmeldungen — dauerhaft mitgeschrieben, neueste zuerst.</p>
+    ${liste.length === 0 ? '<p class="klein-dim">Noch keine Ereignisse aufgezeichnet.</p>' : `
+    <table>
+      <thead><tr><th>Zeit</th><th>Art</th><th>Was</th></tr></thead>
       <tbody>${zeilen}</tbody>
     </table>`}
   </section>`;

@@ -16,7 +16,7 @@
  * nie Module zweier Fassungen nebeneinander.
  */
 
-const CACHE = 'energie-shell-v75';
+const CACHE = 'energie-shell-v76';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/format.js', '/scene.js', '/ev-bedienung.js', '/api.js', '/tarif-regeln.js', '/favicon-64.png?v=20260827', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {

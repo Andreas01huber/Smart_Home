@@ -11,7 +11,13 @@
  */
 
 import type { ConnectorReading } from '@energy/core';
-import type { ConnectorDiagnostics, EnergyConnector } from './types.ts';
+import {
+  istSteuerbar,
+  type ConnectorDiagnostics,
+  type EnergyConnector,
+  type Ladestromgrenzen,
+  type SteuerbaresLadegeraet,
+} from './types.ts';
 
 export type ConnectorStatus =
   | 'online'
@@ -27,6 +33,8 @@ export interface ManagedDiagnostics extends ConnectorDiagnostics {
   readonly consecutiveFailures: number;
   /** Millisekunden bis zur nächsten automatischen Prüfung (null = sofort/online). */
   readonly nextProbeInMs: number | null;
+  /** Letzter Fehler eines Steuerbefehls, falls das Gerät stellbar ist. */
+  readonly letzterBefehlFehler: string | null;
 }
 
 /** Backoff nach STEP 31: 5 s, 10 s, 30 s, 60 s, danach 60 s. */
@@ -60,6 +68,8 @@ export class ManagedConnector implements EnergyConnector {
   /** Letzter selbst beobachteter Fehler (geworfen oder Frist). */
   private eigenerFehler: string | null = null;
   private readonly deadlineMs: number;
+  private befehlFehler: string | null = null;
+  private readonly steuerung: SteuerbaresLadegeraet | null;
 
   constructor(
     inner: EnergyConnector,
@@ -70,6 +80,38 @@ export class ManagedConnector implements EnergyConnector {
     this.displayName = inner.displayName;
     this.backoff = options.backoffScheduleMs ?? DEFAULT_BACKOFF_MS;
     this.deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS;
+    this.steuerung = istSteuerbar(inner) ? this.umhuelleSteuerung(inner) : null;
+  }
+
+  /**
+   * Das Gerät als stellbares Ladegerät — oder `null`, wenn es nur misst.
+   *
+   * Die Regelung bekommt damit dasselbe Health-Gate wie die Messung: Fehler von
+   * Steuerbefehlen landen in der Diagnose, statt nur im Regler zu verschwinden.
+   * Blockiert wird nichts — ein Stopp muss auch an ein als offline geltendes
+   * Gerät versucht werden.
+   */
+  ladegeraet(): SteuerbaresLadegeraet | null {
+    return this.steuerung;
+  }
+
+  private umhuelleSteuerung(inner: SteuerbaresLadegeraet): SteuerbaresLadegeraet {
+    const merke = async <T>(aufruf: () => Promise<T>): Promise<T> => {
+      try {
+        const ergebnis = await aufruf();
+        this.befehlFehler = null;
+        return ergebnis;
+      } catch (error) {
+        this.befehlFehler = error instanceof Error ? error.message : String(error);
+        throw error;
+      }
+    };
+    return {
+      ladestromGrenzen: (): Promise<Ladestromgrenzen | null> => inner.ladestromGrenzen(),
+      steuerfunktionen: () => inner.steuerfunktionen(),
+      setzeLadestrom: (ampere) => merke(() => inner.setzeLadestrom(ampere)),
+      setzeLaden: (an) => merke(() => inner.setzeLaden(an)),
+    };
   }
 
   async read(): Promise<ConnectorReading> {
@@ -119,6 +161,7 @@ export class ManagedConnector implements EnergyConnector {
       online: this.status === 'online',
       consecutiveFailures: this.failures,
       nextProbeInMs,
+      letzterBefehlFehler: this.befehlFehler,
     };
   }
 

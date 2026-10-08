@@ -12,8 +12,14 @@
  * Ein HTTP 200 auf "Laden starten" heisst deshalb nicht "Auto lädt".
  */
 
-/** Ab dieser gemessenen Leistung lädt das Auto wirklich. */
-const LAEDT_AB_W = 100;
+/**
+ * Ab dieser gemessenen Leistung lädt das Auto wirklich.
+ *
+ * Dieselbe Zahl wie `LADEN_AB_W` in `@energy/core` (Historie, Ladeprotokoll,
+ * Regelung). Eine andere Schwelle hier hiesse: Die Anzeige sagt „lädt nicht",
+ * während das Protokoll eine Sitzung zählt.
+ */
+const LAEDT_AB_W = 50;
 
 /** Eine Vorschau verändert nur die Anzeige, niemals die Wallbox. */
 export function bindeLadestromUebernahme(schieber, istVorschau, uebernehmen, optionen) {

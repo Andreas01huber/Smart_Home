@@ -1340,11 +1340,21 @@ function renderDaySummary() {
   const aut = quoteTeile(der.autarkyPercent, der.autarkyStatus);
   const eig = quoteTeile(der.selfConsumptionPercent, der.selfConsumptionStatus);
   const nebenbei = (text) => (text ? `<span class="s-delta">${esc(text)}</span>` : '');
+  // Zählerstände der Geräte: die zweite, unabhängige Zahl. Sie zählt auch,
+  // während der Server nicht lief — weicht sie vom integrierten Wert ab, ist
+  // die Differenz die Lücke. Gezeigt, sobald sie da ist und sich unterscheidet.
+  const z = t.zaehler ?? {};
+  const zaehlerHinweis = (integriertWh, zaehlerWh) => {
+    if (zaehlerWh == null) return '';
+    const abweichung = Math.abs(zaehlerWh - integriertWh);
+    if (abweichung < 50 && abweichung < integriertWh * 0.02) return '';
+    return nebenbei(`Zähler: ${formatEnergy(zaehlerWh)}`);
+  };
   let html = fehler +
-    stat('inverter', 'Produktion', formatEnergyParts(t.productionWh), delta) +
+    stat('inverter', 'Produktion', formatEnergyParts(t.productionWh), delta + zaehlerHinweis(t.productionWh, z.pvWh)) +
     stat('home', 'Haus gesamt inkl. Auto', formatEnergyParts(t.houseConsumptionWh)) +
-    stat('grid', 'Netzbezug', formatEnergyParts(t.gridImportWh)) +
-    stat('grid', 'Einspeisung', formatEnergyParts(t.gridExportWh)) +
+    stat('grid', 'Netzbezug', formatEnergyParts(t.gridImportWh), zaehlerHinweis(t.gridImportWh, z.bezugWh)) +
+    stat('grid', 'Einspeisung', formatEnergyParts(t.gridExportWh), zaehlerHinweis(t.gridExportWh, z.einspeisungWh)) +
     stat('🛡️', 'Autarkie', aut, nebenbei(aut.hinweis), 'Anteil des Verbrauchs, der nicht aus dem Netz kam.') +
     stat('♻️', 'Eigenverbrauch', eig, nebenbei(eig.hinweis), 'Anteil des Solarstroms, der nicht eingespeist wurde.') +
     stat('💶', 'Gesamter Vorteil', der.costs ? { value: formatCurrency(der.costs.totalBenefitEUR).replace(' €', ''), unit: '€' } : '—',
@@ -1795,17 +1805,7 @@ function renderSkeletons() {
 // ── Render orchestration ──────────────────────────────────────────────
 function renderLive(d) {
   lastLive = d;
-  const evKurz = el('ev-kurzstatus');
-  if (evKurz) {
-    // Dieselbe Zustandslogik wie in der Ladeansicht — eine Stelle, ein Wortlaut.
-    const ev = d.ev;
-    const r = ev?.regelung;
-    const modus = r?.betriebsart === 'manuell' ? `Manuell ${r.manuellA} A`
-      : r?.betriebsart === 'intelligent' ? 'Intelligent' : 'kein Modus gewählt';
-    const z = ladezustand(r, ev);
-    const leistung = Number.isFinite(ev?.powerW) && ev.powerW > 100 ? ` · ${formatPower(ev.powerW)}` : '';
-    evKurz.textContent = !ev?.configured ? 'Wallbox nicht eingerichtet' : `${z.titel}${leistung} · ${modus}`;
-  }
+
   // Tageswechsel der Anlage: Wer "heute" ansah, sieht jetzt bewusst den neuen
   // Tag. Wer einen Archivtag ausgewählt hat, bleibt dort.
   if (d.anlage?.datum && d.anlage.datum !== anlagenDatum) {

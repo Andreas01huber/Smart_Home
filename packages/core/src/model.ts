@@ -51,6 +51,30 @@ export interface EnergyMetric {
   readonly provenance: Provenance;
 }
 
+/**
+ * Zählerstände der Geräte, kumulativ über die Lebensdauer, in Wh.
+ *
+ * Sie sind die zweite, unabhängige Wahrheit neben der Leistungsintegration:
+ * Ein Zähler zählt weiter, wenn der Server schläft. Tagessummen aus
+ * Zählerdifferenzen überstehen deshalb Neustarts und Ausfälle; die Integration
+ * der Leistung bleibt für Kurve und Zuordnung (wer hat wen versorgt) nötig.
+ *
+ * `null` heisst: Dieses Gerät führt diesen Zähler nicht oder er ist für die
+ * Grösse nicht aussagekräftig (z. B. AC-Energiezähler eines Hybrid-Wechselrichters,
+ * der Speicherentladung mitzählt und deshalb keine PV-Erzeugung ist).
+ */
+export interface EnergyCounters {
+  readonly solarWh: EnergyMetric | null;
+  readonly gridImportWh: EnergyMetric | null;
+  readonly gridExportWh: EnergyMetric | null;
+}
+
+/** Quellenübergreifend aufgelöste Zählerstände. */
+export interface ResolvedCounters extends EnergyCounters {
+  /** PV-Zähler je Wechselrichter (Connector-ID -> Wh). */
+  readonly solarByConnectorWh: Readonly<Record<string, number | null>>;
+}
+
 /** Betriebszustand eines Speichers. */
 export type BatteryState =
   | 'charging'
@@ -174,6 +198,8 @@ export interface EnergySnapshot {
   readonly batteries: readonly BatterySnapshot[];
   /** null = keine Wallbox konfiguriert. */
   readonly evCharger: EvChargerSnapshot | null;
+  /** Zählerstände, sofern die Quellen welche liefern. */
+  readonly counters?: ResolvedCounters;
 }
 
 /**
@@ -194,6 +220,8 @@ export interface ConnectorReading {
    * reinen Energiequellen (Fronius, Victron) — daher optional.
    */
   readonly evCharger?: EvChargerSnapshot | null;
+  /** Zählerstände dieses Geräts, falls es welche führt. */
+  readonly counters?: EnergyCounters;
 }
 
 /** Die Messgrößen, für die eine maßgebliche Quelle festgelegt werden muss. */

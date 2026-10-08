@@ -8,16 +8,16 @@
 
 import { TuyaCloudClient } from '@energy/connectors';
 
-import { loadConfig } from '../apps/server/src/config.ts';
+import { loadConfig, wallboxQuelle } from '../apps/server/src/config.ts';
 
 const config = loadConfig();
-const ev = config.sources.evCharger;
-if (ev === undefined) throw new Error('Keine Wallbox konfiguriert.');
+const ev = wallboxQuelle(config);
+if (ev === null) throw new Error('Keine Wallbox konfiguriert.');
 
 const client = new TuyaCloudClient({
   accessId: ev.accessId ?? '',
   accessSecret: ev.accessSecret ?? '',
-  region: ev.region ?? 'eu',
+  region: ev.region,
 });
 
 const id = encodeURIComponent(ev.deviceId);

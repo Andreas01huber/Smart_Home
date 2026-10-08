@@ -158,3 +158,30 @@ describe('ManagedConnector — Fristen, Fehler, Gleichzeitigkeit', () => {
     assert.equal(f.reads, 1, 'das Gerät wurde doppelt abgefragt');
   });
 });
+
+describe('ManagedConnector — steuerbares Ladegerät', () => {
+  test('ein reiner Messconnector hat kein Ladegerät', () => {
+    assert.equal(new ManagedConnector(new FakeConnector()).ladegeraet(), null);
+  });
+
+  test('reicht Steuerbefehle durch und merkt sich den letzten Befehlsfehler', async () => {
+    let fehler: string | null = null;
+    const steuerbar = Object.assign(new FakeConnector(), {
+      async ladestromGrenzen() { return { minA: 6, maxA: 16, schrittA: 1 }; },
+      async steuerfunktionen() { return []; },
+      async setzeLadestrom(a: number) { if (fehler) throw new Error(fehler); return a; },
+      async setzeLaden() { if (fehler) throw new Error(fehler); },
+    });
+    const m = new ManagedConnector(steuerbar);
+    const geraet = m.ladegeraet();
+    assert.ok(geraet !== null);
+    assert.equal(await geraet.setzeLadestrom(10), 10);
+    assert.equal(m.diagnostics().letzterBefehlFehler, null);
+    fehler = 'Cloud antwortet nicht';
+    await assert.rejects(geraet.setzeLaden(false), /Cloud antwortet nicht/);
+    assert.equal(m.diagnostics().letzterBefehlFehler, 'Cloud antwortet nicht');
+    fehler = null;
+    await geraet.setzeLaden(true);
+    assert.equal(m.diagnostics().letzterBefehlFehler, null, 'ein Erfolg löscht den Fehler');
+  });
+});

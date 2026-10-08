@@ -196,7 +196,7 @@ function konfiguration(ueber: Partial<AppConfig['ueberschuss']> = {}): AppConfig
     port: 0,
     host: '127.0.0.1',
     pollIntervalMs: 2000,
-    sources: { evCharger: { enabled: true, deviceId: 'x', phases: 3, voltageV: 400 } },
+    quellen: [{ typ: 'tuya-evse', id: 'ev-charger', displayName: 'Wallbox', deviceId: 'x', region: 'eu', phases: 3, voltageV: 400, accessId: null, accessSecret: null }],
     sourceMapping: {
       solarProductionW: 'a',
       houseConsumptionW: 'derived',

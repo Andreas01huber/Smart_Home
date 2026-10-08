@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { BatterySnapshot, ConnectorReading, EvChargerSnapshot, PowerMetric } from '@energy/core';
-import { ManagedConnector, type ConnectorDiagnostics, type EnergyConnector, type TuyaEvseConnector } from '@energy/connectors';
+import { ManagedConnector, type ConnectorDiagnostics, type EnergyConnector } from '@energy/connectors';
 
 import type { AppConfig } from '../apps/server/src/config.ts';
 import { starteServer } from '../apps/server/src/index.ts';
@@ -266,12 +266,12 @@ function konfiguration(port: number, dir: string): AppConfig {
     trustedProxies: [],
     secretsPfad: join(dir, 'secrets-gibt-es-hier-nicht.json'),
     kontenPfad: join(dir, 'secrets-gibt-es-hier-nicht.json'),
-    sources: {
-      fronius: { enabled: true, host: 'fixture', displayName: 'Fronius Symo' },
-      froniusGen24: { enabled: true, host: 'fixture', displayName: 'Fronius GEN24', batteryDisplayName: 'Kleiner Speicher', usableCapacityWh: 11_000 },
-      victron: { enabled: true, host: 'fixture', displayName: 'Victron GX', batteryDisplayName: 'Grosser Speicher', usableCapacityWh: 20_000 },
-      evCharger: { enabled: true, deviceId: 'fixture', displayName: 'Leapmotor C10', phases: 1, voltageV: 229 },
-    },
+    quellen: [
+      { typ: 'fronius-solar-api', id: 'fronius-local', host: 'fixture', displayName: 'Fronius Symo', speicher: null },
+      { typ: 'fronius-solar-api', id: 'fronius-gen24', host: 'fixture', displayName: 'Fronius GEN24', speicher: { displayName: 'Kleiner Speicher', usableCapacityWh: 11_000 } },
+      { typ: 'victron-modbus', id: 'victron-modbus', host: 'fixture', displayName: 'Victron GX', speicher: { displayName: 'Grosser Speicher', usableCapacityWh: 20_000 } },
+      { typ: 'tuya-evse', id: 'ev-charger', deviceId: 'fixture', displayName: 'Leapmotor C10', region: 'eu', phases: 1, voltageV: 229, accessId: null, accessSecret: null },
+    ],
     sourceMapping: {
       solarProductionW: ['fronius-local', 'fronius-gen24'],
       houseConsumptionW: 'derived',
@@ -384,8 +384,12 @@ async function main(): Promise<void> {
     config,
     datenverzeichnis: dir,
     quellen: {
-      connectors: [symo, gen24, victron, evQuelle].map((c) => new ManagedConnector(c)),
-      wallbox: Object.assign(evQuelle, wallboxSteuerung) as unknown as TuyaEvseConnector,
+      // Die Wallbox-Attrappe misst und stellt zugleich; das Health-Gate reicht die
+      // Steuerung durch, genau wie beim echten Gerät.
+      ...(() => {
+        const connectors = [symo, gen24, victron, Object.assign(evQuelle, wallboxSteuerung)].map((c) => new ManagedConnector(c));
+        return { connectors, wallbox: connectors.map((c) => c.ladegeraet()).find((l) => l !== null) ?? null };
+      })(),
     },
     async vorbehandlung(request, response, url) {
       const json = (status: number, body: unknown): true => {

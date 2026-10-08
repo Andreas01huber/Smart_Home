@@ -2,12 +2,11 @@
  * Adapter für Tuya-basierte EV-Ladegeräte (Kategorie `qccdz`),
  * konkret geprüft mit dem "Aimiler EV Charger".
  *
- * FAST NUR LESEND. Von den drei Steuerfunktionen des Geräts (`switch`,
- * `charge_cur_set`, `work_mode`) wird genau eine benutzt: `charge_cur_set`,
- * über `setzeLadestrom()`, für die Überschussregelung. `switch` und
- * `work_mode` bleiben unangetastet — die Regelung pausiert über den
- * Mindestladestrom, nicht über den Hauptschalter, und greift damit in keine
- * Schutzfunktion der Wallbox ein.
+ * Liest den Zustand und stellt genau zwei Dinge: den Ladestrom
+ * (`charge_cur_set`, `setzeLadestrom`) und den Hauptschalter (`switch`,
+ * `setzeLaden`) — beides reguläre, vom Gerät angebotene Steuerpunkte.
+ * `work_mode` bleibt unangetastet. Nach aussen erfüllt der Adapter die
+ * Schnittstelle `SteuerbaresLadegeraet`; die Regelung kennt den Hersteller nicht.
  *
  * Die Datenpunkte stammen nicht aus Vermutungen, sondern aus der am 26.08.2026
  * vom Gerät selbst gelieferten Spezifikation:
@@ -30,6 +29,7 @@
 
 import {
   provenance,
+  STALENESS_BY_TYPE,
   type ConnectorReading,
   type EvChargerSnapshot,
   type EvChargerState,
@@ -37,7 +37,7 @@ import {
 
 import { TuyaCloudClient, type TuyaStatusEntry } from './tuya-cloud.ts';
 import { entschluessblePhase, phasenAusMessung } from './tuya-phase.ts';
-import type { ConnectorDiagnostics, EnergyConnector } from './types.ts';
+import type { ConnectorDiagnostics, EnergyConnector, Ladestromgrenzen, SteuerbaresLadegeraet } from './types.ts';
 import { mitWachhund } from './wachhund.ts';
 
 export interface TuyaEvseOptions {
@@ -158,11 +158,19 @@ export function evSnapshotFromTuyaStatus(
       meta.connectorId,
       `${meta.connectorId}:${meta.deviceId}`,
       measuredAt,
+      new Date(),
+      STALENESS_BY_TYPE['tuya-evse'],
     ),
   };
 }
 
-export class TuyaEvseConnector implements EnergyConnector {
+/**
+ * Vorgabe, wenn das Ger�t seine Grenzen nicht meldet � die einzige Stelle,
+ * an der diese Zahlen stehen. Konservativ: der Bereich jeder 11-kW-Wallbox.
+ */
+export const LADESTROM_VORGABE: Ladestromgrenzen = { minA: 6, maxA: 16, schrittA: 1 };
+
+export class TuyaEvseConnector implements EnergyConnector, SteuerbaresLadegeraet {
   readonly id: string;
   readonly displayName: string;
 
@@ -185,7 +193,7 @@ export class TuyaEvseConnector implements EnergyConnector {
   private cachedAt = 0;
   private inFlight: Promise<void> | null = null;
   /** Vom Gerät gemeldete Grenzen des Ladestroms; einmal geholt, dann behalten. */
-  private grenzen: { minA: number; maxA: number; schrittA: number } | null = null;
+  private grenzen: Ladestromgrenzen | null = null;
   private grenzenVersucht = false;
 
   constructor(options: TuyaEvseOptions) {
@@ -249,7 +257,7 @@ export class TuyaEvseConnector implements EnergyConnector {
    *
    * Wird einmal geholt und behalten; sie ändern sich im Betrieb nicht.
    */
-  async ladestromGrenzen(): Promise<{ minA: number; maxA: number; schrittA: number } | null> {
+  async ladestromGrenzen(): Promise<Ladestromgrenzen | null> {
     if (this.grenzen !== null) return this.grenzen;
     if (this.grenzenVersucht) return null;
     this.grenzenVersucht = true;
@@ -311,7 +319,7 @@ export class TuyaEvseConnector implements EnergyConnector {
 
   async setzeLadestrom(ampere: number): Promise<number> {
     if (!Number.isFinite(ampere)) throw new Error('Ungültiger Ladestrom');
-    const grenzen = (await this.ladestromGrenzen()) ?? { minA: 6, maxA: 16, schrittA: 1 };
+    const grenzen = (await this.ladestromGrenzen()) ?? LADESTROM_VORGABE;
     const gestuft = Math.round(ampere / grenzen.schrittA) * grenzen.schrittA;
     const sicher = Math.max(grenzen.minA, Math.min(grenzen.maxA, gestuft));
 

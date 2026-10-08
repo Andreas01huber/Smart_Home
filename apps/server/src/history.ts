@@ -3,7 +3,11 @@
  *
  * Läuft serverseitig, unabhängig vom Browser (Engine ruft integrate() auf).
  * - Integriert Live-Leistungen (W) zu Energiemengen (Wh), je Wechselrichter/Speicher.
- * - Führt die Tageskurve (1-Minuten-Auflösung) mit Werten je Gerät.
+ * - Führt die Tageskurve: je Minute der MITTELWERT über alle Messungen der
+ *   Minute (nicht eine Momentaufnahme), damit Kurve und Tagessumme dieselbe
+ *   Energie beschreiben und eine kurze Wolke anteilig sichtbar wird.
+ * - Führt Zählerstände der Geräte mit und bildet daraus Tagesdifferenzen, die
+ *   Ausfälle des Servers überstehen.
  * - Persistiert: Tagesaggregate (history.json), heutiger Zwischenstand (today.json)
  *   und je abgeschlossenem Tag ein Archiv (days/YYYY-MM-DD.json) mit voller Kurve.
  *
@@ -24,6 +28,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
+  addiereZaehlersummen,
   addiereZuordnung,
   bilanzwertW,
   computeCosts,
@@ -44,12 +49,17 @@ import {
   type AbdeckungJeGroesse,
   type EnergyTotals,
   type Tariff,
+  type Zaehlersummen,
   type Zuordnung,
 } from '@energy/core';
 
 import type { EngineState } from './engine.ts';
 import { bewahreBeschaedigt, writeJsonAtomic } from './persist.ts';
 import { Tarifverlauf } from './tarife.ts';
+import { localDate, naechsterTagesbeginn, shiftDate, tagesgrenzen } from './tageszeit.ts';
+
+// Weiterhin von hier beziehbar — die Tagesrechnung wohnt jetzt in tageszeit.ts.
+export { localDate, shiftDate, tagesgrenzen } from './tageszeit.ts';
 
 export interface DailyRecord {
   readonly date: string; // YYYY-MM-DD (lokale Zeit)
@@ -57,9 +67,10 @@ export interface DailyRecord {
 }
 
 /**
- * Ein Punkt der Tageskurve. Leistungen in W, SOC in %.
+ * Ein Punkt der Tageskurve: Mittelwerte der Minute ab `t`. Leistungen in W
+ * (ganzzahlig), SOC in % (letzter Wert der Minute).
  *
- * `null` heisst: an diesem Punkt gab es keine verwertbare Messung. Die Kurve
+ * `null` heisst: in dieser Minute gab es keine verwertbare Messung. Die Kurve
  * zeichnet dort eine Lücke, statt den letzten Wert fortzuführen.
  */
 export interface SeriesPoint {
@@ -90,6 +101,18 @@ interface MutableTotals {
   abdeckungJeGroesseS: { pv: number; haus: number; bezug: number; einspeisung: number };
   erfasstAbMs: number | null;
   zuordnung: Zuordnung;
+  /** Zählerstände je Schlüssel (pv, pv:<id>, bezug, einspeisung, auto). */
+  zaehlerstaende: Record<string, Zaehlerstand>;
+}
+
+/**
+ * Ein Zähler über den Tag: Startwert, letzter Wert, und was vor einem
+ * Zählerrücksprung bereits aufgelaufen war.
+ */
+interface Zaehlerstand {
+  start: number;
+  letzter: number;
+  summe: number;
 }
 
 /**
@@ -111,9 +134,26 @@ interface Stichprobe {
   readonly socAgg: number | null;
   readonly socJe: Readonly<Record<string, number | null>>;
   readonly ev: number | null;
+  /** Aktuelle Zählerstände der Geräte (nur live), Schlüssel wie in `zaehlerstaende`. */
+  readonly zaehler: Readonly<Record<string, number>>;
 }
 
 const SERIES_INTERVAL_MS = 60_000;
+
+/** Ab diesem Alter werden Tagesarchive auf 15-Minuten-Mittel verdichtet. */
+const VERDICHTEN_AB_TAGEN = 90;
+const VERDICHTET_INTERVALL_MS = 15 * 60_000;
+
+/** Eine Minute im Aufbau: Energie und Messdauer je Grösse. */
+interface Minutenfenster {
+  beginnMs: number;
+  endeMs: number;
+  wh: { pv: number; haus: number; bezug: number; einspeisung: number };
+  s: { pv: number; haus: number; bezug: number; einspeisung: number };
+  inv: Record<string, { wh: number; s: number }>;
+  bat: Record<string, { wh: number; s: number; soc: number | null }>;
+  socAgg: number | null;
+}
 
 export interface AccumulatorOptions {
   readonly dataDir: string;
@@ -125,20 +165,7 @@ export interface AccumulatorOptions {
   readonly jetzt?: () => number;
 }
 
-/** Lokaler Tagesbeginn und -ende eines Kalendertags, in ms. DST-fest. */
-export function tagesgrenzen(date: string): { beginnMs: number; endeMs: number } {
-  const [j, m, t] = date.split('-').map(Number) as [number, number, number];
-  return {
-    beginnMs: new Date(j, m - 1, t, 0, 0, 0, 0).getTime(),
-    endeMs: new Date(j, m - 1, t + 1, 0, 0, 0, 0).getTime(),
-  };
-}
 
-/** Der nächste lokale Tagesbeginn nach `ms`. */
-function naechsterTagesbeginn(ms: number): number {
-  const d = new Date(ms);
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
-}
 
 export class EnergyAccumulator {
   private readonly dataDir: string;
@@ -152,10 +179,13 @@ export class EnergyAccumulator {
   private today: MutableTotals = freshTotals();
   private currentDate: string;
   private series: SeriesPoint[] = [];
+  /** Die Minute, die gerade gesammelt wird. */
+  private fenster: Minutenfenster | null = null;
+  /** Geparste Tagesarchive, damit die Tagesansicht nicht bei jedem Aufruf liest. */
+  private readonly archivCache = new Map<string, GeladenerTag | null>();
   private letzteProbe: Stichprobe | null = null;
   /** Letzte Erfassung, auch über einen Neustart hinweg. */
   private letzteErfassungMs: number | null = null;
-  private lastSeriesAt = 0;
   private dirty = false;
 
   private readonly startedAt = new Date();
@@ -178,6 +208,7 @@ export class EnergyAccumulator {
       () => localDate(new Date(this.jetzt())),
     );
     this.load();
+    this.verdichteAlteTage();
 
     setInterval(() => this.persistIfDirty(), 120_000).unref();
   }
@@ -193,8 +224,13 @@ export class EnergyAccumulator {
     this.letzteErfassungMs = probe.tMs;
     this.dirty = true;
 
+    // Ohne gültiges Intervall davor (Start, Neustart, zu langer Abstand) war
+    // dazwischen keine Messung — die Kurve bekommt eine sichtbare Lücke.
+    const gueltig = vorher !== null && probe.tMs > vorher.tMs
+      && (probe.tMs - vorher.tMs) / 1000 <= MAX_INTEGRATIONSSCHRITT_S;
+    if (!gueltig) this.markiereLuecke(probe.tMs);
+
     if (vorher !== null && probe.tMs > vorher.tMs) {
-      const gueltig = (probe.tMs - vorher.tMs) / 1000 <= MAX_INTEGRATIONSSCHRITT_S;
       let start = vorher.tMs;
       while (start < probe.tMs) {
         const tag = localDate(new Date(start));
@@ -208,7 +244,28 @@ export class EnergyAccumulator {
     const tag = localDate(new Date(probe.tMs));
     if (tag !== this.currentDate) this.rollover(tag);
     if (this.today.erfasstAbMs === null) this.today.erfasstAbMs = probe.tMs;
-    this.maybeAppendSeries(probe);
+    this.merkeZaehler(probe);
+  }
+
+  /**
+   * Zählerstände fortschreiben.
+   *
+   * Springt ein Zähler zurück (Gerätetausch, Rücksetzung), wird das bis dahin
+   * Aufgelaufene gesichert und neu begonnen — die Tagessumme bleibt stetig.
+   */
+  private merkeZaehler(p: Stichprobe): void {
+    for (const [key, wert] of Object.entries(p.zaehler)) {
+      const z = this.today.zaehlerstaende[key];
+      if (z === undefined) {
+        this.today.zaehlerstaende[key] = { start: wert, letzter: wert, summe: 0 };
+      } else if (wert < z.letzter - 1) {
+        z.summe += z.letzter - z.start;
+        z.start = wert;
+        z.letzter = wert;
+      } else {
+        z.letzter = wert;
+      }
+    }
   }
 
   /** Macht aus dem Engine-Zustand eine geprüfte Stichprobe. */
@@ -251,6 +308,27 @@ export class EnergyAccumulator {
     const evRoh = evLeistungW === undefined ? (snap.evCharger?.chargePowerW ?? null) : evLeistungW;
     const ev = evRoh !== null && Number.isFinite(evRoh) && evRoh >= 0 ? evRoh : null;
 
+    // Zählerstände: nur frische, endliche, nicht-negative Werte.
+    const zaehler: Record<string, number> = {};
+    const z = snap.counters;
+    const nimm = (key: string, m: { valueWh: number | null; provenance: { quality: string } } | null | undefined): void => {
+      if (m && m.provenance.quality === 'live' && m.valueWh !== null && Number.isFinite(m.valueWh) && m.valueWh >= 0) {
+        zaehler[key] = m.valueWh;
+      }
+    };
+    if (z !== undefined) {
+      nimm('pv', z.solarWh);
+      nimm('bezug', z.gridImportWh);
+      nimm('einspeisung', z.gridExportWh);
+      for (const [id, wh] of Object.entries(z.solarByConnectorWh)) {
+        if (wh !== null && Number.isFinite(wh) && wh >= 0) zaehler[`pv:${id}`] = wh;
+      }
+    }
+    const evz = snap.evCharger;
+    if (evz && evz.state !== 'offline' && istAktuell(evz.provenance) && evz.totalEnergyWh !== null && evz.totalEnergyWh >= 0) {
+      zaehler['auto'] = evz.totalEnergyWh;
+    }
+
     return {
       tMs: state.polledAt.getTime(),
       pv: nichtnegativOderNull(bilanzwertW(snap.solarProductionW)),
@@ -263,12 +341,106 @@ export class EnergyAccumulator {
       socAgg: gesamt.socPercent,
       socJe,
       ev,
+      zaehler,
     };
   }
 
-  /** Ein gültiges Intervall mit dem gehaltenen Wert `p` verbuchen. */
+  /**
+   * Ein gültiges Intervall mit dem gehaltenen Wert `p` verbuchen — in die
+   * Tagessummen und, minutenweise geteilt, in die Kurve.
+   */
   private integriere(p: Stichprobe, startMs: number, sekunden: number): void {
     if (sekunden <= 0) return;
+    this.summiere(p, startMs, sekunden);
+    // Dieselbe Energie in Minutenfenster — die Kurve zeigt dann Mittelwerte,
+    // deren Summe die Tagessumme ist, statt zufälliger Momentaufnahmen.
+    let start = startMs;
+    const ende = startMs + sekunden * 1000;
+    while (start < ende) {
+      const fensterEnde = Math.floor(start / SERIES_INTERVAL_MS) * SERIES_INTERVAL_MS + SERIES_INTERVAL_MS;
+      const bis = Math.min(ende, fensterEnde);
+      this.sammle(p, start, (bis - start) / 1000);
+      if (bis === fensterEnde) this.schliesseFenster();
+      start = bis;
+    }
+  }
+
+  /** Energie der Stichprobe in das laufende Minutenfenster legen. */
+  private sammle(p: Stichprobe, startMs: number, sekunden: number): void {
+    if (sekunden <= 0) return;
+    const beginn = Math.floor(startMs / SERIES_INTERVAL_MS) * SERIES_INTERVAL_MS;
+    if (this.fenster !== null && this.fenster.beginnMs !== beginn) this.schliesseFenster();
+    if (this.fenster === null) {
+      this.fenster = {
+        beginnMs: beginn, endeMs: beginn + SERIES_INTERVAL_MS,
+        wh: { pv: 0, haus: 0, bezug: 0, einspeisung: 0 },
+        s: { pv: 0, haus: 0, bezug: 0, einspeisung: 0 },
+        inv: {}, bat: {}, socAgg: null,
+      };
+    }
+    const f = this.fenster;
+    const h = sekunden / 3600;
+    if (p.pv !== null) { f.wh.pv += p.pv * h; f.s.pv += sekunden; }
+    if (p.haus !== null) { f.wh.haus += p.haus * h; f.s.haus += sekunden; }
+    if (p.bezug !== null) { f.wh.bezug += p.bezug * h; f.s.bezug += sekunden; }
+    if (p.einspeisung !== null) { f.wh.einspeisung += p.einspeisung * h; f.s.einspeisung += sekunden; }
+    for (const [id, w] of Object.entries(p.inv)) {
+      const e = (f.inv[id] ??= { wh: 0, s: 0 });
+      if (w !== null) { e.wh += w * h; e.s += sekunden; }
+    }
+    for (const [id, s] of Object.entries(p.speicher)) {
+      const e = (f.bat[id] ??= { wh: 0, s: 0, soc: null });
+      if (s !== null) { e.wh += (s.laden - s.entladen) * h; e.s += sekunden; }
+      const soc = p.socJe[id];
+      if (soc !== null && soc !== undefined) e.soc = soc;
+    }
+    if (p.socAgg !== null) f.socAgg = p.socAgg;
+  }
+
+  /** Das laufende Fenster als Kurvenpunkt ablegen. */
+  private schliesseFenster(): void {
+    const f = this.fenster;
+    this.fenster = null;
+    if (f === null) return;
+    const letzter = this.series[this.series.length - 1];
+    if (letzter !== undefined && f.beginnMs <= letzter.t) return; // schon da (Neustart)
+    // Lag seit dem letzten Punkt mehr als eine Minute, war dazwischen keine
+    // Aufzeichnung. Ein leerer Punkt trennt die Linie — sonst zöge die Kurve
+    // eine Gerade durch eine Stunde, in der niemand gemessen hat.
+    if (letzter !== undefined && f.beginnMs - letzter.t > SERIES_INTERVAL_MS && !istLeer(letzter)) {
+      this.series.push(leererPunkt(letzter.t + SERIES_INTERVAL_MS));
+    }
+    this.series.push(punktAus(f));
+  }
+
+  /**
+   * Eine Lücke in der Aufzeichnung festhalten: das angefangene Fenster
+   * abschliessen und, wenn seit dem letzten Punkt mehr als zwei Minuten
+   * vergangen sind, einen leeren Punkt setzen, der die Linie trennt.
+   */
+  private markiereLuecke(jetztMs: number): void {
+    this.schliesseFenster();
+    const letzter = this.series[this.series.length - 1];
+    if (letzter !== undefined && jetztMs - letzter.t > 2 * SERIES_INTERVAL_MS && !istLeer(letzter)) {
+      this.series.push(leererPunkt(letzter.t + SERIES_INTERVAL_MS));
+    }
+  }
+
+  /**
+   * Die Kurve samt der angefangenen Minute. Für die Live-Ansicht: Wer um
+   * 12:00:40 schaut, soll die Minute 12:00 schon sehen — als Mittel über die
+   * bisherigen 40 Sekunden, nicht erst um 12:01.
+   */
+  private serieMitOffenemFenster(): readonly SeriesPoint[] {
+    const f = this.fenster;
+    if (f === null) return this.series;
+    const letzter = this.series[this.series.length - 1];
+    if (letzter !== undefined && f.beginnMs <= letzter.t) return this.series;
+    return [...this.series, punktAus(f)];
+  }
+
+  /** Ein gültiges Intervall in die Tagessummen verbuchen. */
+  private summiere(p: Stichprobe, startMs: number, sekunden: number): void {
     const h = sekunden / 3600;
     const t = this.today;
     if (t.erfasstAbMs === null) t.erfasstAbMs = startMs;
@@ -317,34 +489,9 @@ export class EnergyAccumulator {
     }
   }
 
-  private maybeAppendSeries(p: Stichprobe): void {
-    if (p.tMs - this.lastSeriesAt < SERIES_INTERVAL_MS) return;
-    const letzter = this.series[this.series.length - 1];
-    // Lag seit dem letzten Punkt mehr als ein doppelter Abstand, war dazwischen
-    // keine Aufzeichnung. Ein leerer Punkt trennt die Linie — sonst zöge die
-    // Kurve eine Gerade durch eine Stunde, in der niemand gemessen hat.
-    if (letzter !== undefined && p.tMs - letzter.t > 2 * SERIES_INTERVAL_MS) {
-      this.series.push(leererPunkt(letzter.t + SERIES_INTERVAL_MS));
-    }
-    this.lastSeriesAt = p.tMs;
-
-    const bat: Record<string, { p: number | null; soc: number | null }> = {};
-    for (const [id, s] of Object.entries(p.speicher)) {
-      bat[id] = { p: s === null ? null : s.laden - s.entladen, soc: p.socJe[id] ?? null };
-    }
-    this.series.push({
-      t: p.tMs,
-      pv: p.pv,
-      house: p.haus,
-      gridImport: p.bezug,
-      gridExport: p.einspeisung,
-      inv: { ...p.inv },
-      bat,
-      socAgg: p.socAgg,
-    });
-  }
-
   private rollover(newDate: string): void {
+    // Die angefangene Minute gehört noch zum alten Tag.
+    this.schliesseFenster();
     // Vollständige Tageskurve + Aggregat des abgeschlossenen Tages archivieren.
     this.archiveDay(this.currentDate, toReadonly(this.today), this.series);
 
@@ -352,33 +499,69 @@ export class EnergyAccumulator {
     this.history.push({ date: this.currentDate, totals: toReadonly(this.today) });
     this.history.sort((a, b) => a.date.localeCompare(b.date));
 
+    // Zähler laufen weiter: Der letzte Stand des alten Tages ist der Anfang des
+    // neuen. Was während eines Ausfalls über Mitternacht zählt, landet im neuen Tag.
+    const uebertrag: Record<string, Zaehlerstand> = {};
+    for (const [k, z] of Object.entries(this.today.zaehlerstaende)) {
+      uebertrag[k] = { start: z.letzter, letzter: z.letzter, summe: 0 };
+    }
     this.today = freshTotals();
+    this.today.zaehlerstaende = uebertrag;
     this.series = [];
     this.currentDate = newDate;
     this.persist();
   }
 
-  private archiveDay(date: string, totals: EnergyTotals, series: readonly SeriesPoint[]): void {
+  private archiveDay(
+    date: string,
+    totals: EnergyTotals,
+    series: readonly SeriesPoint[],
+    intervallMs = SERIES_INTERVAL_MS,
+  ): void {
     try {
       writeJsonAtomic(resolve(this.daysDir, `${date}.json`), {
-        version: 2,
+        version: 3,
         date,
         totals,
         series,
+        seriesIntervalSeconds: intervallMs / 1000,
         batteryNames: this.batteryNames,
         batteryCaps: this.batteryCaps,
         quality: 'local_live',
       });
+      this.archivCache.delete(date);
     } catch (error) {
       console.warn(`Tag ${date} konnte nicht archiviert werden:`, error);
     }
+  }
+
+  /**
+   * Alte Tagesarchive auf 15-Minuten-Mittel verdichten.
+   *
+   * Nach drei Monaten braucht niemand mehr die Minute; ein Tag schrumpft so von
+   * ~150 KB auf ~10 KB, und das Verzeichnis wächst nicht mehr unbegrenzt. Die
+   * Mittelwerte entstehen aus den Minutenmitteln — die Energie bleibt gleich.
+   * Läuft einmal beim Start; ein einzelner unlesbarer Tag bricht nichts ab.
+   */
+  private verdichteAlteTage(): void {
+    const grenze = shiftDate(this.currentDate, -VERDICHTEN_AB_TAGEN);
+    let verdichtet = 0;
+    for (const date of this.availableDates()) {
+      if (date >= grenze || date === this.currentDate) continue;
+      const geladen = this.loadDay(date);
+      if (geladen === null || geladen.intervallMs >= VERDICHTET_INTERVALL_MS || geladen.series.length === 0) continue;
+      const serie = verdichteSerie(geladen.series, VERDICHTET_INTERVALL_MS);
+      this.archiveDay(date, geladen.totals, serie, VERDICHTET_INTERVALL_MS);
+      verdichtet += 1;
+    }
+    if (verdichtet > 0) console.log(`[Historie] ${verdichtet} Tagesarchiv(e) älter als ${VERDICHTEN_AB_TAGEN} Tage auf 15-Minuten-Mittel verdichtet.`);
   }
 
   todayView(): unknown {
     return this.dayView(this.currentDate);
   }
   todaySeries(): readonly SeriesPoint[] {
-    return this.series;
+    return this.serieMitOffenemFenster();
   }
 
   /** Vollständige Tagesansicht für ein beliebiges Datum (heute = live). */
@@ -389,10 +572,11 @@ export class EnergyAccumulator {
     let names = this.batteryNames;
     let caps = this.batteryCaps;
     let quality = 'local_live';
+    let intervallMs = SERIES_INTERVAL_MS;
 
     if (isToday) {
       totals = toReadonly(this.today);
-      series = this.series;
+      series = this.serieMitOffenemFenster();
     } else {
       const archived = this.loadDay(date);
       if (archived) {
@@ -401,6 +585,7 @@ export class EnergyAccumulator {
         names = archived.batteryNames ?? this.batteryNames;
         caps = archived.batteryCaps ?? this.batteryCaps;
         quality = archived.quality ?? 'local_live';
+        intervallMs = archived.intervallMs;
       } else {
         // Kein Kurven-Archiv, aber evtl. ein Aggregat aus history.json.
         const rec = this.recordFor(date);
@@ -428,6 +613,7 @@ export class EnergyAccumulator {
       isToday,
       hasData: true,
       hasSeries: series.length > 1,
+      seriesIntervalSeconds: intervallMs / 1000,
       quality,
       // Tagesgrenzen der Anlage. Der Browser rechnet sie nicht selbst — in einer
       // anderen Zeitzone ergäbe das einen anderen Tag.
@@ -548,14 +734,21 @@ export class EnergyAccumulator {
     return resolve(this.dataDir, 'today.json');
   }
 
-  private loadDay(date: string): {
-    totals: EnergyTotals;
-    series: SeriesPoint[];
-    batteryNames?: Record<string, string>;
-    batteryCaps?: Record<string, number | null>;
-    quality?: string;
-  } | null {
+  private loadDay(date: string): GeladenerTag | null {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    const imCache = this.archivCache.get(date);
+    if (imCache !== undefined) return imCache;
+    const geladen = this.leseTag(date);
+    // Kleiner Cache: Wer durch die Tage blättert, trifft dieselben wieder.
+    if (this.archivCache.size >= 16) {
+      const aeltester = this.archivCache.keys().next().value;
+      if (aeltester !== undefined) this.archivCache.delete(aeltester);
+    }
+    this.archivCache.set(date, geladen);
+    return geladen;
+  }
+
+  private leseTag(date: string): GeladenerTag | null {
     const path = resolve(this.daysDir, `${date}.json`);
     if (!existsSync(path)) return null;
     let parsed: Record<string, unknown>;
@@ -572,9 +765,11 @@ export class EnergyAccumulator {
       console.warn(`${path}: Inhalt ungültig, Tag wird nicht angezeigt.`);
       return null;
     }
+    const intervallS = zahlOderNull(parsed['seriesIntervalSeconds']);
     return {
       totals,
       series: pruefeSerie(parsed['series']),
+      intervallMs: intervallS !== null && intervallS > 0 ? intervallS * 1000 : SERIES_INTERVAL_MS,
       ...(isStringRecord(parsed['batteryNames']) ? { batteryNames: parsed['batteryNames'] } : {}),
       ...(isCapRecord(parsed['batteryCaps']) ? { batteryCaps: parsed['batteryCaps'] } : {}),
       ...(typeof parsed['quality'] === 'string' ? { quality: parsed['quality'] } : {}),
@@ -644,12 +839,9 @@ export class EnergyAccumulator {
 
     if (date === this.currentDate) {
       this.today = toMutable(totals);
+      this.today.zaehlerstaende = pruefeZaehlerstaende(parsed?.['zaehlerstaende']);
       this.series = series;
-      // Ohne diese Zeile stand lastSeriesAt nach einem Neustart auf 0: Der
-      // erste Messzyklus setzte sofort einen weiteren Punkt, wenige Sekunden
-      // nach dem zuletzt gespeicherten.
-      const last = this.series[this.series.length - 1];
-      if (last && Number.isFinite(last.t)) this.lastSeriesAt = last.t;
+      this.fenster = pruefeFenster(parsed?.['fenster']);
     } else {
       // today.json stammt von einem früheren Tag (Server war über Mitternacht
       // aus): diesen Tag noch archivieren, damit seine Kurve nicht verloren geht.
@@ -657,21 +849,31 @@ export class EnergyAccumulator {
       this.history = this.history.filter((r) => r.date !== date);
       this.history.push({ date, totals });
       this.history.sort((a, b) => a.date.localeCompare(b.date));
+      // Die Zähler laufen über den Neustart hinweg weiter — der letzte Stand
+      // von damals ist der Anfang von heute.
+      const alt = pruefeZaehlerstaende(parsed?.['zaehlerstaende']);
+      for (const [k, z] of Object.entries(alt)) {
+        this.today.zaehlerstaende[k] = { start: z.letzter, letzter: z.letzter, summe: 0 };
+      }
     }
   }
 
   persist(): void {
     try {
-      writeJsonAtomic(this.historyPath(), { version: 2, days: this.history }, 2);
+      writeJsonAtomic(this.historyPath(), { version: 3, days: this.history }, 2);
       writeJsonAtomic(this.todayPath(), {
         version: 2,
         date: this.currentDate,
         totals: toReadonly(this.today),
         series: this.series,
+        seriesIntervalSeconds: SERIES_INTERVAL_MS / 1000,
         batteryNames: this.batteryNames,
         batteryCaps: this.batteryCaps,
         // Damit nach einem Neustart klar ist, seit wann nicht erfasst wurde.
         letzteErfassungMs: this.letzteErfassungMs,
+        zaehlerstaende: this.today.zaehlerstaende,
+        // Die angefangene Minute, damit ein Neustart sie nicht verschluckt.
+        fenster: this.fenster,
       });
       this.dirty = false;
     } catch (error) {
@@ -692,6 +894,61 @@ function nichtnegativOderNull(w: number | null): number | null {
 
 function leererPunkt(t: number): SeriesPoint {
   return { t, pv: null, house: null, gridImport: null, gridExport: null, inv: {}, bat: {}, socAgg: null };
+}
+
+function istLeer(p: SeriesPoint): boolean {
+  return p.pv === null && p.house === null && p.gridImport === null && p.gridExport === null
+    && Object.keys(p.inv).length === 0 && Object.keys(p.bat).length === 0;
+}
+
+/** Mittelwerte eines Minutenfensters als Kurvenpunkt. */
+function punktAus(f: Minutenfenster): SeriesPoint {
+  const mittel = (wh: number, s: number): number | null => (s > 0 ? Math.round(wh / (s / 3600)) : null);
+  const inv: Record<string, number | null> = {};
+  for (const [id, e] of Object.entries(f.inv)) inv[id] = mittel(e.wh, e.s);
+  const bat: Record<string, { p: number | null; soc: number | null }> = {};
+  for (const [id, e] of Object.entries(f.bat)) {
+    bat[id] = { p: mittel(e.wh, e.s), soc: e.soc === null ? null : Math.round(e.soc * 10) / 10 };
+  }
+  return {
+    t: f.beginnMs,
+    pv: mittel(f.wh.pv, f.s.pv),
+    house: mittel(f.wh.haus, f.s.haus),
+    gridImport: mittel(f.wh.bezug, f.s.bezug),
+    gridExport: mittel(f.wh.einspeisung, f.s.einspeisung),
+    inv,
+    bat,
+    socAgg: f.socAgg === null ? null : Math.round(f.socAgg * 10) / 10,
+  };
+}
+
+/** Ein gespeichertes Minutenfenster zurücklesen; Unbrauchbares wird verworfen. */
+function pruefeFenster(roh: unknown): Minutenfenster | null {
+  if (typeof roh !== 'object' || roh === null) return null;
+  const r = roh as Record<string, unknown>;
+  const beginn = zahlOderNull(r['beginnMs']);
+  const ende = zahlOderNull(r['endeMs']);
+  const wh = r['wh'] as Record<string, unknown> | undefined;
+  const s = r['s'] as Record<string, unknown> | undefined;
+  if (beginn === null || ende === null || !wh || !s) return null;
+  const vier = (o: Record<string, unknown>): { pv: number; haus: number; bezug: number; einspeisung: number } | null => {
+    const pv = zahlOderNull(o['pv']); const haus = zahlOderNull(o['haus']);
+    const bezug = zahlOderNull(o['bezug']); const einspeisung = zahlOderNull(o['einspeisung']);
+    return pv === null || haus === null || bezug === null || einspeisung === null ? null : { pv, haus, bezug, einspeisung };
+  };
+  const whV = vier(wh); const sV = vier(s);
+  if (whV === null || sV === null) return null;
+  const inv: Record<string, { wh: number; s: number }> = {};
+  for (const [k, v] of Object.entries((r['inv'] ?? {}) as Record<string, Record<string, unknown>>)) {
+    const a = zahlOderNull(v?.['wh']); const b = zahlOderNull(v?.['s']);
+    if (a !== null && b !== null) inv[k] = { wh: a, s: b };
+  }
+  const bat: Record<string, { wh: number; s: number; soc: number | null }> = {};
+  for (const [k, v] of Object.entries((r['bat'] ?? {}) as Record<string, Record<string, unknown>>)) {
+    const a = zahlOderNull(v?.['wh']); const b = zahlOderNull(v?.['s']);
+    if (a !== null && b !== null) bat[k] = { wh: a, s: b, soc: zahlOderNull(v?.['soc']) };
+  }
+  return { beginnMs: beginn, endeMs: ende, wh: whV, s: sV, inv, bat, socAgg: zahlOderNull(r['socAgg']) };
 }
 
 function isStringRecord(v: unknown): v is Record<string, string> {
@@ -751,6 +1008,98 @@ function unionKeys(a: readonly string[], b: readonly string[]): string[] {
   return [...new Set([...a, ...b])];
 }
 
+/** Ein geladenes Tagesarchiv. */
+interface GeladenerTag {
+  totals: EnergyTotals;
+  series: SeriesPoint[];
+  intervallMs: number;
+  batteryNames?: Record<string, string>;
+  batteryCaps?: Record<string, number | null>;
+  quality?: string;
+}
+
+function pruefeZaehlerstaende(roh: unknown): Record<string, Zaehlerstand> {
+  const aus: Record<string, Zaehlerstand> = {};
+  if (typeof roh !== 'object' || roh === null || Array.isArray(roh)) return aus;
+  for (const [k, v] of Object.entries(roh as Record<string, unknown>)) {
+    const z = v as Record<string, unknown> | null;
+    const start = zahlOderNull(z?.['start']);
+    const letzter = zahlOderNull(z?.['letzter']);
+    const summe = zahlOderNull(z?.['summe']);
+    if (start === null || letzter === null || summe === null || start < 0 || letzter < 0 || summe < 0) continue;
+    aus[k] = { start, letzter, summe };
+  }
+  return aus;
+}
+
+/** Tagesdifferenzen aus den Zählerständen. */
+function zaehlersummen(staende: Readonly<Record<string, Zaehlerstand>>): Zaehlersummen {
+  const delta = (key: string): number | null => {
+    const z = staende[key];
+    return z === undefined ? null : Math.max(0, z.summe + (z.letzter - z.start));
+  };
+  const je: Record<string, number> = {};
+  for (const key of Object.keys(staende)) {
+    if (key.startsWith('pv:')) {
+      const d = delta(key);
+      if (d !== null) je[key.slice(3)] = d;
+    }
+  }
+  return {
+    pvWh: delta('pv'),
+    pvJeWechselrichterWh: je,
+    bezugWh: delta('bezug'),
+    einspeisungWh: delta('einspeisung'),
+    autoWh: delta('auto'),
+  };
+}
+
+/**
+ * Minutenpunkte zu gröberen Mitteln zusammenfassen. Ein Punkt je Fenster,
+ * Mittel nur über vorhandene Werte; ein Fenster ohne einen einzigen Wert bleibt
+ * eine Lücke (`null`) — Lücken werden nicht glattgezogen.
+ */
+export function verdichteSerie(serie: readonly SeriesPoint[], intervallMs: number): SeriesPoint[] {
+  const fenster = new Map<number, SeriesPoint[]>();
+  for (const p of serie) {
+    const t = Math.floor(p.t / intervallMs) * intervallMs;
+    const liste = fenster.get(t);
+    if (liste) liste.push(p);
+    else fenster.set(t, [p]);
+  }
+  const mittel = (werte: (number | null)[]): number | null => {
+    const da = werte.filter((w): w is number => w !== null);
+    return da.length === 0 ? null : Math.round(da.reduce((a, b) => a + b, 0) / da.length);
+  };
+  const letzterWert = (werte: (number | null)[]): number | null => {
+    for (let i = werte.length - 1; i >= 0; i--) if (werte[i] !== null) return werte[i] as number;
+    return null;
+  };
+  return [...fenster.entries()].sort((a, b) => a[0] - b[0]).map(([t, punkte]) => {
+    const invIds = new Set(punkte.flatMap((p) => Object.keys(p.inv)));
+    const batIds = new Set(punkte.flatMap((p) => Object.keys(p.bat)));
+    const inv: Record<string, number | null> = {};
+    for (const id of invIds) inv[id] = mittel(punkte.map((p) => p.inv[id] ?? null));
+    const bat: Record<string, { p: number | null; soc: number | null }> = {};
+    for (const id of batIds) {
+      bat[id] = {
+        p: mittel(punkte.map((p) => p.bat[id]?.p ?? null)),
+        soc: letzterWert(punkte.map((p) => p.bat[id]?.soc ?? null)),
+      };
+    }
+    return {
+      t,
+      pv: mittel(punkte.map((p) => p.pv)),
+      house: mittel(punkte.map((p) => p.house)),
+      gridImport: mittel(punkte.map((p) => p.gridImport)),
+      gridExport: mittel(punkte.map((p) => p.gridExport)),
+      inv,
+      bat,
+      socAgg: letzterWert(punkte.map((p) => p.socAgg)),
+    };
+  });
+}
+
 function freshTotals(): MutableTotals {
   return toMutable(emptyTotals());
 }
@@ -769,6 +1118,7 @@ function toReadonly(t: MutableTotals): EnergyTotals {
     abdeckungJeGroesseS: { ...t.abdeckungJeGroesseS },
     erfasstAbMs: t.erfasstAbMs,
     zuordnung: { ...t.zuordnung },
+    zaehler: zaehlersummen(t.zaehlerstaende),
   };
 }
 
@@ -794,27 +1144,20 @@ function toMutable(t: EnergyTotals): MutableTotals {
     abdeckungJeGroesseS: { ...je },
     erfasstAbMs: t.erfasstAbMs ?? null,
     zuordnung: { ...(t.zuordnung ?? leereZuordnung()) },
+    zaehlerstaende: {},
   };
 }
 
-export function localDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
 
-export function shiftDate(date: string, days: number): string {
-  const d = new Date(`${date}T12:00:00`); // Mittag: DST-Wechsel verschiebt das Datum nicht
-  d.setDate(d.getDate() + days);
-  return localDate(d);
-}
 
 function aggregateByMonth(records: readonly DailyRecord[]): unknown[] {
   const byMonth = new Map<string, EnergyTotals>();
   for (const record of records) {
     const month = record.date.slice(0, 7);
-    byMonth.set(month, addTotals(byMonth.get(month) ?? emptyTotals(), record.totals));
+    const bisher = byMonth.get(month);
+    // Ohne Startwert: Ein leerer Startwert hätte keine Zähler, und "Zähler nur,
+    // wenn alle Tage welche haben" ergäbe dann nie welche.
+    byMonth.set(month, bisher === undefined ? record.totals : addTotals(bisher, record.totals));
   }
   return [...byMonth.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
@@ -822,8 +1165,10 @@ function aggregateByMonth(records: readonly DailyRecord[]): unknown[] {
 }
 
 function sumAll(records: readonly DailyRecord[]): EnergyTotals {
-  let acc = emptyTotals();
-  for (const record of records) acc = addTotals(acc, record.totals);
+  const [erster, ...rest] = records;
+  if (erster === undefined) return emptyTotals();
+  let acc = erster.totals;
+  for (const record of rest) acc = addTotals(acc, record.totals);
   return acc;
 }
 
@@ -850,6 +1195,7 @@ function addTotals(a: EnergyTotals, b: EnergyTotals): EnergyTotals {
     pv: x.pv + y.pv, haus: x.haus + y.haus, bezug: x.bezug + y.bezug, einspeisung: x.einspeisung + y.einspeisung,
   }));
   const zuordnung = beide(a.zuordnung, b.zuordnung, addiereZuordnung);
+  const zaehler = beide(a.zaehler, b.zaehler, addiereZaehlersummen);
   return {
     productionWh: a.productionWh + b.productionWh,
     perInverterWh: mergeRecord(a.perInverterWh, b.perInverterWh),
@@ -862,5 +1208,6 @@ function addTotals(a: EnergyTotals, b: EnergyTotals): EnergyTotals {
     ...(covered !== undefined ? { coveredSeconds: covered } : {}),
     ...(je !== undefined ? { abdeckungJeGroesseS: je } : {}),
     ...(zuordnung !== undefined ? { zuordnung } : {}),
+    ...(zaehler !== undefined ? { zaehler } : {}),
   };
 }

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { EnergyAccumulator, localDate, shiftDate } from './history.ts';
+import { EnergyAccumulator, localDate, shiftDate, verdichteSerie, type SeriesPoint } from './history.ts';
 import type { EngineState } from './engine.ts';
 import type { ConnectorReading, EnergySnapshot, PowerMetric, BatterySnapshot } from '@energy/core';
 
@@ -48,6 +48,8 @@ function state(opts: {
   /** Qualität der PV-Messung — für den Fall einer eingefrorenen Quelle. */
   pvQualitaet?: 'live' | 'stale' | 'offline';
   ev?: number | null;
+  /** Zählerstände der Geräte in Wh. */
+  zaehler?: { pv?: number; bezug?: number; einspeisung?: number; auto?: number };
 }): EngineState {
   const snapshot: EnergySnapshot = {
     timestamp: opts.at,
@@ -57,15 +59,25 @@ function state(opts: {
     gridExportW: metric(opts.ge),
     batteries: opts.batteries ?? [],
     evCharger:
-      opts.ev === undefined
+      opts.ev === undefined && opts.zaehler?.auto === undefined
         ? null
         : ({
             deviceId: 'ev', displayName: 'Wallbox', state: 'charging',
-            vehicleConnected: true, chargePowerW: opts.ev, sessionEnergyWh: null,
-            totalEnergyWh: null, maxCurrentA: 16, temperatureC: null,
+            vehicleConnected: true, chargePowerW: opts.ev ?? null, sessionEnergyWh: null,
+            totalEnergyWh: opts.zaehler?.auto ?? null, maxCurrentA: 16, temperatureC: null,
             vehicleSocPercent: null, faultText: null,
             provenance: { connectorId: 'ev', deviceId: 'ev', measuredAt: opts.at, ageMs: 0, quality: 'live' },
           } as EnergySnapshot['evCharger']),
+    ...(opts.zaehler
+      ? {
+          counters: {
+            solarWh: opts.zaehler.pv === undefined ? null : { valueWh: opts.zaehler.pv, provenance: metric(0).provenance },
+            gridImportWh: opts.zaehler.bezug === undefined ? null : { valueWh: opts.zaehler.bezug, provenance: metric(0).provenance },
+            gridExportWh: opts.zaehler.einspeisung === undefined ? null : { valueWh: opts.zaehler.einspeisung, provenance: metric(0).provenance },
+            solarByConnectorWh: {},
+          },
+        }
+      : {}),
   };
   const readings: ConnectorReading[] = Object.entries(opts.inv ?? {}).map(([id, w]) => ({
     connectorId: id, timestamp: opts.at,
@@ -206,8 +218,10 @@ describe('Abdeckung, Kurve und Neustart erklären dieselben Lücken', () => {
   });
 
   test('ungültige Kurvenpunkte sind Lücken, keine fortgeführten Messungen', () => {
+    // Die Kurve zeigt Minutenmittel; ein Mittel braucht ein Intervall.
     const acc = makeAcc();
     miss(acc, { at: um(12, 0, 0), pv: 1000, house: 500, gi: 0, ge: 0, pvQualitaet: 'stale' });
+    miss(acc, { at: um(12, 0, 10), pv: 1000, house: 500, gi: 0, ge: 0, pvQualitaet: 'stale' });
     const v: any = acc.dayView('2026-08-19');
     assert.equal(v.series[0].pv, null);
     assert.equal(v.series[0].house, 500);
@@ -364,5 +378,120 @@ describe('Beschädigte Dateien', () => {
     const acc2 = neuStart();
     const v: any = acc2.dayView('2026-08-19');
     assert.ok(!v.hasData || v.totals.productionWh >= 0, 'negative Summe wurde geglaubt');
+  });
+});
+
+describe('Kurve als Minutenmittel', () => {
+  test('ein Punkt je Minute, Mittel über die Messungen der Minute', () => {
+    const acc = makeAcc();
+    // 12:00:00–12:00:30 mit 1000 W, 12:00:30–12:01:00 mit 3000 W → Mittel 2000 W.
+    miss(acc, { at: um(12, 0, 0), pv: 1000, house: 500, gi: 0, ge: 0 });
+    miss(acc, { at: um(12, 0, 10), pv: 1000, house: 500, gi: 0, ge: 0 });
+    miss(acc, { at: um(12, 0, 20), pv: 1000, house: 500, gi: 0, ge: 0 });
+    miss(acc, { at: um(12, 0, 30), pv: 3000, house: 500, gi: 0, ge: 0 });
+    miss(acc, { at: um(12, 0, 40), pv: 3000, house: 500, gi: 0, ge: 0 });
+    miss(acc, { at: um(12, 0, 50), pv: 3000, house: 500, gi: 0, ge: 0 });
+    miss(acc, { at: um(12, 1, 0), pv: 3000, house: 500, gi: 0, ge: 0 });
+    const v: any = acc.dayView('2026-08-19');
+    const punkt = v.series.find((p: any) => p.t === um(12, 0, 0).getTime());
+    assert.ok(punkt, 'kein Punkt für 12:00');
+    assert.equal(punkt.pv, 2000);
+    assert.equal(punkt.house, 500);
+    assert.ok(Number.isInteger(punkt.pv), 'ganze Watt');
+  });
+
+  test('die angefangene Minute ist in der Live-Ansicht schon sichtbar', () => {
+    const acc = makeAcc();
+    miss(acc, { at: um(12, 0, 0), pv: 1000, house: 500, gi: 0, ge: 0 });
+    miss(acc, { at: um(12, 0, 10), pv: 1000, house: 500, gi: 0, ge: 0 });
+    const v: any = acc.dayView('2026-08-19');
+    assert.equal(v.series.length, 1);
+    assert.equal(v.series[0].pv, 1000);
+    assert.equal(acc.todaySeries().length, 1);
+  });
+
+  test('Kurve und Summe beschreiben dieselbe Energie', () => {
+    const acc = makeAcc();
+    for (let s = 0; s <= 120; s += 10) {
+      miss(acc, { at: new Date(um(12, 0, 0).getTime() + s * 1000), pv: 600 + s * 10, house: 0, gi: 0, ge: 0 });
+    }
+    const v: any = acc.dayView('2026-08-19');
+    const ausKurve = v.series.filter((p: any) => p.pv !== null).reduce((a: number, p: any) => a + p.pv / 60, 0);
+    assert.ok(Math.abs(ausKurve - v.totals.productionWh) < 1, `Kurve ${ausKurve} Wh vs Summe ${v.totals.productionWh} Wh`);
+  });
+
+  test('verdichteSerie mittelt vorhandene Werte und lässt Lücken Lücken', () => {
+    const t0 = um(12, 0, 0).getTime();
+    const p = (min: number, pv: number | null): SeriesPoint => ({
+      t: t0 + min * 60_000, pv, house: 100, gridImport: 0, gridExport: 0, inv: { a: pv }, bat: { b: { p: pv, soc: 50 + min } }, socAgg: 50 + min,
+    });
+    const serie = [p(0, 1000), p(1, 2000), p(2, null), p(15, null), p(16, null)];
+    const grob = verdichteSerie(serie, 15 * 60_000);
+    assert.equal(grob.length, 2);
+    assert.equal(grob[0]?.pv, 1500, 'Mittel nur über vorhandene Werte');
+    assert.equal(grob[0]?.bat['b']?.soc, 52, 'SOC: letzter Wert des Fensters');
+    assert.equal(grob[1]?.pv, null, 'ein Fenster ohne Wert bleibt Lücke');
+  });
+});
+
+describe('Zählerstände als zweite Wahrheit', () => {
+  test('Tagessumme ist die Zählerdifferenz seit dem ersten Stand des Tages', () => {
+    const acc = makeAcc();
+    miss(acc, { at: um(12, 0, 0), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { pv: 100_000, bezug: 5000, einspeisung: 7000, auto: 900 } });
+    miss(acc, { at: um(12, 0, 10), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { pv: 100_250, bezug: 5020, einspeisung: 7100, auto: 950 } });
+    const v: any = acc.dayView('2026-08-19');
+    assert.deepEqual(v.totals.zaehler, { pvWh: 250, pvJeWechselrichterWh: {}, bezugWh: 20, einspeisungWh: 100, autoWh: 50 });
+  });
+
+  test('ohne Zähler bleibt die Grösse null — nicht 0', () => {
+    const acc = makeAcc();
+    miss(acc, { at: um(12, 0, 0), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 5000 } });
+    const v: any = acc.dayView('2026-08-19');
+    assert.equal(v.totals.zaehler.pvWh, null);
+    assert.equal(v.totals.zaehler.bezugWh, 0);
+  });
+
+  test('überlebt einen Neustart samt Ausfallzeit — die Zähler zählten weiter', () => {
+    const acc = makeAcc();
+    miss(acc, { at: um(12, 0, 0), pv: 3600, house: 0, gi: 0, ge: 0, zaehler: { pv: 1000 } });
+    miss(acc, { at: um(12, 0, 10), pv: 3600, house: 0, gi: 0, ge: 0, zaehler: { pv: 1010 } });
+    acc.persist();
+    uhr = um(13, 0, 0).getTime();
+    const acc2 = neuStart();
+    miss(acc2, { at: um(13, 0, 0), pv: 3600, house: 0, gi: 0, ge: 0, zaehler: { pv: 4610 } });
+    const v: any = acc2.dayView('2026-08-19');
+    assert.ok(Math.abs(v.totals.productionWh - 10) < 0.001, 'Integration kennt nur die 10 Wh vor dem Ausfall');
+    assert.equal(v.totals.zaehler.pvWh, 3610, 'der Zähler kennt auch die Stunde dazwischen');
+  });
+
+  test('ein Zählerrücksprung verliert nichts', () => {
+    const acc = makeAcc();
+    miss(acc, { at: um(12, 0, 0), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 500 } });
+    miss(acc, { at: um(12, 0, 10), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 530 } });
+    miss(acc, { at: um(12, 0, 20), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 5 } });
+    miss(acc, { at: um(12, 0, 30), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 12 } });
+    const v: any = acc.dayView('2026-08-19');
+    assert.equal(v.totals.zaehler.bezugWh, 30 + 7);
+  });
+
+  test('über Mitternacht beginnt der neue Tag beim letzten Stand des alten', () => {
+    const acc = makeAcc(um(23, 59, 50, 18));
+    miss(acc, { at: um(23, 59, 55, 18), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 1000 } });
+    miss(acc, { at: um(0, 0, 5, 19), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 1010 } });
+    miss(acc, { at: um(0, 0, 15, 19), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 1030 } });
+    const alt: any = acc.dayView('2026-08-18');
+    const neu: any = acc.dayView('2026-08-19');
+    assert.equal(alt.totals.zaehler.bezugWh, 0);
+    assert.equal(neu.totals.zaehler.bezugWh, 30);
+  });
+
+  test('Monats- und Gesamtsummen addieren Zähler nur, wenn alle Tage welche haben', () => {
+    const acc = makeAcc(um(23, 59, 50, 18));
+    miss(acc, { at: um(23, 59, 55, 18), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 1000 } });
+    miss(acc, { at: um(0, 0, 5, 19), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 1010 } });
+    miss(acc, { at: um(0, 0, 15, 19), pv: 0, house: 0, gi: 0, ge: 0, zaehler: { bezug: 1030 } });
+    const h: any = acc.historyView('total');
+    assert.equal(h.lifetime.zaehler.bezugWh, 30);
+    assert.equal(h.lifetime.zaehler.pvWh, null);
   });
 });

@@ -16,8 +16,10 @@ import type {
   ConnectorId,
   ConnectorReading,
   DataQuality,
+  EnergyMetric,
   EnergySnapshot,
   PowerMetric,
+  ResolvedCounters,
 } from './model.ts';
 
 /**
@@ -153,9 +155,66 @@ export function resolveSnapshot(
     gridExportW: gridExport,
     batteries,
     evCharger,
+    counters: resolveCounters(byConnector, solarSources, mapping),
   };
 
   return { snapshot, unavailable, disagreements, derivedConsumptionNegative };
+}
+
+// --- Zählerstände ----------------------------------------------------------
+
+/**
+ * Zählerstände nach denselben Regeln wie die Leistungen: Netz aus genau einer
+ * Quelle, PV als Summe über die Wechselrichter — und die Summe nur, wenn jeder
+ * Wechselrichter einen PV-Zähler liefert. Fehlt einer, bleibt die Summe
+ * unbekannt; die Einzelwerte stehen trotzdem in `solarByConnectorWh`.
+ */
+function resolveCounters(
+  byConnector: Map<ConnectorId, ConnectorReading>,
+  solarSources: readonly ConnectorId[],
+  mapping: SourceMapping,
+): ResolvedCounters {
+  const solarByConnectorWh: Record<string, number | null> = {};
+  let sum = 0;
+  let vollstaendig = true;
+  let quality: DataQuality = 'live';
+  let oldest = new Date();
+  for (const id of solarSources) {
+    const z = byConnector.get(id)?.counters?.solarWh ?? null;
+    const wert = z !== null && z.valueWh !== null && Number.isFinite(z.valueWh) ? z.valueWh : null;
+    solarByConnectorWh[id] = wert;
+    if (wert === null || z === null) {
+      vollstaendig = false;
+      continue;
+    }
+    sum += wert;
+    quality = worseQuality(quality, z.provenance.quality);
+    if (z.provenance.measuredAt < oldest) oldest = z.provenance.measuredAt;
+  }
+  const solarWh: EnergyMetric | null = vollstaendig && solarSources.length > 0
+    ? {
+        valueWh: sum,
+        provenance: {
+          connectorId: solarSources.length === 1 ? solarSources[0]! : 'sum',
+          deviceId: solarSources.join('+'),
+          measuredAt: oldest,
+          ageMs: Math.max(0, Date.now() - oldest.getTime()),
+          quality,
+        },
+      }
+    : null;
+
+  const pick = (id: ConnectorId, key: 'gridImportWh' | 'gridExportWh'): EnergyMetric | null => {
+    const z = byConnector.get(id)?.counters?.[key] ?? null;
+    return z !== null && z.valueWh !== null && Number.isFinite(z.valueWh) ? z : null;
+  };
+
+  return {
+    solarWh,
+    gridImportWh: pick(mapping.gridImportW, 'gridImportWh'),
+    gridExportWh: pick(mapping.gridExportW, 'gridExportWh'),
+    solarByConnectorWh,
+  };
 }
 
 // --- Auswahl und Summierung ------------------------------------------------

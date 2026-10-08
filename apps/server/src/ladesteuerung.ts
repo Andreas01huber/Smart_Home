@@ -3,33 +3,31 @@
  *
  * Hier läuft zusammen, was in `@energy/core` als reine Rechnung liegt:
  *
- *   Messzyklus  →  berechneLadeziel  →  beruhige  →  Tuya-Befehl
+ *   Messzyklus → berechneLadeziel → uebersteuere → beruhige → Befehl
  *
- * Die Rechnung (`ueberschuss.ts`) und die Beruhigung (`laderegler.ts`) kennen
- * weder Uhr noch Netzwerk und sind deshalb vollständig testbar. Hier steht das,
- * was sich nicht testen lässt, ohne eine echte Wallbox anzufassen: Zeitgeber,
- * Wiederholversuche, Protokoll.
+ * Die Rechnung (`ueberschuss.ts`), die Übersteuerungen (`ladeentscheidung.ts`)
+ * und die Beruhigung (`laderegler.ts`) kennen weder Uhr noch Netzwerk und sind
+ * vollständig testbar. Die Ausführung des Befehls samt Wiederholung steht in
+ * `ladebefehl.ts`. Hier bleibt, was Zustand über die Zeit braucht: Zeitgeber,
+ * Gedächtnis, Abgleich mit der Wirklichkeit, Protokoll.
  *
  * Drei Modi, umschaltbar in config.json:
  *
  *   aus         — nichts geschieht.
  *   beobachten  — es wird gerechnet und angezeigt, aber nichts gesendet.
- *                 Der Vorgabewert: Wer die Wallbox zum ersten Mal automatisch
- *                 stellen lässt, will vorher sehen, was passieren würde.
  *   regeln      — der Ladestrom wird tatsächlich gestellt.
  *
- * Gestellt werden zwei Dinge: der Ladestrom (`charge_cur_set`) und der
- * Hauptschalter (`switch`). Der Schalter musste dazu, weil "Pause" sonst gar
- * keine Pause ist: Der kleinste Ladestrom sind gut 4 kW, und wenn die Sonne die
- * nicht hergibt, kommen sie aus dem Netz — genau das, was diese Regelung
- * verhindern soll. `work_mode` bleibt unangetastet.
- *
  * ── Zwei Betriebsarten für den Menschen ────────────────────────────────────
- * Davon zu trennen ist, was der Benutzer wählt: `intelligent` lädt nur aus
- * eigener Erzeugung, `manuell` mit einem festen Ladestrom, notfalls aus dem
- * Netz. Der Handbetrieb ist kein Schlupfloch in der Autarkieregel, sondern eine
- * ausdrückliche Entscheidung — er wird deutlich angezeigt und endet von selbst,
- * sobald das Fahrzeug abgesteckt wird oder der Server neu startet.
+ * `intelligent` lädt nur aus eigener Erzeugung, `manuell` mit einem festen
+ * Ladestrom, notfalls aus dem Netz. Der Handbetrieb ist kein Schlupfloch in der
+ * Autarkieregel, sondern eine ausdrückliche Entscheidung.
+ *
+ * ── Ausfallverhalten ───────────────────────────────────────────────────────
+ * Die Wallbox hängt an der Cloud; stirbt der Server, bleibt ihr letzter Befehl
+ * stehen. Deshalb: Beim geordneten Herunterfahren wird im intelligenten
+ * Betrieb ein Stopp gesendet (`beimHerunterfahren`), beim Start läuft sofort
+ * ein Abgleichzyklus. Ein Absturz ohne Herunterfahren bleibt eine Lücke, die
+ * nur ein lokaler Steuerpfad schliessen kann.
  */
 
 import {
@@ -40,63 +38,40 @@ import {
   bewaehrtW,
   gedaechtnisAusMesswerten,
   gemessenerAnschluss,
+  LADEN_AB_W,
   ladeleistungAusStromW,
   LEERES_GEDAECHTNIS,
   merkeEntladung,
   nachweisZuruecknehmen,
   neueHistorie,
   speicherspielraum,
+  uebersteuere,
+  begrenzeAufDose,
+  type Dosengrenzen,
   type Ladeanschluss,
   type Ladeentscheidung,
   type Ladezustand,
   type Messwerte,
   type Reglerhistorie,
   type Reglerparameter,
+  type Reglerwahl,
   type Speichergedaechtnis,
   type SpeicherZustand,
   type Zeitparameter,
 } from '@energy/core';
-import type { TuyaEvseConnector } from '@energy/connectors';
+import type { Ladestromgrenzen, SteuerbaresLadegeraet } from '@energy/connectors';
 
 import { ladeanschlussAus, type AppConfig } from './config.ts';
 import { ladeDose, merkeDose } from './wallbox-speicher.ts';
 import { ladeLademodus, merkeLademodus } from './lademodus-speicher.ts';
+import { Befehlsausfuehrung, type Befehlsstand } from './ladebefehl.ts';
 import type { EnergyEngine, EngineState } from './engine.ts';
+import type { Ereignisprotokoll } from './ereignisse.ts';
 
-/**
- * Wie geladen wird — die Entscheidung des Menschen, nicht der Regelung.
- *
- * `intelligent`  Nur, was Sonne und freigegebene Speicherleistung hergeben.
- *                Regelziel: Netzbezug durch das Auto vermeiden. Wegen der
- *                Cloudlatenz der Wallbox ist das ein Ziel, keine Garantie.
- * `manuell`      Ein fester Ladestrom, den ein Mensch eingestellt hat. Reicht
- *                die eigene Erzeugung nicht, kommt der Rest aus dem Netz.
- *
- * Eine eigene Art "Volladung" gab es einmal und ist entfallen: Sie war nichts
- * anderes als Handbetrieb auf dem Höchstwert. Ein Knopf weniger, der dasselbe
- * kann wie der Schieberegler ganz rechts.
- */
+export type { Befehlsstand } from './ladebefehl.ts';
+
+/** Wie geladen wird — die Entscheidung des Menschen, nicht der Regelung. */
 export type Betriebsart = 'intelligent' | 'manuell';
-
-/**
- * Was mit dem letzten Steuerbefehl geschah — getrennt vom Wunsch und vom
- * gemessenen Stromfluss.
- *
- *   uebermittelt  an die Cloud geschickt, Antwort steht aus
- *   angenommen    die Cloud hat den Befehl angenommen (HTTP ok)
- *   bestaetigt    das Gerät meldet den gesendeten Zustand zurück
- *   fehlgeschlagen  die Cloud hat abgelehnt oder nicht geantwortet
- *
- * "angenommen" heisst ausdrücklich nicht "Auto lädt" — ob Strom fliesst,
- * sagt nur die Messung.
- */
-export interface Befehlsstand {
-  readonly schalter: boolean;
-  readonly stromA: number | null;
-  readonly gesendetAm: string;
-  readonly status: 'uebermittelt' | 'angenommen' | 'bestaetigt' | 'fehlgeschlagen';
-  readonly fehler: string | null;
-}
 
 /** Was die Wallbox zuletzt selbst meldete — nicht, was gesendet wurde. */
 export interface Geraetesicht {
@@ -159,81 +134,52 @@ export interface Steuerzustand {
   readonly letzterBefehlAt: string | null;
   readonly letzterFehler: string | null;
   readonly naechsteRegelungInS: number;
-  /** Gewählte Betriebsart — die Entscheidung des Menschen. `null` = noch keine Wahl. */
   readonly betriebsart: Betriebsart | null;
-  /** Letzter Steuerbefehl und sein Status. */
   readonly befehl: Befehlsstand | null;
-  /** Was die Wallbox selbst zuletzt meldete. */
   readonly geraet: Geraetesicht | null;
-  /** Eingestellter Ladestrom im Handbetrieb, in Ampere. */
   readonly manuellA: number;
   /** Nur noch für ältere Oberflächen: Handbetrieb auf dem Höchstwert. */
   readonly volladung: boolean;
-  /** Wie das Auto angesteckt ist — erkannt, nicht konfiguriert. */
   readonly anschluss: Anschlussinfo;
-  /** Angesteckt, fordert aber keinen Strom mehr (voll oder eigene Grenze). */
   readonly fordertNicht: boolean;
-  /** Vom Menschen angehalten. */
   readonly gestoppt: boolean;
-  /** Höchster Ladestrom an einer Haushaltssteckdose. */
   readonly haushaltMaxA: number;
   readonly protokoll: readonly Regelschritt[];
 }
 
+/** Kurzfassung für den Live-Strom — ohne das Protokoll. */
+export type Steuerkurz = Omit<
+  Steuerzustand,
+  'protokoll' | 'aktiv' | 'zielLeistungW' | 'netzW' | 'letzterBefehlAt' | 'naechsteRegelungInS'
+>;
+
 /** So viele Regelschritte werden vorgehalten — genug für gut zwei Stunden. */
 const PROTOKOLL_MAX = 240;
-
-/** Obergrenze für den Wiederholabstand nach Tuya-Fehlern. */
-const BACKOFF_MAX_MS = 5 * 60_000;
-
-/**
- * Kürzere Obergrenze, wenn ein STOPP nicht durchkam.
- *
- * Fünf Minuten zu warten ist richtig, wenn eine Erhöhung scheitert — dann lädt
- * das Auto eben etwas langsamer. Bei einem misslungenen Stopp sind fünf Minuten
- * fünf Minuten Netzbezug. Deshalb wird hier deutlich schneller nachgefasst.
- */
-const BACKOFF_STOPP_MAX_MS = 60_000;
-
-/**
- * Ab dieser gemessenen Leistung gilt das Fahrzeug als ladend.
- *
- * Deutlich unter dem kleinsten Ladestrom (6 A sind gut 4 kW) und deutlich über
- * dem Grundrauschen der Wallbox-Elektronik.
- */
-const LAEDT_AB_W = 200;
 
 /** Platzhalter für "wir wissen nicht, was an der Wallbox eingestellt ist". */
 const UNBEKANNT_A = -1;
 
 /**
- * So oft wird eingeschaltet, bevor die Regelung aufgibt.
- *
- * Ein Fahrzeug braucht nach dem Einschalten ein paar Sekunden, bis es Strom
- * zieht — der erste Versuch beweist also nichts. Drei Versuche hintereinander
- * ohne einen einzigen Ampere sind dagegen eindeutig: Der Akku ist voll, oder
- * die im Auto eingestellte Ladegrenze ist erreicht.
+ * So oft wird eingeschaltet, bevor die Regelung aufgibt. Drei Versuche
+ * hintereinander ohne einen einzigen Ampere sind eindeutig: Der Akku ist voll,
+ * oder die im Auto eingestellte Ladegrenze ist erreicht.
  */
 const VERSUCHE_BIS_AUFGABE = 3;
 
-/**
- * Danach wird es noch einmal versucht.
- *
- * Nicht endgültig aufgeben: Ein Fahrzeug kann seine Meinung ändern — eine
- * Abfahrtszeit rückt näher, die Klimatisierung springt an, der Ladestand fällt
- * wieder unter die Grenze. Eine halbe Stunde ist selten genug, um die Wallbox
- * in Ruhe zu lassen, und oft genug, um es nicht zu verpassen.
- */
+/** Danach wird es noch einmal versucht — ein Fahrzeug darf seine Meinung ändern. */
 const NEUER_VERSUCH_MS = 30 * 60_000;
 
+/** Kürzester Abstand zwischen zwei Schnellprüfungen. */
+const SCHNELLPRUEFUNG_ABSTAND_MS = 5000;
+
+/** Vorgabe, wenn das Gerät seine Grenzen nicht meldet. */
+const GRENZEN_VORGABE: Ladestromgrenzen = { minA: 6, maxA: 16, schrittA: 1 };
+
 /**
- * Ein Befehl ohne Beobachtungszeit — für Vorgaben von Hand.
- *
- * Gleiche Form wie das Ergebnis der Beruhigung, damit der Zyklus dahinter
- * nichts unterscheiden muss. Gesendet wird nur, wenn sich wirklich etwas
- * ändert; sonst liefe bei jedem Zyklus ein Tuya-Befehl hinaus.
+ * Ein Befehl ohne Beobachtungszeit — für Vorgaben von Hand. Gesendet wird nur,
+ * wenn sich wirklich etwas ändert.
  */
-function sofort(
+function sofortBefehl(
   stromA: number,
   historie: Reglerhistorie,
   jetztMs: number,
@@ -249,119 +195,69 @@ function sofort(
   };
 }
 
-/**
- * Kürzester Abstand zwischen zwei Schnellprüfungen.
- *
- * Die Engine misst alle zwei Sekunden. Jedes Mal einen vollen Zyklus samt
- * Tuya-Aufruf zu starten waere Unfug; fuenf Sekunden sind schnell genug, um
- * eine Wolke abzufangen, und langsam genug, um die Cloud nicht zu ueberrennen.
- */
-const SCHNELLPRUEFUNG_ABSTAND_MS = 5000;
+/** Lage des Fahrzeugs — nimmt es Strom an, ist es angesteckt? */
+interface Fahrzeuglage {
+  warAngesteckt: boolean | null;
+  fordertNicht: boolean;
+  /** Wie oft hintereinander eingeschaltet wurde, ohne dass Strom floss. */
+  angeboteOhneLadung: number;
+  /** Wann der nächste Versuch frühestens erlaubt ist, nachdem aufgegeben wurde. */
+  naechsterVersuchAt: number;
+  /** Höchste je gemessene Ladeleistung an diesem Anschluss. */
+  hoechsteLadeleistungW: number;
+}
 
 export class Ladesteuerung {
+  // ── Zeitgeber ─────────────────────────────────────────────────────────
   private timer: NodeJS.Timeout | null = null;
-  private historie: Reglerhistorie = neueHistorie(0, 0);
-  private letzte: Ladeentscheidung | null = null;
-  private protokoll: Regelschritt[] = [];
-  private letzterBefehlAt: number | null = null;
-  private letzterFehler: string | null = null;
-  private fehlerzahl = 0;
-  private gesperrtBis = 0;
-  /** Ein kleinerer Sollwert darf eine Sperre nach einem höheren Fehlversuch überholen. */
-  private fehlgeschlagenA: number | null = null;
+  private abmelden: (() => void) | null = null;
   private laeuft = false;
   private erneutRegeln = false;
-  private warAngesteckt: boolean | null = null;
-  private grenzen = { minA: 6, maxA: 16, schrittA: 1 };
-  private letzterZustand: Ladezustand | null = null;
   private naechsteRegelungAt = 0;
-  /**
-   * Zuletzt bewusst gewählte Betriebsart; `null` = noch keine Wahl.
-   *
-   * Kommt aus `lademodus.json` und bleibt über Abstecken und Neustart
-   * erhalten. Ohne Wahl wird nicht geladen.
-   */
-  private betriebsart: Betriebsart | null = null;
-  /** Letzter Steuerbefehl samt Status — siehe `Befehlsstand`. */
-  private befehl: Befehlsstand | null = null;
-  /** Was die Wallbox zuletzt meldete. */
-  private geraet: Geraetesicht | null = null;
-  /** Wer über Zustandsänderungen sofort Bescheid wissen will (Ereignisstrom). */
-  private readonly beobachter = new Set<() => void>();
-  /** Ladestrom im Handbetrieb. Erst gültig, wenn `betriebsart === 'manuell'`. */
-  private manuellA = 0;
-  /**
-   * Wie das Auto angesteckt ist — aus der Messung erkannt, nicht konfiguriert.
-   *
-   * Startet mit dem Wert aus config.json und wird korrigiert, sobald eine
-   * Messung eine andere Dose beweist. Bleibt danach stehen: Wenn das Fahrzeug
-   * gerade nichts zieht, gibt es nichts zu messen, und die zuletzt erkannte
-   * Dose ist immer noch die richtige Auskunft.
-   */
-  private anschluss: Ladeanschluss;
-  /**
-   * Fahrzeug ist angesteckt, will aber nicht laden.
-   *
-   * Das kommt vor, wenn der Akku voll ist oder die im Auto eingestellte
-   * Ladegrenze erreicht wurde. Ohne diese Erkennung böte die Regelung endlos
-   * weiter an, die Wallbox liesse den Schuetz jedes Mal nach einer Minute
-   * wieder fallen, und in der App stünde die ganze Zeit "lädt".
-   */
-  private fordertNicht = false;
-  /** Wie oft hintereinander eingeschaltet wurde, ohne dass Strom floss. */
-  private angeboteOhneLadung = 0;
-  /**
-   * Höchste je gemessene Ladeleistung an diesem Anschluss.
-   *
-   * Der Beweis gegen eine Fehlerkennung: Was einmal geflossen ist, kann eine
-   * Haushaltssteckdose nicht hergeben, wenn es über ihrer Grenze lag. Wird beim
-   * Abstecken zurückgesetzt — danach kann eine andere Dose dran sein.
-   */
-  private hoechsteLadeleistungW = 0;
-  /**
-   * Vom Menschen pausiert.
-   *
-   * Eigener Zustand und keine Betriebsart: Beim Fortsetzen gilt wieder die
-   * gewählte Betriebsart. Übersteht Neustart und Browserwechsel und endet erst
-   * bei EINDEUTIGEM Abstecken — eine nicht erreichbare Wallbox ist kein
-   * Abstecken.
-   */
-  private gestoppt = false;
-  /** Wann der nächste Versuch frühestens erlaubt ist, nachdem aufgegeben wurde. */
-  private naechsterVersuchAt = 0;
-  /** Zuletzt an die Wallbox gesendeter Schalterzustand; null = unbekannt. */
-  private ladenAn: boolean | null = null;
-  /** Ob der Startwert schon aus dem Gerät übernommen wurde. */
-  private initialisiert = false;
   private letzteSchnellpruefungAt = 0;
-  private abmelden: (() => void) | null = null;
-  /**
-   * Was die Speicher nachweislich liefern.
-   *
-   * Wächst bei jedem Messtakt mit dem, was wirklich fliesst, und schrumpft,
-   * sobald trotz eingeplanter Speicherleistung Netzbezug auftritt. Ohne dieses
-   * Gedächtnis müsste die Regelung der Konfiguration glauben — und die kann
-   * keine Anlage kennen.
-   */
+
+  // ── Wahl des Menschen (dauerhaft in lademodus.json) ───────────────────
+  private betriebsart: Betriebsart | null = null;
+  private manuellA = 0;
+  private gestoppt = false;
+
+  // ── Regler ────────────────────────────────────────────────────────────
+  private historie: Reglerhistorie = neueHistorie(0, 0);
+  private initialisiert = false;
+  private letzte: Ladeentscheidung | null = null;
+  private grenzen: Ladestromgrenzen = GRENZEN_VORGABE;
+  private anschluss: Ladeanschluss;
   private gedaechtnis: Speichergedaechtnis = LEERES_GEDAECHTNIS;
-  /** Wurde im letzten Zyklus mit ungenutzter Speicherleistung gerechnet? */
   private mitSpeicherGerechnet = false;
-  /**
-   * Was an der Wallbox zuletzt eingestellt war, laut Geraet.
-   *
-   * Gebraucht beim Wechsel in den Handbetrieb: Die eigene Historie kennt nur,
-   * was DIESE Regelung gesendet hat — im Beobachtungsmodus also nichts. Das
-   * Geraet weiss es besser.
-   */
+  /** Was an der Wallbox zuletzt eingestellt war, laut Gerät. */
   private geraeteStromA: number | null = null;
+
+  // ── Fahrzeug und Gerät ────────────────────────────────────────────────
+  private readonly fahrzeug: Fahrzeuglage = {
+    warAngesteckt: null,
+    fordertNicht: false,
+    angeboteOhneLadung: 0,
+    naechsterVersuchAt: 0,
+    hoechsteLadeleistungW: 0,
+  };
+  private geraet: Geraetesicht | null = null;
+  private readonly befehle: Befehlsausfuehrung | null;
+
+  // ── Protokoll und Beobachter ──────────────────────────────────────────
+  private protokoll: Regelschritt[] = [];
+  private letzterZustand: Ladezustand | null = null;
+  private readonly beobachter = new Set<() => void>();
+  private letzteMeldung = '';
 
   constructor(
     private readonly engine: EnergyEngine,
-    private readonly wallbox: TuyaEvseConnector | null,
+    private readonly wallbox: SteuerbaresLadegeraet | null,
     private readonly config: AppConfig,
     private readonly datenverzeichnis: string | null = null,
+    private readonly ereignisse: Ereignisprotokoll | null = null,
   ) {
-    // Die zuletzt erkannte Dose gilt weiter — siehe `wallbox-speicher.ts`.
+    this.befehle = wallbox === null ? null : new Befehlsausfuehrung(wallbox, () => this.melde());
+
     const gemerkt = datenverzeichnis === null ? null : ladeDose(datenverzeichnis);
     this.anschluss = gemerkt === null
       ? ladeanschlussAus(config)
@@ -372,8 +268,6 @@ export class Ladesteuerung {
           + `(${Math.round(this.anschluss.spannungV)} V).`,
       );
     }
-    // Die zuletzt bewusst gewählte Einstellung. Fehlt sie oder ist sie
-    // beschädigt, bleibt es bei "keine Wahl" — und damit bei keinem Laden.
     const modus = datenverzeichnis === null ? null : ladeLademodus(datenverzeichnis);
     if (modus !== null) {
       this.betriebsart = modus.betriebsart;
@@ -382,86 +276,8 @@ export class Ladesteuerung {
     }
   }
 
-  /**
-   * Mitschreiben, ob das Fahrzeug die Freigabe annimmt.
-   *
-   * Zwei Beweise setzen alle Zweifel zurück: Es fliesst Strom (dann will es
-   * offensichtlich), oder es wurde abgesteckt (dann fängt beim nächsten Mal
-   * alles von vorn an). Wird aus dem Messtakt UND aus dem Regelzyklus
-   * aufgerufen — der Messtakt ist schneller, der Zyklus läuft auch dann, wenn
-   * der Dienst ohne laufenden Messtakt getaktet wird.
-   */
-  private merkeNachfrage(leistungW: number, angesteckt: boolean | null, erreichbar: boolean): void {
-    // Nur eine erreichbare Wallbox kann ein Abstecken bezeugen. Offline oder
-    // ohne Aussage des Control Pilot ist das eine Datenlücke, kein Ereignis.
-    const abgesteckt = erreichbar && angesteckt === false;
-    if (abgesteckt && this.warAngesteckt === true && this.laeuft) this.erneutRegeln = true;
-    if (erreichbar && angesteckt !== null) this.warAngesteckt = angesteckt;
-    if (leistungW > LAEDT_AB_W) {
-      this.angeboteOhneLadung = 0;
-      this.fordertNicht = false;
-    }
-    if (abgesteckt) {
-      this.angeboteOhneLadung = 0;
-      this.fordertNicht = false;
-      this.naechsterVersuchAt = 0;
-      // Beim nächsten Mal kann eine andere Dose dran sein.
-      this.hoechsteLadeleistungW = 0;
-      // Die Pause gilt für diesen Steckvorgang. Betriebsart und Ladestrom
-      // bleiben — sie sind die bewusste Wahl für das nächste Anstecken.
-      if (this.gestoppt) {
-        this.gestoppt = false;
-        this.speichereWahl();
-        this.melde();
-      }
-    }
-  }
+  // ── Lebenszyklus ──────────────────────────────────────────────────────
 
-  /**
-   * Den Ladestrom auf das begrenzen, was die erkannte Dose verträgt.
-   *
-   * An der Starkstromdose sind es die Grenzen des Geräts, sonst nichts. An der
-   * Haushaltssteckdose kommt eine zweite Grenze dazu: `haushaltMaxA`.
-   *
-   * Wie hoch die sein darf, weiss die Software nicht — das hängt an der
-   * Sicherung und dem Leitungsquerschnitt der jeweiligen Installation, und das
-   * kann nur ein Mensch beurteilen, der seine eigene Elektroinstallation kennt.
-   * Viele Schuko-Steckdosen sind für 16 A nicht im Dauerbetrieb ausgelegt,
-   * andere — mit passender Absicherung — durchaus. An DIESER Anlage ist
-   * geprüft: Die Leitung trägt 16 A auch an der Haushaltssteckdose, nur die
-   * Leistung ist geringer als an der Starkstromdose (3,7 statt 11 kW).
-   *
-   * Deshalb gilt hier eine eigene Obergrenze, und zwar auch im Handbetrieb: Die
-   * Regel dieser Anlage lautet, dass die Software nie über das hinausgeht, was
-   * die Elektroinstallation zulässt. Der Wert kommt bewusst aus config.json und
-   * nicht als Fingertipp auf dem Handy — wer eine schwächere Dose oder einen
-   * Ladeziegel mit eigener Begrenzung nutzt, trägt dort die passende Zahl ein.
-   */
-  private begrenzeAufDose(ampere: number): number {
-    const geraet = Math.min(this.grenzen.maxA, Math.max(this.grenzen.minA, Math.round(ampere)));
-    if (this.anschluss.phasen !== 1) return geraet;
-    return Math.min(geraet, this.config.ueberschuss.haushaltMaxA);
-  }
-
-  /** Der erkannte Anschluss, aufbereitet für die Oberfläche. */
-  private anschlussInfo(): Anschlussinfo {
-    return {
-      phasen: this.anschluss.phasen,
-      spannungV: Math.round(this.anschluss.spannungV),
-      name: anschlussName(this.anschluss),
-      wattProAmpere: Math.round(ladeleistungAusStromW(1, this.anschluss) ?? 0),
-    };
-  }
-
-  /**
-   * Erfahrung aus aufgezeichneten Messwerten übernehmen.
-   *
-   * Vor `start()` aufzurufen. Ohne diesen Schritt fängt die Regelung nach jedem
-   * Neustart bei null Wissen an: Sie wüsste nicht, dass der grosse Speicher
-   * 4,2 kW und der kleine 4,6 kW liefern kann, würde beide nicht einplanen und
-   * einen halben Sonnentag zu wenig laden — bis das Haus zufällig genug Last
-   * macht, dass die Speicher es von selbst beweisen.
-   */
   lerneAus(
     punkte: readonly { readonly id: string; readonly entladenW: number; readonly tMs: number }[],
   ): void {
@@ -479,96 +295,70 @@ export class Ladesteuerung {
   start(): void {
     if (this.timer !== null) return;
     if (this.config.ueberschuss.modus === 'aus' || this.wallbox === null) return;
+    const wallbox = this.wallbox;
 
     const intervallMs = this.config.ueberschuss.intervallSekunden * 1000;
-    // Die Gerätegrenzen einmal vom Gerät holen. Scheitert das, bleibt es bei
-    // den konservativen Vorgabewerten - niemals bei erfundenen.
-    void this.wallbox.ladestromGrenzen().then((g) => {
+    void wallbox.ladestromGrenzen().then((g) => {
       if (g !== null) this.grenzen = g;
       console.log(
         `[Laderegelung] Ladestrom ${this.grenzen.minA}-${this.grenzen.maxA} A `
           + `in Schritten von ${this.grenzen.schrittA} A `
-          + `(${g === null ? 'Vorgabe — Geraet hat keine Grenzen gemeldet' : 'vom Geraet gemeldet'}).`,
+          + `(${g === null ? 'Vorgabe — Gerät hat keine Grenzen gemeldet' : 'vom Gerät gemeldet'}).`,
       );
     });
-    // Einmalig auflisten, was das Geraet an Steuerpunkten anbietet. Steht hier,
-    // weil sich sonst nur durch Ausprobieren klaeren laesst, ob das
-    // Cloud-Projekt ueberhaupt schreiben darf.
-    void this.wallbox.steuerfunktionen().then((f) => {
+    void wallbox.steuerfunktionen().then((f) => {
       console.log(
         f.length === 0
-          ? '[Laderegelung] Steuerfunktionen nicht abrufbar — moeglicherweise hat das '
-              + 'Tuya-Projekt nur Leserechte.'
-          : `[Laderegelung] Steuerbar laut Geraet: ${f.map((x) => x.code).join(', ')}`,
+          ? '[Laderegelung] Steuerfunktionen nicht abrufbar — möglicherweise hat das '
+              + 'Cloud-Projekt nur Leserechte.'
+          : `[Laderegelung] Steuerbar laut Gerät: ${f.map((x) => x.code).join(', ')}`,
       );
     });
 
     this.naechsteRegelungAt = Date.now() + intervallMs;
     this.timer = setInterval(() => void this.zyklus(), intervallMs);
     this.timer.unref();
+    // Sofort abgleichen, nicht erst in 30 s: Nach einem Neustart weiss niemand,
+    // was die Wallbox gerade tut. Ohne Messwerte kehrt der Zyklus still zurück.
+    void this.zyklus();
 
-    // ── Schnellpfad ─────────────────────────────────────────────────────────
-    // Der 30-Sekunden-Takt ist richtig für das gemächliche Nachführen, aber zu
-    // träge für den einen Fall, der wirklich zählt: Eine Wolke zieht vor die
-    // Sonne, acht Kilowatt fehlen schlagartig, und bis zum nächsten Zyklus
-    // holt sich das Auto die Differenz aus dem Netz.
-    //
-    // Vorhersehen lässt sich das nicht — eine Wolke kündigt sich nicht an. Was
-    // sich verkürzen lässt, ist die Zeit bis zur Reaktion. Deshalb hängt sich
-    // die Regelung zusätzlich an den Messtakt der Engine (alle zwei Sekunden)
-    // und greift sofort ein, sobald wirklich Strom aus dem Netz fliesst,
-    // während das Auto lädt. Aus einem halben Minutchen werden zwei Sekunden.
-    this.abmelden = this.engine.subscribe((state) => {
-      const snap = state.resolution.snapshot;
-      const speicher = this.speicherzustand(state);
-      const netzbezug = snap.gridImportW.valueW ?? 0;
-      const evLeistung = snap.evCharger?.chargePowerW ?? 0;
-      const jetzt = Date.now();
+    // Schnellpfad am Messtakt der Engine: Zieht eine Wolke vor die Sonne, wird
+    // sofort gesenkt statt erst im nächsten Zyklus.
+    this.abmelden = this.engine.subscribe((state) => this.beimMesstakt(state));
+  }
 
-      // Zusehen und lernen, in jeder Betriebsart. Auch wer nur beobachtet, soll
-      // wissen, was seine Speicher können — sonst startet die Regelung beim
-      // Umschalten auf "regeln" ohne jede Erfahrung.
-      this.gedaechtnis = merkeEntladung(this.gedaechtnis, speicher, jetzt);
-
-      // Im Zwei-Sekunden-Takt mitprüfen, ob das Fahrzeug zugreift. Nur im
-      // Regelzyklus zu schauen hiesse, einen kurzen Ladeversuch zwischen zwei
-      // Zyklen zu verpassen und zu Unrecht aufzugeben.
-      this.merkeNachfrage(
-        snap.evCharger?.chargePowerW ?? 0,
-        snap.evCharger?.vehicleConnected ?? null,
-        snap.evCharger !== null && snap.evCharger.state !== 'offline',
-      );
-      this.merkeGeraet(snap.evCharger);
-
-      if (this.config.ueberschuss.modus !== 'regeln' || this.laeuft) return;
-      if (evLeistung <= LAEDT_AB_W) return;
-      if (netzbezug <= this.config.ueberschuss.notbremseAbW) return;
-      if (jetzt - this.letzteSchnellpruefungAt < SCHNELLPRUEFUNG_ABSTAND_MS) return;
-
-      // Netzbezug, obwohl mit Speicherleistung gerechnet wurde: Die Annahme war
-      // zu gross. Vor dem Nachregeln den Nachweis zurücknehmen, sonst rechnet
-      // der gleich folgende Zyklus mit derselben zu hohen Zahl noch einmal.
-      if (this.mitSpeicherGerechnet) {
-        this.gedaechtnis = nachweisZuruecknehmen(this.gedaechtnis, speicher, jetzt);
-      }
-
-      this.letzteSchnellpruefungAt = jetzt;
-      void this.zyklus();
-    });
+  stop(): void {
+    if (this.timer !== null) clearInterval(this.timer);
+    this.timer = null;
+    this.abmelden?.();
+    this.abmelden = null;
   }
 
   /**
-   * Betriebsart wählen — auch ohne angestecktes Auto.
+   * Geordnetes Herunterfahren.
    *
-   * Die Wahl gilt, bis sie geändert wird: über Abstecken, Neustart und andere
-   * Browser hinweg. Sie wird zuerst dauerhaft gespeichert und erst danach
-   * übernommen; scheitert das Speichern, wirft die Methode und nichts ändert
-   * sich — eine Wahl, die ein Neustart vergässe, soll nicht als erledigt gelten.
+   * Im intelligenten Betrieb wird ein Stopp gesendet, falls die Wallbox
+   * freigegeben ist: Ohne laufenden Regler kann niemand mehr senken, und das
+   * Auto lüde aus dem Netz weiter. Im Handbetrieb hat der Mensch Netzbezug
+   * ausdrücklich erlaubt — da bleibt alles, wie es ist.
    */
+  async beimHerunterfahren(): Promise<void> {
+    this.stop();
+    if (this.befehle === null || this.config.ueberschuss.modus !== 'regeln') return;
+    if (this.betriebsart !== 'intelligent') return;
+    const freigegeben = this.befehle.ladenAn === true || this.historie.gesetztA > 0;
+    if (!freigegeben) return;
+    console.log('[Laderegelung] Herunterfahren — Wallbox wird abgeschaltet, damit ohne Regler kein Netzbezug entsteht.');
+    this.ereignisse?.notiere('laden.stopp-beim-herunterfahren', 'Wallbox beim Herunterfahren abgeschaltet.');
+    const ergebnis = await this.befehle.sende(0);
+    if (!ergebnis.ok) {
+      console.warn(`[Laderegelung] Stopp beim Herunterfahren fehlgeschlagen: ${ergebnis.fehler}`);
+    }
+  }
+
+  // ── Bedienung ─────────────────────────────────────────────────────────
+
   setzeBetriebsart(art: Betriebsart, ampere?: number): void {
-    // Ohne Vorgabe übernimmt der Handbetrieb, was gerade eingestellt ist. Wer
-    // von der Automatik auf Hand umschaltet, während das Auto mit 14 A lädt,
-    // erwartet 14 A und nicht einen Sprung auf den Mindestwert.
     const anfang =
       ampere
       ?? (this.manuellA >= this.grenzen.minA
@@ -582,55 +372,406 @@ export class Ladesteuerung {
         : this.manuellA;
     if (this.betriebsart === art && gewuenschtA === this.manuellA) return;
     this.speichereWahl({ betriebsart: art, manuellA: gewuenschtA });
-    this.setzeBetriebsartStill(art, gewuenschtA);
-    this.melde();
-    if (this.laeuft) this.erneutRegeln = true;
-    // Nicht bis zum nächsten Zyklus warten: Wer den Knopf drückt, will es sehen.
-    void this.zyklus();
-  }
-
-  /** Wie `setzeBetriebsart`, aber ohne Speichern und Zyklus — für Aufrufe von innen. */
-  private setzeBetriebsartStill(art: Betriebsart, ampere: number): void {
     this.betriebsart = art;
-    this.manuellA = ampere;
-    // Wer umschaltet, will es jetzt wissen — nicht in einer halben Stunde.
-    this.fordertNicht = false;
-    this.angeboteOhneLadung = 0;
-    this.naechsterVersuchAt = 0;
+    this.manuellA = gewuenschtA;
+    this.fahrzeug.fordertNicht = false;
+    this.fahrzeug.angeboteOhneLadung = 0;
+    this.fahrzeug.naechsterVersuchAt = 0;
     console.log(
       art === 'intelligent'
         ? '[Laderegelung] Intelligentes Laden — nur, was Sonne und Speicher hergeben.'
-        : `[Laderegelung] Handbetrieb mit ${ampere} A — feste Vorgabe, auch aus dem Netz.`,
+        : `[Laderegelung] Handbetrieb mit ${gewuenschtA} A — feste Vorgabe, auch aus dem Netz.`,
     );
+    this.ereignisse?.notiere(
+      'laden.betriebsart',
+      art === 'intelligent' ? 'Betriebsart: intelligent' : `Betriebsart: manuell, ${gewuenschtA} A`,
+    );
+    this.melde();
+    if (this.laeuft) this.erneutRegeln = true;
+    void this.zyklus();
   }
 
-  /**
-   * Laden pausieren oder fortsetzen — der Knopf, der alles überstimmt.
-   *
-   * Pausieren wirkt in jeder Betriebsart und auch während eines laufenden
-   * Befehls: Der laufende Zyklus unterdrückt danach jede Einschaltfreigabe,
-   * und sofort folgt ein Zyklus mit dem Stopp. Beim Fortsetzen gilt wieder die
-   * gewählte Betriebsart. Die Pause wird gespeichert (Neustart, andere
-   * Browser) und endet erst bei eindeutigem Abstecken.
-   */
   setzeGestoppt(an: boolean): void {
     if (this.gestoppt === an) return;
-    // Ohne gewählte Betriebsart gibt es nichts dauerhaft zu speichern — es wird
-    // dann ohnehin nicht geladen.
     if (this.betriebsart !== null) this.speichereWahl({ pausiert: an });
     this.gestoppt = an;
     this.melde();
     if (this.laeuft) this.erneutRegeln = true;
     console.log(an ? '[Laderegelung] Laden pausiert.' : '[Laderegelung] Laden fortgesetzt.');
+    this.ereignisse?.notiere('laden.stopp', an ? 'Laden vom Benutzer gestoppt.' : 'Laden vom Benutzer fortgesetzt.');
+    void this.zyklus();
+  }
+
+  /** Alte Schnittstelle: "Volladung" heisst Handbetrieb auf dem Höchstwert. */
+  setzeVolladung(an: boolean): void {
+    if (an) this.setzeBetriebsart('manuell', this.grenzen.maxA);
+    else this.setzeBetriebsart('intelligent');
+  }
+
+  abonniere(beobachter: () => void): () => void {
+    this.beobachter.add(beobachter);
+    return () => this.beobachter.delete(beobachter);
+  }
+
+  // ── Auskunft ──────────────────────────────────────────────────────────
+
+  zustand(): Steuerzustand {
+    const e = this.letzte;
+    return {
+      ...this.kurz(),
+      aktiv: this.timer !== null,
+      zielLeistungW: e?.zielLeistungW ?? 0,
+      netzW: this.protokoll[this.protokoll.length - 1]?.netzW ?? 0,
+      letzterBefehlAt:
+        this.befehle?.letzterBefehlAt == null ? null : new Date(this.befehle.letzterBefehlAt).toISOString(),
+      naechsteRegelungInS: Math.max(0, Math.round((this.naechsteRegelungAt - Date.now()) / 1000)),
+      // Neueste zuerst — so liest man ein Protokoll.
+      protokoll: [...this.protokoll].reverse(),
+    };
+  }
+
+  kurz(): Steuerkurz {
+    const e = this.letzte;
+    return {
+      modus: this.config.ueberschuss.modus,
+      zustand: e?.zustand ?? (this.config.ueberschuss.modus === 'aus' ? 'aus' : 'wartet'),
+      grund: e?.grund ?? 'Noch kein Regelzyklus gelaufen.',
+      zielA: e?.zielA ?? 0,
+      gesetztA: this.historie.gesetztA,
+      verfuegbarW: Math.round(e?.verfuegbarW ?? 0),
+      hausOhneAutoW: e?.hausOhneAutoW ?? null,
+      speicherbeitragW: Math.round(e?.speicherbeitragW ?? 0),
+      betriebsart: this.betriebsart,
+      befehl: this.befehle?.befehl ?? null,
+      geraet: this.geraet,
+      manuellA: this.manuellA,
+      minA: this.grenzen.minA,
+      maxA: this.grenzen.maxA,
+      volladung: this.betriebsart === 'manuell' && this.manuellA >= this.grenzen.maxA,
+      anschluss: this.anschlussInfo(),
+      fordertNicht: this.fahrzeug.fordertNicht,
+      gestoppt: this.gestoppt,
+      letzterFehler: this.befehle?.letzterFehler ?? null,
+      haushaltMaxA: this.config.ueberschuss.haushaltMaxA,
+    };
+  }
+
+  // ── Messtakt (alle 2 s) ───────────────────────────────────────────────
+
+  private beimMesstakt(state: EngineState): void {
+    const snap = state.resolution.snapshot;
+    const speicher = this.speicherzustand(state);
+    const netzbezug = snap.gridImportW.valueW ?? 0;
+    const evLeistung = snap.evCharger?.chargePowerW ?? 0;
+    const jetzt = Date.now();
+
+    // Zusehen und lernen, in jeder Betriebsart.
+    this.gedaechtnis = merkeEntladung(this.gedaechtnis, speicher, jetzt);
+    this.merkeNachfrage(evLeistung, snap.evCharger?.vehicleConnected ?? null,
+      snap.evCharger !== null && snap.evCharger.state !== 'offline');
+    this.merkeGeraet(snap.evCharger);
+
+    if (this.config.ueberschuss.modus !== 'regeln' || this.laeuft) return;
+    if (evLeistung <= LADEN_AB_W) return;
+    if (netzbezug <= this.config.ueberschuss.notbremseAbW) return;
+    if (jetzt - this.letzteSchnellpruefungAt < SCHNELLPRUEFUNG_ABSTAND_MS) return;
+
+    // Netzbezug, obwohl mit Speicherleistung gerechnet wurde: Die Annahme war
+    // zu gross. Vor dem Nachregeln den Nachweis zurücknehmen.
+    if (this.mitSpeicherGerechnet) {
+      this.gedaechtnis = nachweisZuruecknehmen(this.gedaechtnis, speicher, jetzt);
+    }
+    this.letzteSchnellpruefungAt = jetzt;
     void this.zyklus();
   }
 
   /**
-   * Die aktuelle Wahl dauerhaft schreiben.
-   *
-   * Wirft bei Schreibfehlern. Ohne Datenverzeichnis (Tests) wird nur im
-   * Arbeitsspeicher gehalten.
+   * Mitschreiben, ob das Fahrzeug die Freigabe annimmt. Zwei Beweise setzen
+   * alle Zweifel zurück: Es fliesst Strom, oder es wurde abgesteckt.
    */
+  private merkeNachfrage(leistungW: number, angesteckt: boolean | null, erreichbar: boolean): void {
+    const f = this.fahrzeug;
+    // Nur eine erreichbare Wallbox kann ein Abstecken bezeugen.
+    const abgesteckt = erreichbar && angesteckt === false;
+    if (abgesteckt && f.warAngesteckt === true && this.laeuft) this.erneutRegeln = true;
+    if (erreichbar && angesteckt !== null) {
+      if (f.warAngesteckt !== angesteckt && f.warAngesteckt !== null) {
+        this.ereignisse?.notiere('fahrzeug.' + (angesteckt ? 'angesteckt' : 'abgesteckt'),
+          angesteckt ? 'Fahrzeug angesteckt.' : 'Fahrzeug abgesteckt.');
+      }
+      f.warAngesteckt = angesteckt;
+    }
+    if (leistungW > LADEN_AB_W) {
+      f.angeboteOhneLadung = 0;
+      f.fordertNicht = false;
+    }
+    if (abgesteckt) {
+      f.angeboteOhneLadung = 0;
+      f.fordertNicht = false;
+      f.naechsterVersuchAt = 0;
+      // Beim nächsten Mal kann eine andere Dose dran sein.
+      f.hoechsteLadeleistungW = 0;
+      // Die Pause gilt für diesen Steckvorgang. Betriebsart bleibt.
+      if (this.gestoppt) {
+        this.gestoppt = false;
+        this.speichereWahl();
+        this.melde();
+      }
+    }
+  }
+
+  /** Gerätesicht fortschreiben und einen ausstehenden Befehl ggf. bestätigen. */
+  private merkeGeraet(ev: EngineState['resolution']['snapshot']['evCharger']): void {
+    const erreichbar = ev !== null && ev.state !== 'offline';
+    const vorher = this.geraet?.erreichbar ?? null;
+    this.geraet = {
+      erreichbar,
+      angesteckt: erreichbar ? ev.vehicleConnected : null,
+      schalterAn: erreichbar ? ev.schalterAn : null,
+      stromA: erreichbar ? ev.maxCurrentA : null,
+      leistungW: erreichbar ? ev.chargePowerW : null,
+      alterMs: ev !== null && Number.isFinite(ev.provenance.ageMs) ? ev.provenance.ageMs : null,
+    };
+    if (vorher !== null && vorher !== erreichbar) {
+      this.ereignisse?.notiere('wallbox.' + (erreichbar ? 'erreichbar' : 'offline'),
+        erreichbar ? 'Wallbox wieder erreichbar.' : 'Wallbox nicht erreichbar.');
+    }
+    if (this.befehle?.bestaetigeAus(ev)) this.melde();
+  }
+
+  // ── Regelzyklus ───────────────────────────────────────────────────────
+
+  private async zyklus(): Promise<void> {
+    // Ein hängender Cloud-Aufruf darf nicht dazu führen, dass sich Zyklen
+    // überholen und zwei Befehle gleichzeitig unterwegs sind.
+    if (this.laeuft) return;
+    this.laeuft = true;
+    this.naechsteRegelungAt = Date.now() + this.config.ueberschuss.intervallSekunden * 1000;
+
+    try {
+      const state = this.engine.current();
+      if (state === null || this.befehle === null) return;
+
+      const messwerte = this.messwerte(state);
+      if (messwerte.evStromA !== null) this.geraeteStromA = messwerte.evStromA;
+      this.mitSpeicherGerechnet =
+        speicherspielraum(messwerte.speicher, this.parameter()).entladespielraumW > 0;
+
+      // Beim ersten Zyklus weiss die Regelung nicht, was an der Wallbox
+      // eingestellt ist — UNBEKANNT ist die einzige ehrliche Aussage, und sie
+      // sorgt dafür, dass der erste Zyklus in jedem Fall einen Befehl schickt.
+      if (!this.initialisiert) {
+        this.initialisiert = true;
+        this.historie = neueHistorie(UNBEKANNT_A, Date.now());
+      }
+
+      const laedtWirklich = (messwerte.evLeistungW ?? 0) > LADEN_AB_W;
+      this.merkeNachfrage(messwerte.evLeistungW ?? 0, messwerte.evAngesteckt, messwerte.wallboxErreichbar);
+      this.merkeGeraet(state.resolution.snapshot.evCharger);
+      this.erkenneDose(messwerte, laedtWirklich);
+      this.gleicheMitWirklichkeitAb(messwerte, laedtWirklich);
+      this.pruefeFahrzeugnachfrage();
+
+      const { entscheidung, sofort, regelbar } = uebersteuere(
+        berechneLadeziel(messwerte, this.parameter()),
+        messwerte,
+        this.wahl(),
+        this.dosengrenzen(),
+      );
+      this.letzte = entscheidung;
+      const netzW = (messwerte.netzbezugW ?? 0) - (messwerte.netzeinspeisungW ?? 0);
+
+      if (!regelbar) {
+        this.notiere(messwerte, entscheidung, netzW, false, entscheidung.grund, null);
+        return;
+      }
+
+      // Beruhigung nur im Autarkbetrieb — nicht, um einen Menschen warten zu lassen.
+      const ergebnis = sofort
+        ? sofortBefehl(entscheidung.zielA, this.historie, Date.now())
+        : beruhige({
+            wunschA: entscheidung.zielA,
+            netzbezugW: messwerte.netzbezugW ?? 0,
+            jetztMs: Date.now(),
+            historie: this.historie,
+            zeit: this.zeitparameter(),
+          });
+
+      // Beobachten: rechnen, protokollieren, aber nichts senden. `gesetztA`
+      // bleibt unangetastet — ein nie abgeschickter Sollwert ist keiner.
+      if (this.config.ueberschuss.modus !== 'regeln') {
+        this.historie = { ...ergebnis.historie, gesetztA: this.historie.gesetztA };
+        this.notiere(messwerte, entscheidung, netzW, false,
+          ergebnis.senden ? `${ergebnis.grund} (nur beobachtet)` : ergebnis.grund, null);
+        return;
+      }
+
+      if (!ergebnis.senden) {
+        this.historie = ergebnis.historie;
+        this.notiere(messwerte, entscheidung, netzW, false, ergebnis.grund, null);
+        return;
+      }
+
+      if (this.befehle.gesperrt(ergebnis.stromA)) {
+        this.notiere(messwerte, entscheidung, netzW, false,
+          `${ergebnis.grund} — wartet nach Fehler.`, this.befehle.letzterFehler);
+        return;
+      }
+
+      const gesendet = await this.befehle.sende(ergebnis.stromA, () => this.erneutRegeln);
+      if (!gesendet.ok) {
+        // Historie NICHT fortschreiben: Der Sollwert gilt erst als gesetzt,
+        // wenn die Wallbox ihn angenommen hat.
+        this.ereignisse?.notiere('laden.befehl-fehlgeschlagen',
+          `Befehl ${ergebnis.stromA === 0 ? 'Abschalten' : `${ergebnis.stromA} A`} fehlgeschlagen: ${gesendet.fehler}`);
+        this.notiere(messwerte, entscheidung, netzW, false, ergebnis.grund, gesendet.fehler);
+        return;
+      }
+      if ('abgebrochen' in gesendet) {
+        this.historie = { ...this.historie, gesetztA: UNBEKANNT_A };
+        return;
+      }
+      // Jede Freigabe zählt, bis wirklich Strom fliesst.
+      if (gesendet.eingeschaltet) this.fahrzeug.angeboteOhneLadung += 1;
+      this.historie = { ...ergebnis.historie, gesetztA: ergebnis.stromA };
+      this.ereignisse?.notiere('laden.befehl',
+        gesendet.gesetztA === 0 ? 'Wallbox abgeschaltet.' : `Ladestrom auf ${gesendet.gesetztA} A gesetzt.`,
+        { zustand: entscheidung.zustand, grund: ergebnis.grund });
+      this.notiere(messwerte, entscheidung, netzW, true,
+        `${ergebnis.grund} Gesendet: ${gesendet.gesetztA === 0 ? 'Ladung abgeschaltet' : `${gesendet.gesetztA} A`}.`,
+        null);
+    } catch (error) {
+      // Sicherheitsnetz: Der Dienst läuft rund um die Uhr und darf an keinem
+      // unerwarteten Fehler sterben.
+      console.warn('[Laderegelung] Zyklus übersprungen:', error instanceof Error ? error.message : error);
+    } finally {
+      this.laeuft = false;
+      this.melde();
+      if (this.erneutRegeln) {
+        this.erneutRegeln = false;
+        await this.zyklus();
+      }
+    }
+  }
+
+  /**
+   * An welcher Dose hängt das Auto? Erste Wahl ist die Messung (`phase_a`),
+   * sonst die Herleitung aus Leistung und eingestelltem Strom — nur solange
+   * wirklich Strom fliesst.
+   */
+  private erkenneDose(messwerte: Messwerte, laedtWirklich: boolean): void {
+    const f = this.fahrzeug;
+    if (laedtWirklich) {
+      f.hoechsteLadeleistungW = Math.max(f.hoechsteLadeleistungW, messwerte.evLeistungW ?? 0);
+    }
+    const erkannt =
+      anschlussAusPhasenmessung(messwerte.evSpannungV, messwerte.evPhasen)
+        ?? (laedtWirklich
+          ? gemessenerAnschluss(messwerte.evLeistungW, messwerte.evStromA, this.anschluss, f.hoechsteLadeleistungW)
+          : this.anschluss);
+    if (erkannt.phasen !== this.anschluss.phasen) {
+      if (this.datenverzeichnis !== null) {
+        merkeDose(this.datenverzeichnis, {
+          phasen: erkannt.phasen,
+          spannungV: erkannt.spannungV,
+          erkanntAm: new Date().toISOString(),
+        });
+      }
+      console.log(
+        `[Laderegelung] Anschluss erkannt: ${anschlussName(erkannt)} `
+          + `(${Math.round(erkannt.spannungV)} V, ${erkannt.phasen === 3 ? 'dreiphasig' : 'einphasig'}). `
+          + `Ein Ampere sind hier ${Math.round(ladeleistungAusStromW(1, erkannt) ?? 0)} W.`,
+      );
+      this.ereignisse?.notiere('wallbox.dose', `Anschluss erkannt: ${anschlussName(erkannt)}.`);
+    }
+    this.anschluss = erkannt;
+  }
+
+  /**
+   * Der wichtigste Sicherheitsnetz-Griff: Es entscheidet der Messwert, nicht
+   * die Erinnerung — in beide Richtungen.
+   *
+   * Fliesst Strom, obwohl wir pausiert zu haben glauben (neu angesteckt,
+   * eigener Zeitplan, verlorener Befehl), wird das Gedächtnis verworfen und der
+   * Stopp erneut geschickt. Ist das Gerät aus, obwohl ein Strom gesetzt sein
+   * sollte, wird das Gedächtnis auf "pausiert" gestellt und der Startweg läuft
+   * von vorn. Der Abstand zum letzten Befehl muss sein: Direkt nach dem
+   * Einschalten meldet die Cloud den alten Schalterzustand noch eine Weile.
+   */
+  private gleicheMitWirklichkeitAb(messwerte: Messwerte, laedtWirklich: boolean): void {
+    if (this.befehle === null) return;
+    if (laedtWirklich && this.historie.gesetztA === 0) {
+      console.warn(
+        `[Laderegelung] Die Wallbox lädt mit ${Math.round(messwerte.evLeistungW ?? 0)} W, `
+          + 'obwohl sie abgeschaltet sein sollte — Stopp wird erneut gesendet.',
+      );
+      this.ereignisse?.notiere('laden.abweichung', 'Wallbox lädt, obwohl abgeschaltet — Stopp wird wiederholt.');
+      this.historie = { ...this.historie, gesetztA: messwerte.evStromA ?? UNBEKANNT_A };
+      this.befehle.ladenAn = null;
+    }
+    const schalterAusMs = Date.now() - (this.befehle.letzterBefehlAt ?? 0);
+    if (
+      messwerte.evSchalterAn === false
+      && this.historie.gesetztA > 0
+      && schalterAusMs > this.config.ueberschuss.intervallSekunden * 1000
+    ) {
+      console.warn(
+        `[Laderegelung] Wallbox ist abgeschaltet, obwohl ${this.historie.gesetztA} A `
+          + 'gesetzt sein sollten — wird neu gestartet.',
+      );
+      this.ereignisse?.notiere('laden.abweichung', 'Wallbox ist aus, obwohl Strom gesetzt sein sollte — Neustart.');
+      this.historie = { ...this.historie, gesetztA: 0 };
+      this.befehle.ladenAn = false;
+    }
+  }
+
+  /** Nach drei Freigaben ohne ein einziges Ampere gilt: voll oder Ladegrenze. */
+  private pruefeFahrzeugnachfrage(): void {
+    const f = this.fahrzeug;
+    if (f.angeboteOhneLadung >= VERSUCHE_BIS_AUFGABE && !f.fordertNicht) {
+      f.fordertNicht = true;
+      f.naechsterVersuchAt = Date.now() + NEUER_VERSUCH_MS;
+      console.log(
+        `[Laderegelung] Fahrzeug hat ${VERSUCHE_BIS_AUFGABE} Freigaben nicht angenommen — `
+          + `vermutlich voll. Laden wird beendet, neuer Versuch in ${Math.round(NEUER_VERSUCH_MS / 60_000)} Minuten.`,
+      );
+      this.ereignisse?.notiere('fahrzeug.fordert-nicht', 'Fahrzeug nimmt keinen Strom an — Laden beendet, neuer Versuch später.');
+    }
+    if (f.fordertNicht && Date.now() >= f.naechsterVersuchAt) {
+      f.fordertNicht = false;
+      f.angeboteOhneLadung = 0;
+    }
+  }
+
+  // ── Hilfen ────────────────────────────────────────────────────────────
+
+  private wahl(): Reglerwahl {
+    return {
+      betriebsart: this.betriebsart,
+      manuellA: this.manuellA,
+      gestoppt: this.gestoppt,
+      fordertNicht: this.fahrzeug.fordertNicht,
+    };
+  }
+
+  private dosengrenzen(): Dosengrenzen {
+    return {
+      minA: this.grenzen.minA,
+      maxA: this.grenzen.maxA,
+      anschluss: this.anschluss,
+      haushaltMaxA: this.config.ueberschuss.haushaltMaxA,
+    };
+  }
+
+  private anschlussInfo(): Anschlussinfo {
+    return {
+      phasen: this.anschluss.phasen,
+      spannungV: Math.round(this.anschluss.spannungV),
+      name: anschlussName(this.anschluss),
+      wattProAmpere: Math.round(ladeleistungAusStromW(1, this.anschluss) ?? 0),
+    };
+  }
+
   private speichereWahl(
     aenderung: Partial<{ betriebsart: Betriebsart; manuellA: number; pausiert: boolean }> = {},
   ): void {
@@ -651,149 +792,22 @@ export class Ladesteuerung {
     }
   }
 
-  /** Beobachter für den Ereignisstrom. Gibt die Abmeldung zurück. */
-  abonniere(beobachter: () => void): () => void {
-    this.beobachter.add(beobachter);
-    return () => this.beobachter.delete(beobachter);
-  }
-
+  /**
+   * Beobachter benachrichtigen — aber nur, wenn sich für sie etwas geändert
+   * hat. Der Zyklus ruft nach jedem Durchlauf hierher; ohne diesen Vergleich
+   * ginge alle 30 s ein voller Zustand über den Ereignisstrom, auch wenn
+   * nichts passiert ist.
+   */
   private melde(): void {
+    const { geraet, ...rest } = this.kurz();
+    // Das Alter der Ger�temeldung tickt bei jeder Messung � es z�hlt hier nicht.
+    const jetzt = JSON.stringify({ ...rest, geraet: geraet === null ? null : { ...geraet, alterMs: null } });
+    if (jetzt === this.letzteMeldung) return;
+    this.letzteMeldung = jetzt;
     for (const b of this.beobachter) {
       try { b(); } catch { /* ein toter Empfänger stört die übrigen nicht */ }
     }
   }
-
-  /** Gerätesicht fortschreiben und einen ausstehenden Befehl ggf. bestätigen. */
-  private merkeGeraet(ev: EngineState['resolution']['snapshot']['evCharger']): void {
-    const erreichbar = ev !== null && ev.state !== 'offline';
-    this.geraet = {
-      erreichbar,
-      angesteckt: erreichbar ? ev.vehicleConnected : null,
-      schalterAn: erreichbar ? ev.schalterAn : null,
-      stromA: erreichbar ? ev.maxCurrentA : null,
-      leistungW: erreichbar ? ev.chargePowerW : null,
-      alterMs: ev !== null && Number.isFinite(ev.provenance.ageMs) ? ev.provenance.ageMs : null,
-    };
-    const b = this.befehl;
-    if (b === null || (b.status !== 'angenommen' && b.status !== 'uebermittelt') || !erreichbar) return;
-    const schalterPasst = ev.schalterAn === b.schalter;
-    const stromPasst = !b.schalter || b.stromA === null || ev.maxCurrentA === b.stromA;
-    if (schalterPasst && stromPasst) {
-      this.befehl = { ...b, status: 'bestaetigt' };
-      this.melde();
-    }
-  }
-
-  /**
-   * Alte Schnittstelle, damit eine noch zwischengespeicherte Oberfläche auf
-   * dem Handy nicht ins Leere greift. "Volladung" heisst jetzt Handbetrieb auf
-   * dem Höchstwert — gleiches Verhalten, ein Knopf weniger.
-   */
-  setzeVolladung(an: boolean): void {
-    if (an) this.setzeBetriebsart('manuell', this.grenzen.maxA);
-    else this.setzeBetriebsart('intelligent');
-  }
-
-  stop(): void {
-    if (this.timer !== null) clearInterval(this.timer);
-    this.timer = null;
-    this.abmelden?.();
-    this.abmelden = null;
-  }
-
-  zustand(): Steuerzustand {
-    const e = this.letzte;
-    const netzW = this.protokoll[this.protokoll.length - 1]?.netzW ?? 0;
-    return {
-      modus: this.config.ueberschuss.modus,
-      aktiv: this.timer !== null,
-      zustand: e?.zustand ?? (this.config.ueberschuss.modus === 'aus' ? 'aus' : 'wartet'),
-      grund: e?.grund ?? 'Noch kein Regelzyklus gelaufen.',
-      zielA: e?.zielA ?? 0,
-      zielLeistungW: e?.zielLeistungW ?? 0,
-      gesetztA: this.historie.gesetztA,
-      verfuegbarW: e?.verfuegbarW ?? 0,
-      hausOhneAutoW: e?.hausOhneAutoW ?? null,
-      speicherbeitragW: e?.speicherbeitragW ?? 0,
-      netzW,
-      minA: this.grenzen.minA,
-      maxA: this.grenzen.maxA,
-      letzterBefehlAt:
-        this.letzterBefehlAt === null ? null : new Date(this.letzterBefehlAt).toISOString(),
-      letzterFehler: this.letzterFehler,
-      naechsteRegelungInS: Math.max(
-        0,
-        Math.round((this.naechsteRegelungAt - Date.now()) / 1000),
-      ),
-      betriebsart: this.betriebsart,
-      befehl: this.befehl,
-      geraet: this.geraet,
-      manuellA: this.manuellA,
-      volladung: this.betriebsart === 'manuell' && this.manuellA >= this.grenzen.maxA,
-      anschluss: this.anschlussInfo(),
-      fordertNicht: this.fordertNicht,
-      gestoppt: this.gestoppt,
-      haushaltMaxA: this.config.ueberschuss.haushaltMaxA,
-      // Neueste zuerst — so liest man ein Protokoll.
-      protokoll: [...this.protokoll].reverse(),
-    };
-  }
-
-  /**
-   * Kurzfassung für den Live-Strom.
-   *
-   * `zustand()` baut das ganze Protokoll auf — das alle zwei Sekunden über den
-   * Ereignisstrom zu schicken wäre Verschwendung. Hier steht nur, was die Karte
-   * braucht.
-   */
-  kurz(): {
-    modus: string;
-    zustand: Ladezustand;
-    grund: string;
-    zielA: number;
-    gesetztA: number;
-    verfuegbarW: number;
-    hausOhneAutoW: number | null;
-    speicherbeitragW: number;
-    betriebsart: Betriebsart | null;
-    befehl: Befehlsstand | null;
-    geraet: Geraetesicht | null;
-    manuellA: number;
-    minA: number;
-    maxA: number;
-    volladung: boolean;
-    anschluss: Anschlussinfo;
-    fordertNicht: boolean;
-    gestoppt: boolean;
-    letzterFehler: string | null;
-    haushaltMaxA: number;
-  } {
-    const e = this.letzte;
-    return {
-      modus: this.config.ueberschuss.modus,
-      zustand: e?.zustand ?? (this.config.ueberschuss.modus === 'aus' ? 'aus' : 'wartet'),
-      grund: e?.grund ?? 'Noch kein Regelzyklus gelaufen.',
-      zielA: e?.zielA ?? 0,
-      gesetztA: this.historie.gesetztA,
-      verfuegbarW: Math.round(e?.verfuegbarW ?? 0),
-      hausOhneAutoW: e?.hausOhneAutoW ?? null,
-      speicherbeitragW: Math.round(e?.speicherbeitragW ?? 0),
-      betriebsart: this.betriebsart,
-      befehl: this.befehl,
-      geraet: this.geraet,
-      manuellA: this.manuellA,
-      minA: this.grenzen.minA,
-      maxA: this.grenzen.maxA,
-      volladung: this.betriebsart === 'manuell' && this.manuellA >= this.grenzen.maxA,
-      anschluss: this.anschlussInfo(),
-      fordertNicht: this.fordertNicht,
-      gestoppt: this.gestoppt,
-      letzterFehler: this.letzterFehler,
-      haushaltMaxA: this.config.ueberschuss.haushaltMaxA,
-    };
-  }
-
-  // ── intern ──────────────────────────────────────────────────────────────
 
   private parameter(): Reglerparameter {
     const u = this.config.ueberschuss;
@@ -826,12 +840,7 @@ export class Ladesteuerung {
     };
   }
 
-  /**
-   * Die Speicher, wie die Regelung sie sieht — samt Nachweis.
-   *
-   * Eigene Methode, weil der Schnellpfad sie im Zwei-Sekunden-Takt braucht,
-   * ohne den ganzen Messwertsatz aufzubauen.
-   */
+  /** Die Speicher, wie die Regelung sie sieht — samt Nachweis. */
   private speicherzustand(state: EngineState): SpeicherZustand[] {
     return state.resolution.snapshot.batteries.map((b) => {
       const frisch = b.provenance.quality === 'live'
@@ -849,30 +858,18 @@ export class Ladesteuerung {
   }
 
   /**
-   * Messwerte aus dem Zustand der Engine.
-   *
-   * `hausMitAutoW` wird hier bewusst NICHT um das Auto bereinigt — das macht
-   * `berechneLadeziel` selbst und nur an dieser einen Stelle. Zweimal abziehen
-   * wäre der klassische Fehler jeder Überschussregelung.
+   * Messwerte aus dem Zustand der Engine. `hausMitAutoW` wird hier bewusst
+   * NICHT um das Auto bereinigt — das macht `berechneLadeziel` selbst.
    */
   private messwerte(state: EngineState): Messwerte {
     const snap = state.resolution.snapshot;
     const ev = snap.evCharger;
-
     const speicher = this.speicherzustand(state);
 
-    // Ältester Messwert, der in die Entscheidung eingeht. Der Netzzähler ist
-    // das Rückführsignal - ist der alt, ist die ganze Regelung blind.
-    //
-    // Das Alter der Wallbox zählt nur mit, solange tatsächlich Strom fließt.
-    // Eine eingeschaltete, aber untätige Wallbox (Auto voll, wartet, oder
-    // Schalter an ohne Ladung) meldet minutenlang nichts, weil Tuya nur bei
-    // Wertänderung meldet — ihr "0 W" ist dann alt und trotzdem richtig.
-    // Zählte allein "Schalter an" schon mit, würde die Regelung genau dann
-    // blockieren, wenn das Auto gerade steckt, aber noch nichts anfordert -
-    // also im ganz normalen Ruhezustand. Echte Nichterreichbarkeit prüft
-    // ohnehin `wallboxErreichbar` separat.
-    const wallboxLaeuft = (ev?.chargePowerW ?? 0) > LAEDT_AB_W;
+    // Das Alter der Wallbox zählt nur mit, solange tatsächlich Strom fliesst:
+    // Tuya meldet nur bei Wertänderung, ein "0 W" im Ruhezustand ist alt und
+    // trotzdem richtig.
+    const wallboxLaeuft = (ev?.chargePowerW ?? 0) > LADEN_AB_W;
     const benoetigt = [
       snap.gridImportW.provenance, snap.gridExportW.provenance,
       snap.solarProductionW.provenance, snap.houseConsumptionW.provenance,
@@ -903,411 +900,7 @@ export class Ladesteuerung {
     };
   }
 
-  private async zyklus(): Promise<void> {
-    // Ein hängender Tuya-Aufruf darf nicht dazu führen, dass sich Zyklen
-    // überholen und zwei Befehle gleichzeitig unterwegs sind.
-    if (this.laeuft) return;
-    this.laeuft = true;
-    this.naechsteRegelungAt = Date.now() + this.config.ueberschuss.intervallSekunden * 1000;
-
-    try {
-      const state = this.engine.current();
-      if (state === null || this.wallbox === null) return;
-
-      const messwerte = this.messwerte(state);
-      if (messwerte.evStromA !== null) this.geraeteStromA = messwerte.evStromA;
-
-      // Merken, ob in diesem Zyklus überhaupt mit ungenutzter Speicherleistung
-      // gerechnet wurde. Nur dann darf späterer Netzbezug den Speichern
-      // angelastet werden — sonst wäre jede Wolke ein Grund, den Nachweis zu
-      // kürzen, den die Speicher sich redlich verdient haben.
-      this.mitSpeicherGerechnet =
-        speicherspielraum(messwerte.speicher, this.parameter()).entladespielraumW > 0;
-
-      // Beim ersten Zyklus weiss die Regelung nicht, was an der Wallbox
-      // eingestellt ist — und sie darf es auch nicht annehmen. Tat sie bisher:
-      // Die Historie startete mit "0 A gesetzt", ein gewünschter Stopp galt
-      // damit als bereits erledigt ("Sollwert unverändert") und es ging nie ein
-      // Befehl hinaus. UNBEKANNT ist die einzige ehrliche Aussage, und sie
-      // sorgt dafür, dass der erste Zyklus in jedem Fall einen Befehl schickt.
-      if (!this.initialisiert) {
-        this.initialisiert = true;
-        this.historie = neueHistorie(UNBEKANNT_A, Date.now());
-      }
-
-      // ── Abgleich mit der Wirklichkeit ───────────────────────────────────
-      // Der wichtigste Sicherheitsnetz-Griff dieser Datei. Bisher glaubte die
-      // Regelung ihrem eigenen Gedächtnis: Stand dort "abgeschaltet", wurde
-      // nichts mehr gesendet. Schaltet die Wallbox aber von sich aus wieder ein
-      // — neu angesteckt, eigener Zeitplan, verlorener Befehl —, lädt das Auto
-      // munter aus dem Netz weiter, und niemand merkt es.
-      //
-      // Deshalb entscheidet hier der Messwert, nicht die Erinnerung: Fliesst
-      // Strom, obwohl wir pausiert zu haben glauben, wird das Gedächtnis
-      // verworfen und der Stopp erneut geschickt.
-      const laedtWirklich = (messwerte.evLeistungW ?? 0) > LAEDT_AB_W;
-      this.merkeNachfrage(messwerte.evLeistungW ?? 0, messwerte.evAngesteckt, messwerte.wallboxErreichbar);
-      this.merkeGeraet(state.resolution.snapshot.evCharger);
-
-      // ── An welcher Dose hängt das Auto? ─────────────────────────────────
-      // Aus gesetztem Strom und gemessener Leistung folgt beides: die Art der
-      // Dose und ihre tatsächliche Spannung. Nur solange wirklich Strom
-      // fliesst — ohne Messung gibt es nichts zu erkennen, und der zuletzt
-      // erkannte Anschluss bleibt die richtige Auskunft.
-      if (laedtWirklich) {
-        this.hoechsteLadeleistungW = Math.max(
-          this.hoechsteLadeleistungW,
-          messwerte.evLeistungW ?? 0,
-        );
-      }
-
-      // ── An welcher Dose hängt das Auto? ─────────────────────────────────
-      // Erste Wahl ist die Messung: Die Wallbox meldet in `phase_a` Spannung
-      // und tatsächlichen Strom, daraus folgt die Zahl der Phasen ohne jedes
-      // Zurückrechnen. Fehlt der Datenpunkt, greift die alte Herleitung aus
-      // Leistung und eingestelltem Strom.
-      const erkannt =
-        anschlussAusPhasenmessung(messwerte.evSpannungV, messwerte.evPhasen)
-          ?? (laedtWirklich
-            ? gemessenerAnschluss(
-                messwerte.evLeistungW,
-                messwerte.evStromA,
-                this.anschluss,
-                this.hoechsteLadeleistungW,
-              )
-            : this.anschluss);
-      if (erkannt.phasen !== this.anschluss.phasen) {
-        if (this.datenverzeichnis !== null) {
-          merkeDose(this.datenverzeichnis, {
-            phasen: erkannt.phasen,
-            spannungV: erkannt.spannungV,
-            erkanntAm: new Date().toISOString(),
-          });
-        }
-        console.log(
-          `[Laderegelung] Anschluss erkannt: ${anschlussName(erkannt)} `
-            + `(${Math.round(erkannt.spannungV)} V, ${erkannt.phasen === 3 ? 'dreiphasig' : 'einphasig'}). `
-            + `Ein Ampere sind hier ${Math.round(ladeleistungAusStromW(1, erkannt) ?? 0)} W.`,
-        );
-      }
-      this.anschluss = erkannt;
-
-      if (laedtWirklich && this.historie.gesetztA === 0) {
-        console.warn(
-          `[Laderegelung] Die Wallbox lädt mit ${Math.round(messwerte.evLeistungW ?? 0)} W, `
-            + 'obwohl sie abgeschaltet sein sollte — Stopp wird erneut gesendet.',
-        );
-        this.historie = { ...this.historie, gesetztA: messwerte.evStromA ?? UNBEKANNT_A };
-        this.ladenAn = null;
-      }
-
-      // Und derselbe Griff in die andere Richtung — die Lücke, die am 8.9. an
-      // der Anlage auffiel. Das Gerät stand auf `charge_cur_set 16` bei
-      // `switch false`: eingestellt, aber abgeschaltet. Für die Regelung sah
-      // das aus wie "16 A sind gesetzt, es gibt nichts zu tun", die Beruhigung
-      // meldete brav "Sollwert unverändert" — und weil kein Befehl mehr
-      // hinausging, blieb die Wallbox aus, obwohl 11 kW Überschuss dastanden.
-      //
-      // Ein Ladestrom OHNE Schalter ist kein gesetzter Ladestrom. Deshalb gilt
-      // hier wieder der Messwert und nicht die Erinnerung: Ist das Gerät aus,
-      // wird das Gedächtnis auf "pausiert" gestellt, und der reguläre Startweg
-      // samt seiner Beobachtungszeit läuft von vorn.
-      //
-      // Der Abstand zum letzten Befehl muss sein: Direkt nach dem Einschalten
-      // meldet die Tuya-Cloud den alten Schalterzustand noch eine Weile weiter,
-      // und ohne diese Bedingung würde sich die Regelung selbst zurücksetzen.
-      const schalterAusMs = Date.now() - (this.letzterBefehlAt ?? 0);
-      if (
-        messwerte.evSchalterAn === false
-        && this.historie.gesetztA > 0
-        && schalterAusMs > this.config.ueberschuss.intervallSekunden * 1000
-      ) {
-        console.warn(
-          `[Laderegelung] Wallbox ist abgeschaltet, obwohl ${this.historie.gesetztA} A `
-            + 'gesetzt sein sollten — wird neu gestartet.',
-        );
-        this.historie = { ...this.historie, gesetztA: 0 };
-        this.ladenAn = false;
-      }
-
-      let entscheidung = berechneLadeziel(messwerte, this.parameter());
-
-      // ── Nimmt das Fahrzeug überhaupt noch? ──────────────────────────────
-      // Nach drei Freigaben ohne ein einziges Ampere ist der Fall klar: voll,
-      // oder die im Auto eingestellte Ladegrenze ist erreicht. Weiter
-      // anzubieten heisst dann nur, dass die Wallbox alle paar Minuten ein
-      // Schütz schaltet und in der App "lädt" steht, während nichts fliesst.
-      if (this.angeboteOhneLadung >= VERSUCHE_BIS_AUFGABE && !this.fordertNicht) {
-        this.fordertNicht = true;
-        this.naechsterVersuchAt = Date.now() + NEUER_VERSUCH_MS;
-        console.log(
-          `[Laderegelung] Fahrzeug hat ${VERSUCHE_BIS_AUFGABE} Freigaben nicht angenommen — `
-            + 'vermutlich voll. Laden wird beendet, neuer Versuch in '
-            + `${Math.round(NEUER_VERSUCH_MS / 60_000)} Minuten.`,
-        );
-      }
-      // Nach der Wartezeit noch einmal von vorn: Ein Fahrzeug darf seine
-      // Meinung ändern.
-      if (this.fordertNicht && Date.now() >= this.naechsterVersuchAt) {
-        this.fordertNicht = false;
-        this.angeboteOhneLadung = 0;
-      }
-      if (this.fordertNicht && messwerte.evAngesteckt === true) {
-        entscheidung = {
-          ...entscheidung,
-          zustand: 'fordert-nicht',
-          zielA: 0,
-          zielLeistungW: 0,
-          // "Akku voll" wäre eine Behauptung: Die Wallbox überträgt keinen
-          // Ladestand. Belegt ist nur, dass nichts angenommen wurde.
-          grund:
-            'Das Fahrzeug nimmt derzeit keinen Strom an (möglich: Akku voll, '
-            + 'Ladegrenze oder Ladeplan im Auto). Neuer Versuch später.',
-        };
-      }
-
-      // Übersteuerung durch den Menschen. Die Gerätegrenzen gelten weiterhin:
-      // Was Wallbox und Fahrzeug nicht zulassen, wird auch von Hand nicht
-      // gesetzt.
-      const vonHand =
-        this.betriebsart === 'manuell'
-        && !this.gestoppt
-        && messwerte.evAngesteckt === true
-        && messwerte.wallboxErreichbar;
-      if (vonHand) {
-        const zielA = this.begrenzeAufDose(this.manuellA);
-        // Wurde der Wunsch gekappt, muss das dastehen. Sonst steht dort 10 A,
-        // wo 16 eingestellt wurden, und niemand weiss warum.
-        const gekappt = zielA < Math.round(this.manuellA);
-        entscheidung = {
-          ...entscheidung,
-          zustand: 'laedt',
-          zielA,
-          zielLeistungW: ladeleistungAusStromW(zielA, this.anschluss) ?? 0,
-          grund: gekappt
-            ? `Handbetrieb — ${Math.round(this.manuellA)} A gewünscht, an der `
-              + `Haushaltssteckdose sind ${zielA} A die Dauergrenze.`
-            : `Handbetrieb — fest auf ${zielA} A eingestellt, auch aus dem Netz.`,
-        };
-      }
-
-      // Ohne bewusste Wahl wird nicht geladen — auch nicht intelligent. Eine
-      // Wallbox, die gerade freigegeben ist, wird abgeschaltet.
-      if (this.betriebsart === null && messwerte.evAngesteckt === true) {
-        entscheidung = {
-          ...entscheidung,
-          zustand: 'wahl-fehlt',
-          zielA: 0,
-          zielLeistungW: 0,
-          grund: 'Noch kein Lademodus gewählt. Bitte "Intelligent" oder "Manuell" wählen.',
-        };
-      }
-
-      // Der Stopp-Knopf überstimmt alles, auch den Handbetrieb und die
-      // schönste Sonne. Er steht deshalb ganz am Ende der Kette.
-      if (this.gestoppt && messwerte.evAngesteckt === true) {
-        entscheidung = {
-          ...entscheidung,
-          zustand: 'gestoppt',
-          zielA: 0,
-          zielLeistungW: 0,
-          grund: 'Ladestopp angefordert. Zum Weiterladen "Laden fortsetzen" drücken.',
-        };
-      }
-
-      // Und die Dose setzt die letzte Grenze — auch im intelligenten Betrieb.
-      if (entscheidung.zielA > 0) {
-        const begrenzt = this.begrenzeAufDose(entscheidung.zielA);
-        if (begrenzt !== entscheidung.zielA) {
-          entscheidung = {
-            ...entscheidung,
-            zielA: begrenzt,
-            zielLeistungW: ladeleistungAusStromW(begrenzt, this.anschluss) ?? 0,
-            grund:
-              `${entscheidung.grund} An der Haushaltssteckdose höchstens `
-              + `${begrenzt} A — mehr hält die Leitung im Dauerbetrieb nicht aus.`,
-          };
-        }
-      }
-      this.letzte = entscheidung;
-
-      const netzW =
-        (messwerte.netzbezugW ?? 0) - (messwerte.netzeinspeisungW ?? 0);
-
-      // In Zuständen ohne Regelbedarf wird nichts gesendet, aber protokolliert:
-      // "nicht verbunden" oder "gestört" sind Auskünfte, keine Ereignisse.
-      // "fordert-nicht" gehoert dazu: Es muss ein Stopp hinausgehen, sonst
-      // bliebe die Wallbox eingeschaltet und wartete auf ein Auto, das nicht
-      // mehr will.
-      const regelbar =
-        entscheidung.zustand === 'laedt'
-        || entscheidung.zustand === 'fordert-nicht'
-        || entscheidung.zustand === 'gestoppt'
-        || entscheidung.zustand === 'wahl-fehlt'
-        || entscheidung.zustand.startsWith('pausiert');
-      if (!regelbar) {
-        this.notiere(messwerte, entscheidung, netzW, false, entscheidung.grund, null);
-        return;
-      }
-
-      // Beruhigung nur im Autarkbetrieb. Sie ist dafür da, nicht auf jede Wolke
-      // zu reagieren — nicht dafür, einen Menschen warten zu lassen. Wer den
-      // Schieberegler bewegt, will die Änderung sehen und nicht neunzig
-      // Sekunden Beobachtungszeit abwarten; nach einer Pause wären es sogar
-      // zwei Minuten.
-      const ergebnis = vonHand || this.gestoppt || entscheidung.zustand === 'pausiert-messwerte'
-        || entscheidung.zustand === 'wahl-fehlt'
-        ? sofort(entscheidung.zielA, this.historie, Date.now())
-        : beruhige({
-            wunschA: entscheidung.zielA,
-            netzbezugW: messwerte.netzbezugW ?? 0,
-            jetztMs: Date.now(),
-            historie: this.historie,
-            zeit: this.zeitparameter(),
-          });
-
-      // Beobachten: rechnen, protokollieren, aber nichts an die Wallbox senden.
-      //
-      // `gesetztA` bleibt dabei unangetastet. Die Beruhigung schreibt es fort,
-      // sobald sie senden WÜRDE — hier wurde aber nichts gesendet, und eine
-      // Regelung, die sich einen nie abgeschickten Sollwert merkt, führt sich
-      // selbst hinters Licht.
-      if (this.config.ueberschuss.modus !== 'regeln') {
-        this.historie = { ...ergebnis.historie, gesetztA: this.historie.gesetztA };
-        this.notiere(
-          messwerte,
-          entscheidung,
-          netzW,
-          false,
-          ergebnis.senden ? `${ergebnis.grund} (nur beobachtet)` : ergebnis.grund,
-          null,
-        );
-        return;
-      }
-
-      if (!ergebnis.senden) {
-        this.historie = ergebnis.historie;
-        this.notiere(messwerte, entscheidung, netzW, false, ergebnis.grund, null);
-        return;
-      }
-
-      // Nach einem Tuya-Fehler wird nicht sofort weitergehämmert.
-      const dringlicher = this.fehlgeschlagenA !== null && ergebnis.stromA < this.fehlgeschlagenA;
-      if (Date.now() < this.gesperrtBis && !dringlicher) {
-        this.notiere(
-          messwerte,
-          entscheidung,
-          netzW,
-          false,
-          `${ergebnis.grund} — wartet nach Tuya-Fehler.`,
-          this.letzterFehler,
-        );
-        return;
-      }
-
-      // Wunsch, Übermittlung, Bestätigung und Stromfluss sind vier Dinge. Hier
-      // beginnt die Übermittlung; bestätigt wird erst, wenn das Gerät den
-      // Zustand zurückmeldet (siehe `merkeGeraet`).
-      this.befehl = {
-        schalter: ergebnis.stromA > 0,
-        stromA: ergebnis.stromA > 0 ? ergebnis.stromA : null,
-        gesendetAm: new Date().toISOString(),
-        status: 'uebermittelt',
-        fehler: null,
-      };
-      this.melde();
-
-      try {
-        // Pause heisst abschalten, nicht "auf 6 A herunter". Der kleinste
-        // Ladestrom sind gut 4 kW — ohne Sonne kämen die aus dem Netz, und
-        // genau das ist der Fall, den diese Regelung ausschliessen soll.
-        let gesetzt: number;
-        if (ergebnis.stromA === 0) {
-          await this.wallbox.setzeLaden(false);
-          this.ladenAn = false;
-          gesetzt = 0;
-        } else {
-          gesetzt = await this.wallbox.setzeLadestrom(ergebnis.stromA);
-          // Ein Stopp/Moduswechsel/Abstecken während der Cloud-Anfrage darf
-          // nicht anschließend noch eine veraltete Einschaltfreigabe auslösen.
-          if (this.erneutRegeln) {
-            this.historie = { ...this.historie, gesetztA: UNBEKANNT_A };
-            return;
-          }
-          // Nach einer Pause muss erst wieder eingeschaltet werden. Der Strom
-          // zuerst, damit das Fahrzeug nicht kurz mit dem alten Wert anläuft.
-          if (this.ladenAn !== true) {
-            await this.wallbox.setzeLaden(true);
-            this.ladenAn = true;
-            // Jede Freigabe zaehlt, bis wirklich Strom fliesst. Zurueckgesetzt
-            // wird im Messtakt, sobald das Fahrzeug zugreift.
-            this.angeboteOhneLadung += 1;
-          }
-        }
-        this.historie = { ...ergebnis.historie, gesetztA: ergebnis.stromA };
-        if (this.befehl !== null && this.befehl.status === 'uebermittelt') {
-          this.befehl = { ...this.befehl, status: 'angenommen' };
-        }
-        this.letzterBefehlAt = Date.now();
-        this.letzterFehler = null;
-        this.fehlerzahl = 0;
-        this.gesperrtBis = 0;
-        this.fehlgeschlagenA = null;
-        this.notiere(
-          messwerte,
-          entscheidung,
-          netzW,
-          true,
-          `${ergebnis.grund} Gesendet: ${gesetzt === 0 ? 'Ladung abgeschaltet' : `${gesetzt} A`}.`,
-          null,
-        );
-      } catch (error) {
-        // Historie NICHT fortschreiben: Der Sollwert gilt erst als gesetzt,
-        // wenn die Wallbox ihn angenommen hat. Sonst glaubt die Regelung an
-        // einen Wert, den das Gerät nie gesehen hat.
-        if (dringlicher) this.fehlerzahl = 0;
-        this.fehlgeschlagenA = ergebnis.stromA;
-        this.fehlerzahl += 1;
-        this.letzterFehler = error instanceof Error ? error.message : String(error);
-        if (this.befehl !== null) {
-          this.befehl = { ...this.befehl, status: 'fehlgeschlagen', fehler: this.letzterFehler };
-        }
-        // Ein misslungener Stopp wird schneller wiederholt als eine misslungene
-        // Erhöhung — die eine Richtung kostet Netzstrom, die andere nur Zeit.
-        const obergrenze =
-          ergebnis.stromA === 0 ? BACKOFF_STOPP_MAX_MS : BACKOFF_MAX_MS;
-        const wartenMs = Math.min(obergrenze, 30_000 * 2 ** (this.fehlerzahl - 1));
-        this.gesperrtBis = Date.now() + wartenMs;
-        console.warn(
-          `[Laderegelung] Tuya-Befehl fehlgeschlagen (${this.fehlerzahl}. Mal): `
-            + `${this.letzterFehler} — nächster Versuch in ${Math.round(wartenMs / 1000)} s.`,
-        );
-        this.notiere(messwerte, entscheidung, netzW, false, ergebnis.grund, this.letzterFehler);
-      }
-    } catch (error) {
-      // Sicherheitsnetz: Der Dienst läuft rund um die Uhr und darf an keinem
-      // unerwarteten Fehler sterben.
-      console.warn(
-        '[Laderegelung] Zyklus übersprungen:',
-        error instanceof Error ? error.message : error,
-      );
-    } finally {
-      this.laeuft = false;
-      this.melde();
-      if (this.erneutRegeln) {
-        this.erneutRegeln = false;
-        await this.zyklus();
-      }
-    }
-  }
-
-  /**
-   * Schreibt einen Schritt ins Protokoll.
-   *
-   * Auf die Konsole geht nur, was sich geändert hat — ein Regelzyklus alle
-   * 30 Sekunden ergäbe sonst 2880 Zeilen am Tag, in denen niemand mehr etwas
-   * findet. Das vollständige Protokoll steht in der Oberfläche.
-   */
+  /** Schreibt einen Schritt ins Protokoll; auf die Konsole nur Änderungen. */
   private notiere(
     messwerte: Messwerte,
     entscheidung: Ladeentscheidung,
@@ -1335,7 +928,6 @@ export class Ladesteuerung {
       grund,
       fehler,
     };
-
     this.protokoll.push(schritt);
     if (this.protokoll.length > PROTOKOLL_MAX) this.protokoll.shift();
 
@@ -1346,7 +938,13 @@ export class Ladesteuerung {
           + `Netz ${Math.round(netzW)} W · verfügbar ${Math.round(entscheidung.verfuegbarW)} W · `
           + `Ziel ${entscheidung.zielA} A · ${grund}`,
       );
+      if (entscheidung.zustand !== this.letzterZustand) {
+        this.ereignisse?.notiere('laden.zustand', `${entscheidung.zustand}: ${grund}`);
+      }
       this.letzterZustand = entscheidung.zustand;
     }
   }
 }
+
+// Für Aufrufer, die nur die Grenzlogik brauchen (z. B. Oberflächen-Vorschau).
+export { begrenzeAufDose };

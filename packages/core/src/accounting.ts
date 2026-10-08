@@ -63,6 +63,42 @@ export interface EnergyTotals {
   readonly erfasstAbMs?: number | null;
   /** Modellierte Herkunft, nur aus vollständig gemessenen Intervallen. */
   readonly zuordnung?: Zuordnung;
+  /**
+   * Tagessummen laut Gerätezählern — die zweite, unabhängige Wahrheit.
+   *
+   * Zählerdifferenzen überstehen Ausfälle des Servers; die integrierten Werte
+   * oben nicht. Wo beide da sind, ist die Differenz ein Mass für die Lücke.
+   * `null` je Grösse, wenn kein Gerät einen passenden Zähler führt.
+   */
+  readonly zaehler?: Zaehlersummen;
+}
+
+/** Energiemengen aus Zählerdifferenzen über den Zeitraum, in Wh. */
+export interface Zaehlersummen {
+  readonly pvWh: number | null;
+  readonly pvJeWechselrichterWh: Readonly<Record<string, number>>;
+  readonly bezugWh: number | null;
+  readonly einspeisungWh: number | null;
+  readonly autoWh: number | null;
+}
+
+export function leereZaehlersummen(): Zaehlersummen {
+  return { pvWh: null, pvJeWechselrichterWh: {}, bezugWh: null, einspeisungWh: null, autoWh: null };
+}
+
+/** Zählersummen addieren; eine Grösse ist nur bekannt, wenn beide Seiten sie kennen. */
+export function addiereZaehlersummen(a: Zaehlersummen, b: Zaehlersummen): Zaehlersummen {
+  const beide = (x: number | null, y: number | null): number | null =>
+    x === null || y === null ? null : x + y;
+  const je: Record<string, number> = { ...a.pvJeWechselrichterWh };
+  for (const [k, v] of Object.entries(b.pvJeWechselrichterWh)) je[k] = (je[k] ?? 0) + v;
+  return {
+    pvWh: beide(a.pvWh, b.pvWh),
+    pvJeWechselrichterWh: je,
+    bezugWh: beide(a.bezugWh, b.bezugWh),
+    einspeisungWh: beide(a.einspeisungWh, b.einspeisungWh),
+    autoWh: beide(a.autoWh, b.autoWh),
+  };
 }
 
 export function leereZuordnung(): Zuordnung {
@@ -187,6 +223,21 @@ export function pruefeTotals(roh: unknown): EnergyTotals | null {
   const erfasstAb = r['erfasstAbMs'];
   if (erfasstAb !== undefined && erfasstAb !== null && !nichtnegativ(erfasstAb)) return null;
 
+  let zaehler: Zaehlersummen | undefined;
+  if (r['zaehler'] !== undefined) {
+    const z = r['zaehler'] as Record<string, unknown>;
+    if (typeof z !== 'object' || z === null) return null;
+    const optional = (w: unknown): number | null | false =>
+      w === null || w === undefined ? null : nichtnegativ(w) ? w : false;
+    const pv = optional(z['pvWh']);
+    const bezug = optional(z['bezugWh']);
+    const einspeisung = optional(z['einspeisungWh']);
+    const auto = optional(z['autoWh']);
+    const je = pruefeEnergieRecord(z['pvJeWechselrichterWh'] ?? {});
+    if (pv === false || bezug === false || einspeisung === false || auto === false || je === null) return null;
+    zaehler = { pvWh: pv, pvJeWechselrichterWh: je, bezugWh: bezug, einspeisungWh: einspeisung, autoWh: auto };
+  }
+
   return {
     productionWh: r['productionWh'] as number,
     perInverterWh,
@@ -200,6 +251,7 @@ export function pruefeTotals(roh: unknown): EnergyTotals | null {
     ...(abdeckung !== undefined ? { abdeckungJeGroesseS: abdeckung } : {}),
     ...(erfasstAb !== undefined ? { erfasstAbMs: erfasstAb as number | null } : {}),
     ...(zuordnung !== undefined ? { zuordnung } : {}),
+    ...(zaehler !== undefined ? { zaehler } : {}),
   };
 }
 

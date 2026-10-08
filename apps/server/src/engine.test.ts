@@ -6,9 +6,9 @@ import { EnergyEngine } from './engine.ts';
 import type { AppConfig } from './config.ts';
 
 const config = {
-  sources: {}, pollIntervalMs: 2000,
+  quellen: [] as AppConfig['quellen'], pollIntervalMs: 2000,
   sourceMapping: { solarProductionW: 'test', houseConsumptionW: 'derived', gridImportW: 'test', gridExportW: 'test' },
-} as AppConfig;
+} as unknown as AppConfig;
 const lesen = (watt: number): ConnectorReading => {
   const p = { connectorId: 'test', deviceId: 'test', measuredAt: new Date(), ageMs: 0, quality: 'live' as const };
   return { connectorId: 'test', timestamp: new Date(),
@@ -39,7 +39,7 @@ it('startet bei einer langsamen Quelle keinen überholenden zweiten Poll', async
 it('erkennt einen ausbleibenden konfigurierten Speicher bereits beim ersten Poll', async () => {
   const connector = { id: 'test', diagnostics: () => ({}), read: async () => lesen(4000) } as unknown as EnergyConnector;
   const engine = new EnergyEngine([connector], { ...config,
-    sources: { victron: { enabled: true, host: 'unused', usableCapacityWh: 50000 } },
+    quellen: [{ typ: 'victron-modbus', id: 'victron-modbus', displayName: 'Victron', host: 'unused', speicher: { displayName: 'Speicher', usableCapacityWh: 50000 } }],
   });
   await poll(engine);
   assert.equal(engine.current()?.resolution.snapshot.houseConsumptionW.valueW, null);

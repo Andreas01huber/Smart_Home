@@ -6,7 +6,7 @@
 import { resolveSnapshot, type ConnectorReading, type ResolutionResult } from '@energy/core';
 import type { EnergyConnector, ConnectorDiagnostics } from '@energy/connectors';
 
-import type { AppConfig } from './config.ts';
+import { speicherquellen, type AppConfig } from './config.ts';
 
 export interface EngineState {
   readonly resolution: ResolutionResult;
@@ -27,7 +27,11 @@ export class EnergyEngine {
     private readonly connectors: readonly EnergyConnector[],
     private readonly config: AppConfig,
     private readonly quellenFristMs = QUELLEN_FRIST_MS,
-  ) {}
+  ) {
+    // Was laut Konfiguration einen Speicher liefern soll, wird von Anfang an
+    // erwartet — nicht erst, nachdem es einmal geliefert hat.
+    for (const id of speicherquellen(config)) this.bekannteSpeicherquellen.add(id);
+  }
 
   start(): void {
     if (this.timer !== null) return;
@@ -80,16 +84,6 @@ export class EnergyEngine {
 
       for (const reading of readings) {
         for (const battery of reading.batteries) this.bekannteSpeicherquellen.add(battery.provenance.connectorId);
-      }
-      const quellen = [
-        ['fronius-local', this.config.sources.fronius],
-        ['fronius-gen24', this.config.sources.froniusGen24],
-        ['victron-modbus', this.config.sources.victron],
-      ] as const;
-      for (const [id, quelle] of quellen) {
-        if (quelle?.enabled && (quelle.batteryDisplayName || (quelle.usableCapacityWh ?? 0) > 0)) {
-          this.bekannteSpeicherquellen.add(id);
-        }
       }
       const resolution = resolveSnapshot(readings, this.config.sourceMapping, {
         expectedBatterySources: [...this.bekannteSpeicherquellen],

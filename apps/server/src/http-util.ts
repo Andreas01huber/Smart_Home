@@ -73,3 +73,28 @@ export function herkunftErlaubt(request: IncomingMessage): boolean {
     return false;
   }
 }
+
+/** Für Seiten, die nie zwischengespeichert werden dürfen (Anmeldung, Verwaltung). */
+export const KEIN_CACHE = 'no-store, no-cache, must-revalidate';
+
+/** Eine HTML-Seite senden, die in keinen fremden Rahmen gehört. */
+export function sendeSeite(response: ServerResponse, status: number, html: string): void {
+  response.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': KEIN_CACHE,
+    // Anmeldung und Verwaltung gehören in keinen fremden Rahmen: Ein
+    // unsichtbares iframe wäre sonst ein Weg, Klicks abzugreifen.
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'same-origin',
+  });
+  response.end(html);
+}
+
+export function leiteWeiter(response: ServerResponse, ziel: string, cookie?: string): void {
+  response.writeHead(302, {
+    location: ziel,
+    'cache-control': KEIN_CACHE,
+    ...(cookie === undefined ? {} : { 'set-cookie': cookie }),
+  });
+  response.end();
+}

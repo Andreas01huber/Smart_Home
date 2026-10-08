@@ -18,35 +18,19 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { clearCookie, istHttps, vertrauterProxy } from './auth.ts';
 import { adminPage } from './admin-page.ts';
 import type { Benutzer, Kontenspeicher, Rolle } from './benutzer.ts';
-import { readBody } from './http-util.ts';
+import { herkunftErlaubt, KEIN_CACHE, leiteWeiter, readBody, sendeSeite } from './http-util.ts';
 import type { Sitzungsspeicher } from './sitzungen.ts';
-
-const KEIN_CACHE = 'no-store, no-cache, must-revalidate';
+import type { Ereignisprotokoll } from './ereignisse.ts';
 
 export interface AdminKontext {
+
   readonly konten: Kontenspeicher;
   readonly sitzungen: Sitzungsspeicher;
   readonly vertrauteProxies?: readonly string[];
+  /** F�r die Anzeige der letzten Ereignisse und das Mitschreiben von Verwaltungsaktionen. */
+  readonly ereignisse?: Ereignisprotokoll;
 }
 
-function sendeSeite(response: ServerResponse, status: number, html: string): void {
-  response.writeHead(status, {
-    'content-type': 'text/html; charset=utf-8',
-    'cache-control': KEIN_CACHE,
-    'x-frame-options': 'DENY',
-    'referrer-policy': 'same-origin',
-  });
-  response.end(html);
-}
-
-function leiteWeiter(response: ServerResponse, ziel: string, cookie?: string): void {
-  response.writeHead(302, {
-    location: ziel,
-    'cache-control': KEIN_CACHE,
-    ...(cookie === undefined ? {} : { 'set-cookie': cookie }),
-  });
-  response.end();
-}
 
 /** Zurück auf die Verwaltung, mit Meldung. */
 function zurueck(
@@ -59,28 +43,6 @@ function zurueck(
   if (meldung.wer) p.set('wer', meldung.wer);
   const anhang = p.toString();
   leiteWeiter(response, anhang.length > 0 ? `/admin?${anhang}` : '/admin');
-}
-
-/**
- * Kommt der POST von dieser Seite?
- *
- * Der Sitzungskeks ist `SameSite=Lax` und wird bei einem POST von einer fremden
- * Seite ohnehin nicht mitgeschickt — die Anfrage käme also gar nicht bis hierher.
- * Diese Prüfung ist die zweite Reihe: Sie kostet nichts und trägt auch dann,
- * wenn an der Keks-Einstellung einmal jemand dreht.
- *
- * Fehlt der Kopf ganz, wird durchgelassen: Nicht jeder Client schickt ihn, und
- * eine Verwaltung, die sich je nach Browser nicht bedienen lässt, ist schlimmer
- * als der Fall, den sie hier abdeckt.
- */
-function gleicheHerkunft(request: IncomingMessage): boolean {
-  const origin = request.headers.origin;
-  if (typeof origin !== 'string' || origin.length === 0) return true;
-  try {
-    return new URL(origin).host === request.headers.host;
-  } catch {
-    return false;
-  }
 }
 
 const VERBOTEN = `<!doctype html>
@@ -137,6 +99,7 @@ export function adminRouten(
         ...(wer === null ? {} : { wer }),
         speicher: schreibstatus(),
         sitzungsbetrieb: sitzungen.betriebszustand(),
+        ereignisse: kontext.ereignisse?.letzte(60) ?? [],
       }),
     );
     return true;
@@ -149,7 +112,7 @@ export function adminRouten(
     return true;
   }
 
-  if (!gleicheHerkunft(request)) {
+  if (!herkunftErlaubt(request)) {
     zurueck(response, { fehler: 'abgelehnt' });
     return true;
   }
@@ -176,6 +139,7 @@ export function adminRouten(
             zurueck(response, { fehler: ergebnis.fehler });
             return;
           }
+          kontext.ereignisse?.notiere('konto.angelegt', `Konto  angelegt`, { von: ich.username });
           zurueck(response, { ok: 'angelegt', wer: ergebnis.benutzer.username });
           return;
         }
@@ -195,6 +159,7 @@ export function adminRouten(
           // angemeldet, hätte der Wechsel genau die Wirkung nicht, wegen der
           // man ihn vornimmt.
           sitzungen.beendeVonBenutzer(id);
+          kontext.ereignisse?.notiere('konto.passwort', `Passwort f�r  gesetzt`, { von: ich.username });
           zurueck(response, { ok: 'passwort', wer: ergebnis.benutzer.username });
           return;
         }
@@ -222,18 +187,21 @@ export function adminRouten(
             return;
           }
           sitzungen.beendeVonBenutzer(id);
+          kontext.ereignisse?.notiere('konto.geloescht', `Konto  gel�scht`, { von: ich.username });
           zurueck(response, { ok: 'geloescht', wer: ergebnis.benutzer.username });
           return;
         }
 
         case '/admin/geraet-abmelden': {
           sitzungen.beende(id);
+          kontext.ereignisse?.notiere('sitzung.beendet', 'Ger�t abgemeldet', { von: ich.username });
           zurueck(response, { ok: 'abgemeldet' });
           return;
         }
 
         case '/admin/alle-abmelden': {
           sitzungen.beendeAlle();
+          kontext.ereignisse?.notiere('sitzung.alle-beendet', 'Alle Ger�te abgemeldet', { von: ich.username });
           // Das eigene Gerät ist mit abgemeldet. Direkt auf die Anmeldung
           // schicken, statt auf eine Seite, die sofort weiterleitet.
           leiteWeiter(response, '/login', clearCookie(istHttps(request.headers, vertrauterProxy(request.socket.remoteAddress, kontext.vertrauteProxies ?? []))));

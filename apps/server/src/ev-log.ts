@@ -51,7 +51,7 @@ import {
 } from '@energy/core';
 
 import type { EngineState } from './engine.ts';
-import { localDate } from './history.ts';
+import { localDate, naechsterTagesbeginn } from './tageszeit.ts';
 import { bewahreBeschaedigt, writeJsonAtomic } from './persist.ts';
 
 /** Sessions unterhalb dieser Energie sind Fehlanschlüsse, kein Ladevorgang. */
@@ -121,11 +121,6 @@ interface Messpunkt {
   readonly einspeisungW: number | null;
   readonly speicherEntladenW: Record<string, number>;
   readonly speicherLadenW: number;
-}
-
-function naechsterTagesbeginn(ms: number): number {
-  const d = new Date(ms);
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
 }
 
 export class ChargeSessionLog {

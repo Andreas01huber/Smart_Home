@@ -14,6 +14,7 @@ import {
   splitBatteryPower,
   splitGridPower,
   storedEnergyWh,
+  STALENESS_BY_TYPE,
   type BatterySnapshot,
   type ConnectorReading,
   type PowerMetric,
@@ -24,6 +25,9 @@ import {
   VICTRON_SYSTEM_UNIT_ID,
 } from './modbus-client.ts';
 import type { ConnectorDiagnostics, EnergyConnector } from './types.ts';
+
+/** Frischegrenzen f�r Modbus TCP � je Art, nicht je Ger�t. */
+const POLICY = STALENESS_BY_TYPE['victron-modbus'];
 
 /**
  * Ein zusammenhängender Block von Register 884 bis 913. Alle darin enthaltenen
@@ -182,7 +186,7 @@ export class VictronModbusConnector implements EnergyConnector {
 
     const metric = (valueW: number | null): PowerMetric => ({
       valueW,
-      provenance: provenance(this.id, 'system', measuredAt),
+      provenance: provenance(this.id, 'system', measuredAt, new Date(), POLICY),
     });
 
     return {
@@ -228,7 +232,7 @@ export class VictronModbusConnector implements EnergyConnector {
       // seine Nennkapazität nicht preis.
       ratedCapacityWh: null,
       state,
-      provenance: provenance(this.id, `${this.id}:system`, measuredAt),
+      provenance: provenance(this.id, `${this.id}:system`, measuredAt, new Date(), POLICY),
     };
   }
 

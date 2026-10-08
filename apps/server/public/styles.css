@@ -1,6 +1,3 @@
-.lade-zugang { display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: 100%; padding: .85rem 1rem; margin-bottom: 1rem; min-height: 56px; text-align: left; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-left: 4px solid var(--ev); border-radius: var(--radius-sm); cursor: pointer; font: inherit; }
-.lade-zugang strong { display: block; margin-bottom: .2rem; }
-#ev-kurzstatus { color: var(--text-dim); font-size: .9rem; }
 .ev-stopp { display: block; min-height: 48px; width: 100%; margin-top: 1rem; padding: .75rem 1rem; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font: inherit; font-weight: 650; cursor: pointer; }
 .ev-stopp.an { background: var(--accent-strong); color: var(--on-accent); }
 .ev-stopp:disabled { opacity: .6; cursor: wait; }
