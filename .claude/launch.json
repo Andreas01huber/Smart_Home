@@ -6,6 +6,18 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["start"],
       "port": 4173
+    },
+    {
+      "name": "fixture",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "tools/fixture-server.ts", "--port", "4180"],
+      "port": 4180
+    },
+    {
+      "name": "fixture-leer",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "tools/fixture-server.ts", "--port", "4181", "--leer"],
+      "port": 4181
     }
   ]
 }

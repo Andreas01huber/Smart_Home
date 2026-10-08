@@ -36,15 +36,31 @@ nicht als aktuell ausgegeben.
 Stimmt die Energiebilanz nicht, weist das Dashboard darauf hin, statt eine
 plausibel aussehende Zahl zu zeigen.
 
+Tagessummen entstehen auf zwei Wegen: aus der Integration der Leistung (alle
+2 s) und aus den **Zählerständen der Geräte** (Fronius Smart Meter, Symo
+`E_Total`, Wallbox `forward_energy_total`). Die Zähler laufen auch, wenn der
+Server nicht läuft; weichen beide Zahlen ab, zeigt die Tagesansicht den
+Zählerwert daneben. Die Tageskurve zeigt Minutenmittel, keine Momentaufnahmen.
+
+Was passiert ist — Befehle an die Wallbox, Stopps, Verbindungsabbrüche,
+Anmeldungen — steht dauerhaft in `data/ereignisse.jsonl` und in der
+Verwaltung (`/admin`) sowie unter `/api/ereignisse`.
+
 ## Konfiguration
 
-`config.json` im Projektordner:
+`config.json` im Projektordner. Sie wird beim Start **streng geprüft**: Ein
+unbekannter Schlüssel, eine fehlende Adresse oder ein unklarer Modus verhindern
+den Start mit einer Liste aller Fundstellen — statt still auf einen Vorgabewert
+zu fallen. Schlüssel mit `_` davor (`_hinweis`) sind Kommentare.
 
-- `sources.fronius.host` — IP des Fronius Symo
-- `sources.froniusGen24.enabled` — auf `true`, sobald die Solar API am GEN24
-  aktiviert ist
-- `sources.victron.usableCapacityWh` — nutzbare Kapazität des grossen
-  Speichers; das Batteriesystem meldet sie nicht über Modbus
+- `sources` — die Geräte, in zwei Schreibweisen:
+  - bisherige Objektform `{ "fronius": …, "froniusGen24": …, "victron": …, "evCharger": … }`
+    (feste IDs `fronius-local`, `fronius-gen24`, `victron-modbus`, `ev-charger`)
+  - Listenform `[{ "id": "wr-nord", "typ": "fronius-solar-api", "host": "…" }, …]`
+    mit `typ` aus `fronius-solar-api`, `victron-modbus`, `tuya-evse` — für
+    einen weiteren Wechselrichter oder Speicher genügt ein Eintrag
+- `batteryDisplayName` / `usableCapacityWh` an einer Quelle bedeuten: Dieses
+  Gerät liefert einen Speicher. Fehlt er in der Messung, ist das eine Lücke.
 - `sourceMapping` — welche Quelle für welche Messgrösse maßgeblich ist.
   Es wird immer genau eine Quelle ausgewählt, niemals addiert.
 
@@ -63,6 +79,15 @@ npm run discover
 
 Sucht Fronius- und Victron-Geräte im lokalen Netz und meldet, was tatsächlich
 gefunden wurde. Nützlich nach Änderungen an der Anlage.
+
+```bash
+npm run sicherung
+```
+
+Kopiert `data/` (Historie, Tagesarchive, Ladeprotokoll, Tarife, Ereignisse) nach
+`sicherungen/<Zeitstempel>/`, behält die letzten 14. Mit `-- --ziel D:\Backup`
+an einen anderen Ort, mit `-- --wiederherstellen <Ordner>` zurückspielen (bei
+gestopptem Server; der aktuelle Stand wird vorher gesichert).
 
 ```bash
 npm test

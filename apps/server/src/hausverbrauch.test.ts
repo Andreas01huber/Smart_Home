@@ -2,92 +2,134 @@
  * Tests der Aufteilung in Haus und Auto.
  *
  * Die Fälle stammen aus dem Betrieb am 8.9.2026 — an dem Tag stand in der App
- * minutenlang ein Hausverbrauch von 11,7 kW, obwohl im Haus 1,5 kW liefen.
+ * minutenlang ein Hausverbrauch von 11,7 kW, obwohl im Haus 1,5 kW liefen —
+ * und aus dem Projektreview vom 19.9.: Eine unbekannte Autoleistung wurde dort
+ * noch zu gemessenen 0 W.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Hausverbrauch, HALTBARKEIT_MS } from './hausverbrauch.ts';
+import { Hausverbrauch, HALTBARKEIT_MS, teileRein } from './hausverbrauch.ts';
 
-describe('Stimmige Messwerte', () => {
-  it('zieht das Auto ab', () => {
-    const h = new Hausverbrauch();
-    const a = h.teile(11_246, 10_084, 1000);
-    assert.equal(Math.round(a.wattW ?? -1), 1162);
-    assert.equal(a.autoW, 10_084);
-    assert.equal(a.frisch, true);
+describe('Gemessen, geschätzt, unbekannt', () => {
+  it('lässt eine unbekannte Autoleistung unbekannt — der Fall aus dem Review', () => {
+    // Vorher: autoW 0, frisch true. Die Bilanz zählte daraus gemessene 0 W.
+    const a = new Hausverbrauch().fuerZyklus(0, 1200, null);
+    assert.deepEqual(a.hausGesamt, { w: 1200, art: 'gemessen' });
+    assert.deepEqual(a.hausOhneAuto, { w: null, art: 'unbekannt' });
+    assert.deepEqual(a.auto, { w: null, art: 'unbekannt' });
+    assert.equal(a.schaetzung, null);
   });
 
-  it('lässt den Wert stehen, wenn kein Auto lädt', () => {
-    const h = new Hausverbrauch();
-    const a = h.teile(1500, 0, 1000);
-    assert.equal(a.wattW, 1500);
-    assert.equal(a.autoW, 0);
+  it('hält gemessene 0 W von unbekannt getrennt', () => {
+    const a = new Hausverbrauch().fuerZyklus(0, 1500, 0);
+    assert.deepEqual(a.auto, { w: 0, art: 'gemessen' });
+    assert.deepEqual(a.hausOhneAuto, { w: 1500, art: 'gemessen' });
   });
 
-  it('kennt keinen Wert ohne Zähler', () => {
-    const h = new Hausverbrauch();
-    assert.equal(h.teile(null, 4000, 1000).wattW, null);
+  it('zieht ein plausibel gemessenes Auto ab', () => {
+    const a = new Hausverbrauch().fuerZyklus(1000, 11_246, 10_084);
+    assert.equal(a.hausOhneAuto.art, 'gemessen');
+    assert.equal(Math.round(a.hausOhneAuto.w ?? -1), 1162);
+    assert.deepEqual(a.auto, { w: 10_084, art: 'gemessen' });
+  });
+
+  it('kennt ohne Hauszähler nur, was die Wallbox misst', () => {
+    const a = new Hausverbrauch().fuerZyklus(1000, null, 4000);
+    assert.deepEqual(a.hausGesamt, { w: null, art: 'unbekannt' });
+    assert.deepEqual(a.hausOhneAuto, { w: null, art: 'unbekannt' });
+    assert.deepEqual(a.auto, { w: 4000, art: 'gemessen' });
+  });
+
+  it('verwirft unplausible Werte statt sie zu verrechnen', () => {
+    for (const kaputt of [Number.NaN, Number.POSITIVE_INFINITY, -800]) {
+      const a = teileRein(kaputt, 2000, 0, null);
+      assert.equal(a.hausGesamt.art, 'unbekannt', `Haus ${kaputt}`);
+      const b = teileRein(1200, kaputt, 0, null);
+      assert.equal(b.auto.art, 'unbekannt', `Auto ${kaputt}`);
+    }
+    // Rundungsrauschen knapp unter null ist 0 W, kein Fehler.
+    assert.deepEqual(teileRein(-20, 0, 0, null).hausGesamt, { w: 0, art: 'gemessen' });
   });
 });
 
 describe('Wenn die Wallbox nachhinkt', () => {
-  it('hält die zuletzt bekannte Grundlast', () => {
+  it('schätzt aus der Grundlast — gekennzeichnet und befristet', () => {
     const h = new Hausverbrauch();
-    // Erst stimmig: Grundlast 1162 W wird gemerkt.
-    h.teile(11_246, 10_084, 1000);
-    // Dann der echte Widerspruch: Zähler 9338 W, Wallbox meldet weiter 10 084 W.
-    const a = h.teile(9338, 10_084, 3000);
-    assert.equal(Math.round(a.wattW ?? -1), 1162);
-    // Der Rest gehört dem Auto — und ist damit näher an der Wahrheit als der
-    // veraltete Wert aus der Cloud.
-    assert.equal(Math.round(a.autoW), 8176);
-    assert.equal(a.frisch, false);
+    h.fuerZyklus(1000, 11_246, 10_084); // stimmig: Grundlast 1162 W
+    const a = h.fuerZyklus(3000, 9338, 10_084); // Widerspruch
+    assert.equal(a.hausOhneAuto.art, 'geschaetzt');
+    assert.equal(Math.round(a.hausOhneAuto.w ?? -1), 1162);
+    assert.equal(a.auto.art, 'geschaetzt');
+    assert.equal(Math.round(a.auto.w ?? -1), 8176);
+    assert.ok(a.schaetzung, 'Schätzung ohne Grundlage');
+    assert.equal(a.schaetzung.grundlastAmMs, 1000);
+    assert.equal(a.schaetzung.gueltigBisMs, 1000 + HALTBARKEIT_MS);
   });
 
   it('lässt eine Änderung im Haus nicht unter den Tisch fallen', () => {
-    // Geht während der Verzögerung das Backrohr an, steckt das im Zählerwert.
-    // Hier passen die Werte wieder zusammen, also wird normal abgezogen — und
-    // der Hausverbrauch steigt sofort mit.
     const h = new Hausverbrauch();
-    h.teile(11_246, 10_084, 1000);
-    const a = h.teile(11_246 + 3400, 10_084, 3000);
-    assert.equal(Math.round(a.wattW ?? -1), 4562);
-    assert.equal(a.frisch, true);
+    h.fuerZyklus(1000, 11_246, 10_084);
+    const a = h.fuerZyklus(3000, 11_246 + 3400, 10_084);
+    assert.equal(a.hausOhneAuto.art, 'gemessen');
+    assert.equal(Math.round(a.hausOhneAuto.w ?? -1), 4562);
   });
 
-  it('hält die Grundlast über mehrere Zyklen durch', () => {
-    // Die Verzögerung dauert selten nur einen Zyklus. Solange sie anhält, darf
-    // die Anzeige nicht zwischen zwei Werten springen.
+  it('schreibt die Grundlast aus einer Schätzung nicht fort', () => {
+    // Sonst verlängerte sich eine Schätzung selbst immer weiter.
     const h = new Hausverbrauch();
-    h.teile(11_246, 10_084, 1000);
-    for (const t of [3000, 5000, 7000, 9000]) {
-      const a = h.teile(9338, 10_084, t);
-      assert.equal(Math.round(a.wattW ?? -1), 1162, `bei ${t} ms gesprungen`);
-    }
+    h.fuerZyklus(1000, 11_246, 10_084);
+    h.fuerZyklus(3000, 9338, 10_084);
+    const spaet = h.fuerZyklus(1000 + HALTBARKEIT_MS + 1, 9338, 10_084);
+    assert.equal(spaet.hausOhneAuto.art, 'unbekannt');
   });
 
   it('behauptet nichts mehr, wenn die Grundlast zu alt ist', () => {
     const h = new Hausverbrauch();
-    h.teile(11_246, 10_084, 1000);
-    const a = h.teile(9338, 10_084, 1000 + HALTBARKEIT_MS + 1);
-    assert.equal(a.wattW, null);
-    assert.equal(a.frisch, false);
+    h.fuerZyklus(1000, 11_246, 10_084);
+    const a = h.fuerZyklus(1000 + HALTBARKEIT_MS + 1, 9338, 10_084);
+    assert.equal(a.hausOhneAuto.w, null);
+    assert.equal(a.auto.w, null);
   });
 
   it('behauptet nichts, solange noch nie etwas Stimmiges kam', () => {
-    // Startet der Server mitten in einem Ladevorgang, gibt es noch keine
-    // Grundlast. Dann lieber ein Strich als eine erfundene Zahl.
-    const h = new Hausverbrauch();
-    assert.equal(h.teile(9338, 10_084, 1000).wattW, null);
+    const a = new Hausverbrauch().fuerZyklus(1000, 9338, 10_084);
+    assert.equal(a.hausOhneAuto.art, 'unbekannt');
+    assert.equal(a.hausGesamt.w, 9338);
   });
 
   it('gibt nie mehr Haus aus, als der Zähler hergibt', () => {
     const h = new Hausverbrauch();
-    h.teile(5000, 0, 1000); // Grundlast 5000 W gemerkt
-    const a = h.teile(800, 4000, 2000);
-    assert.equal(a.wattW, 800);
-    assert.equal(a.autoW, 0);
+    h.fuerZyklus(1000, 5000, 0); // Grundlast 5000 W
+    const a = h.fuerZyklus(2000, 800, 4000);
+    assert.equal(a.hausOhneAuto.w, 800);
+    assert.equal(a.auto.w, 0);
+  });
+});
+
+describe('Ein Messzyklus, eine Aufteilung', () => {
+  it('liefert vielen Browsern dasselbe und verändert dabei nichts', () => {
+    // Vorher rechnete jeder Ereignisstrom selbst und schrieb die Grundlast
+    // fort: Mehr offene Handys, andere Ergebnisse.
+    const h = new Hausverbrauch();
+    h.fuerZyklus(1000, 11_246, 10_084);
+    const erste = h.fuerZyklus(3000, 9338, 10_084);
+    for (let i = 0; i < 20; i++) {
+      // Jeder weitere Client fragt denselben Zyklus — auch mit anderen Werten
+      // aus einer späteren Momentaufnahme darf sich nichts verschieben.
+      assert.equal(h.fuerZyklus(3000, 9338, 10_084), erste);
+      assert.equal(h.fuerZyklus(3000, 20_000, 0), erste);
+    }
+    const danach = h.fuerZyklus(5000, 9338, 10_084);
+    assert.equal(Math.round(danach.hausOhneAuto.w ?? -1), 1162, 'Grundlast wurde verschoben');
+  });
+
+  it('dreht das Gedächtnis mit einem älteren Zeitpunkt nicht zurück', () => {
+    const h = new Hausverbrauch();
+    h.fuerZyklus(5000, 11_246, 10_084);
+    h.fuerZyklus(1000, 3000, 0); // verspätet ausgelieferter alter Stand
+    const a = h.fuerZyklus(6000, 9338, 10_084);
+    assert.equal(Math.round(a.hausOhneAuto.w ?? -1), 1162);
   });
 });

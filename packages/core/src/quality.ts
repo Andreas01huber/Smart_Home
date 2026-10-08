@@ -18,16 +18,33 @@ export interface StalenessPolicy {
 }
 
 /**
- * Vorgaben je Datenquelle.
- *
- * Die Victron-VRM-Werte sind bewusst großzügig bemessen: Die VRM API ist laut
- * offizieller Doku auf im Mittel ~3 Requests/s begrenzt, und die Loggerdaten
- * einer Installation aktualisieren sich ohnehin deutlich langsamer als eine
- * lokale Messung. Ein 5-Sekunden-Limit wie bei Fronius würde die Quelle
- * dauerhaft fälschlich als gestört melden.
+ * Art der Datenquelle. Die Frischegrenzen hängen am Typ, nicht an der
+ * Connector-ID: Zwei Fronius-Wechselrichter altern gleich, egal wie sie heissen.
  */
-export const DEFAULT_STALENESS_POLICIES: Record<string, StalenessPolicy> = {
-  'fronius-local': {
+export type Quellenart =
+  | 'fronius-solar-api'
+  | 'victron-modbus'
+  | 'victron-mqtt'
+  | 'victron-vrm'
+  | 'tuya-evse';
+
+/**
+ * Vorgaben je Quellenart.
+ *
+ * Lokale Quellen (Fronius Solar API, Victron Modbus) werden alle 2 s abgefragt
+ * und liefern einen Zeitstempel je Antwort; nach 15 s ohne neuen Wert ist etwas
+ * faul. Die Tuya-Cloud meldet Datenpunkte nur bei Änderung — eine untätige
+ * Wallbox hat deshalb legitim alte Zeitstempel; die Grenzen sind bewusst weit.
+ * Die VRM-Werte sind großzügig, weil die Cloud laut Doku auf ~3 Requests/s
+ * begrenzt ist und Loggerdaten ohnehin langsamer kommen.
+ */
+export const STALENESS_BY_TYPE: Readonly<Record<Quellenart, StalenessPolicy>> = {
+  'fronius-solar-api': {
+    expectedIntervalMs: 2_000,
+    staleAfterMs: 15_000,
+    offlineAfterMs: 60_000,
+  },
+  'victron-modbus': {
     expectedIntervalMs: 2_000,
     staleAfterMs: 15_000,
     offlineAfterMs: 60_000,
@@ -42,12 +59,33 @@ export const DEFAULT_STALENESS_POLICIES: Record<string, StalenessPolicy> = {
     staleAfterMs: 300_000,
     offlineAfterMs: 900_000,
   },
+  'tuya-evse': {
+    expectedIntervalMs: 10_000,
+    staleAfterMs: 60_000,
+    offlineAfterMs: 300_000,
+  },
 };
 
-const FALLBACK_POLICY: StalenessPolicy = {
+/**
+ * Für Quellen ohne bekannte Art (Tests, Fixtures). Bewusst dieselben Werte wie
+ * früher für unbekannte IDs, damit sich bestehendes Verhalten nicht ändert.
+ */
+export const FALLBACK_POLICY: StalenessPolicy = {
   expectedIntervalMs: 10_000,
   staleAfterMs: 60_000,
   offlineAfterMs: 300_000,
+};
+
+/**
+ * Bisherige Zuordnung über die Connector-ID — nur noch für Aufrufer, die ihre
+ * Art nicht mitgeben. Neue Connectoren übergeben ihre Policy ausdrücklich.
+ */
+export const DEFAULT_STALENESS_POLICIES: Record<string, StalenessPolicy> = {
+  'fronius-local': STALENESS_BY_TYPE['fronius-solar-api'],
+  'fronius-gen24': STALENESS_BY_TYPE['fronius-solar-api'],
+  'victron-modbus': STALENESS_BY_TYPE['victron-modbus'],
+  'victron-mqtt': STALENESS_BY_TYPE['victron-mqtt'],
+  'victron-vrm': STALENESS_BY_TYPE['victron-vrm'],
 };
 
 export function policyFor(connectorId: ConnectorId): StalenessPolicy {
@@ -63,12 +101,18 @@ export function classifyAge(
   return 'live';
 }
 
-/** Baut eine Provenance und leitet Alter sowie Qualität selbst ab. */
+/**
+ * Baut eine Provenance und leitet Alter sowie Qualität selbst ab.
+ *
+ * @param policy Frischegrenzen der Quelle. Connectoren geben sie nach ihrer
+ *   Art mit (`STALENESS_BY_TYPE`); ohne Angabe gilt die Zuordnung über die ID.
+ */
 export function provenance(
   connectorId: ConnectorId,
   deviceId: string,
   measuredAt: Date,
   now: Date = new Date(),
+  policy: StalenessPolicy = policyFor(connectorId),
 ): Provenance {
   const ageMs = Math.max(0, now.getTime() - measuredAt.getTime());
   return {
@@ -76,9 +120,19 @@ export function provenance(
     deviceId,
     measuredAt,
     ageMs,
-    quality: classifyAge(ageMs, policyFor(connectorId)),
+    quality: classifyAge(ageMs, policy),
   };
 }
+
+/**
+ * Längstes Intervall, das als gemessen integriert wird.
+ *
+ * Gilt für Tagesbilanz und Ladeprotokoll gleichermassen. Ist mehr Zeit seit dem
+ * letzten Messwert vergangen, war dazwischen nachweislich keine Messung — das
+ * ganze Intervall ist dann Lücke, nicht nur der Teil über dieser Grenze.
+ * Sonst gälten nach jedem Ausfall die ersten Sekunden als sicher gemessen.
+ */
+export const MAX_INTEGRATIONSSCHRITT_S = 15;
 
 /** Ist dieser Messpunkt aktuell genug, um als Messung durchzugehen? */
 export function istAktuell(provenance: Provenance): boolean {

@@ -6,6 +6,7 @@ import {
   hashPassword,
   herkunftVon,
   istHttps,
+  vertrauterProxy,
   LoginThrottle,
   parseCookies,
   sessionCookie,
@@ -143,12 +144,12 @@ describe('Herkunft und Protokoll hinter dem Tunnel', () => {
   it('nimmt die Cloudflare-Adresse, nicht die des Tunnels', () => {
     // Sonst hätten alle Anfragen aus dem Internet dieselbe Herkunft, und ein
     // einziger Angreifer würde damit alle anderen aussperren.
-    const h = herkunftVon({ 'cf-connecting-ip': '9.9.9.9' }, '127.0.0.1');
+    const h = herkunftVon({ 'cf-connecting-ip': '9.9.9.9' }, '127.0.0.1', true);
     assert.equal(h, '9.9.9.9');
   });
 
   it('nimmt sonst den ersten Eintrag aus X-Forwarded-For', () => {
-    assert.equal(herkunftVon({ 'x-forwarded-for': '9.9.9.9, 10.0.0.1' }, '127.0.0.1'), '9.9.9.9');
+    assert.equal(herkunftVon({ 'x-forwarded-for': '9.9.9.9, 10.0.0.1' }, '127.0.0.1', true), '9.9.9.9');
   });
 
   it('fällt auf die Verbindungsadresse zurück', () => {
@@ -156,9 +157,25 @@ describe('Herkunft und Protokoll hinter dem Tunnel', () => {
   });
 
   it('erkennt HTTPS nur am Kopf des Tunnels', () => {
-    assert.equal(istHttps({ 'x-forwarded-proto': 'https' }), true);
-    assert.equal(istHttps({ 'x-forwarded-proto': 'https,http' }), true);
-    assert.equal(istHttps({ 'x-forwarded-proto': 'http' }), false);
-    assert.equal(istHttps({}), false);
+    assert.equal(istHttps({ 'x-forwarded-proto': 'https' }, true), true);
+    assert.equal(istHttps({ 'x-forwarded-proto': 'https,http' }, true), true);
+    assert.equal(istHttps({ 'x-forwarded-proto': 'http' }, true), false);
+    assert.equal(istHttps({}, true), false);
+  });
+
+  it('glaubt Weiterleitungsköpfe nur von einem vertrauten Proxy', () => {
+    // Ein Gerät im Heimnetz, das direkt verbindet, darf sich über einen
+    // gefälschten Kopf keine neue Identität für die Anmeldebremse geben.
+    const gefaelscht = { 'x-forwarded-for': '1.2.3.4', 'cf-connecting-ip': '5.6.7.8' };
+    const vomLan = vertrauterProxy('192.168.178.50', ['127.0.0.1', '::1']);
+    assert.equal(vomLan, false);
+    assert.equal(herkunftVon(gefaelscht, '192.168.178.50', vomLan), '192.168.178.50');
+    assert.equal(istHttps({ 'x-forwarded-proto': 'https' }, vomLan), false);
+  });
+
+  it('erkennt den lokalen Tunnel auch in IPv6-Schreibweise', () => {
+    assert.equal(vertrauterProxy('::ffff:127.0.0.1', ['127.0.0.1']), true);
+    assert.equal(vertrauterProxy('::1', ['127.0.0.1', '::1']), true);
+    assert.equal(vertrauterProxy(undefined, ['127.0.0.1']), false);
   });
 });

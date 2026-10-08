@@ -165,6 +165,19 @@ export interface ChargeSession {
    * zusammengeführt wurde. 1 = unverändert.
    */
   readonly teile?: number;
+  /**
+   * Energie und Ladezeit je lokalem Kalendertag.
+   *
+   * Eine Session bleibt ein Ladevorgang, auch über Mitternacht — ihre Energie
+   * gehört aber zu den Tagen, an denen sie geflossen ist. Ältere Sessions haben
+   * das Feld nicht; sie werden in Auswertungen ihrem Starttag zugerechnet und
+   * als Näherung gekennzeichnet.
+   */
+  readonly jeTag?: Readonly<Record<string, {
+    readonly energyWh: number;
+    readonly chargingSeconds: number;
+    readonly split?: EvEnergySplit;
+  }>>;
 }
 
 /** Ein Abschnitt innerhalb einer Ladesession. */

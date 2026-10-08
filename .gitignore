@@ -52,3 +52,12 @@ desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# Notfall-Marker der Sitzungsverwaltung (siehe sitzungen.ts)
+sitzungen-gesperrt.flag
+
+# Ergebnis von npm run discover (enthält lokale Adressen)
+discovery-report.json
+
+# Sicherungen aus npm run sicherung
+sicherungen/

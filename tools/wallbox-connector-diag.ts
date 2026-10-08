@@ -1,14 +1,15 @@
 /** Denselben Connector wie der Server benutzen und wiederholt `read()` aufrufen. */
 import { TuyaEvseConnector } from '@energy/connectors';
-import { loadConfig } from '../apps/server/src/config.ts';
+import { loadConfig, wallboxQuelle } from '../apps/server/src/config.ts';
 
 const config = loadConfig();
-const ev = config.sources.evCharger!;
+const ev = wallboxQuelle(config);
+if (ev === null) throw new Error('Keine Wallbox konfiguriert.');
 const c = new TuyaEvseConnector({
   accessId: ev.accessId ?? '',
   accessSecret: ev.accessSecret ?? '',
   deviceId: ev.deviceId,
-  region: ev.region ?? 'eu',
+  region: ev.region,
   idleIntervalMs: 5000,
   activeIntervalMs: 2000,
 });

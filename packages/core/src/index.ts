@@ -8,4 +8,5 @@ export * from './ev-sessions.ts';
 export * from './ladeleistung.ts';
 export * from './ueberschuss.ts';
 export * from './laderegler.ts';
+export * from './ladeentscheidung.ts';
 export * from './speichergedaechtnis.ts';

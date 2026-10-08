@@ -38,48 +38,149 @@
  */
 export const HALTBARKEIT_MS = 120_000;
 
-export interface HausAnteil {
-  /** Hausverbrauch ohne Auto, in Watt. `null` = nicht bestimmbar. */
-  readonly wattW: number | null;
-  /** Was davon dem Auto zugerechnet wurde. */
-  readonly autoW: number;
-  /** false = aus der gemerkten Grundlast geschätzt, nicht frisch gerechnet. */
-  readonly frisch: boolean;
+/**
+ * Kleine negative Zählerwerte sind Rauschen, grosse ein Messfehler.
+ *
+ * Ein berechneter Hausverbrauch kann durch Rundung der Einzelzähler knapp
+ * unter null fallen; das ist kein Befund und wird auf 0 gesetzt. Deutlich
+ * darunter stimmt an der Bilanz etwas nicht — dann gibt es keinen Wert.
+ */
+const RAUSCHEN_W = 50;
+
+/**
+ * Wie eine Zahl zustande kam.
+ *
+ *   gemessen    direkt aus einem Zähler oder einer stimmigen Differenz zweier
+ *               Messungen
+ *   geschaetzt  aus einer gemerkten Grundlast hergeleitet, weil die aktuellen
+ *               Messungen sich widersprechen — befristet gültig
+ *   unbekannt   es gibt keine belastbare Aussage; `w` ist dann immer `null`
+ */
+export type Wertart = 'gemessen' | 'geschaetzt' | 'unbekannt';
+
+export interface Groesse {
+  readonly w: number | null;
+  readonly art: Wertart;
 }
 
+const UNBEKANNT: Groesse = { w: null, art: 'unbekannt' };
+
+export interface HausAnteil {
+  /** Hauszähler, Auto inklusive. */
+  readonly hausGesamt: Groesse;
+  readonly hausOhneAuto: Groesse;
+  readonly auto: Groesse;
+  /** Nur bei einer Schätzung: worauf sie beruht und wie lange sie gilt. */
+  readonly schaetzung: {
+    readonly grundlastW: number;
+    readonly grundlastAmMs: number;
+    readonly gueltigBisMs: number;
+  } | null;
+}
+
+/** Eine gemerkte, stimmig gemessene Grundlast. */
+export interface Grundlast {
+  readonly w: number;
+  readonly amMs: number;
+}
+
+/** Endlich, und nicht deutlich negativ; kleines Rauschen wird zu 0. */
+function plausibelW(wert: number | null | undefined): number | null {
+  if (typeof wert !== 'number' || !Number.isFinite(wert)) return null;
+  if (wert < -RAUSCHEN_W) return null;
+  return Math.max(0, wert);
+}
+
+/**
+ * Die Aufteilung als reine Rechnung — ohne Gedächtnis, ohne Uhr.
+ *
+ * Grundsatz: Was unbekannt ist, bleibt unbekannt. Ein Hauszähler allein
+ * beweist nicht, welchen Anteil das Auto verursacht; eine fehlende
+ * Wallboxleistung wird deshalb weder zu 0 W noch zu "alles ist Haus".
+ */
+export function teileRein(
+  hausW: number | null,
+  autoW: number | null,
+  jetztMs: number,
+  grundlast: Grundlast | null,
+): HausAnteil {
+  const haus = plausibelW(hausW);
+  const auto = plausibelW(autoW);
+  const hausGesamt: Groesse = haus === null ? UNBEKANNT : { w: haus, art: 'gemessen' };
+
+  // Ohne Zähler weiss man vom Auto trotzdem, was die Wallbox misst — nur
+  // gegengeprüft ist es nicht, und vom Haus weiss man nichts.
+  if (haus === null) {
+    return {
+      hausGesamt,
+      hausOhneAuto: UNBEKANNT,
+      auto: auto === null ? UNBEKANNT : { w: auto, art: 'gemessen' },
+      schaetzung: null,
+    };
+  }
+  if (auto === null) {
+    return { hausGesamt, hausOhneAuto: UNBEKANNT, auto: UNBEKANNT, schaetzung: null };
+  }
+
+  // Stimmig: Das Auto passt in den Zählerwert hinein.
+  if (auto <= haus) {
+    return {
+      hausGesamt,
+      hausOhneAuto: { w: haus - auto, art: 'gemessen' },
+      auto: { w: auto, art: 'gemessen' },
+      schaetzung: null,
+    };
+  }
+
+  // Widerspruch: Die Wallbox meldet mehr, als das ganze Haus verbraucht. Mit
+  // frischer Grundlast lässt sich schätzen — gekennzeichnet und befristet.
+  if (grundlast === null || jetztMs - grundlast.amMs > HALTBARKEIT_MS) {
+    return { hausGesamt, hausOhneAuto: UNBEKANNT, auto: UNBEKANNT, schaetzung: null };
+  }
+  const basis = Math.min(grundlast.w, haus);
+  return {
+    hausGesamt,
+    hausOhneAuto: { w: basis, art: 'geschaetzt' },
+    auto: { w: haus - basis, art: 'geschaetzt' },
+    schaetzung: {
+      grundlastW: grundlast.w,
+      grundlastAmMs: grundlast.amMs,
+      gueltigBisMs: grundlast.amMs + HALTBARKEIT_MS,
+    },
+  };
+}
+
+/**
+ * Das Gedächtnis dazu: eine Aufteilung pro Messzyklus.
+ *
+ * Früher rechnete jede Anzeige selbst nach — jeder offene Browser, jeder
+ * Ereignisstrom und die Bilanz. Weil die Rechnung die Grundlast fortschreibt,
+ * hing ihr Ergebnis davon ab, wie viele Geräte gerade zusahen. Jetzt wird je
+ * Messzeitpunkt genau einmal gerechnet und das Ergebnis für alle aufgehoben.
+ */
 export class Hausverbrauch {
-  private grundlastW: number | null = null;
-  private grundlastAtMs = 0;
+  private grundlast: Grundlast | null = null;
+  private letzterZyklusMs = Number.NEGATIVE_INFINITY;
+  private letzte: HausAnteil | null = null;
 
   /**
-   * Aufteilen, was der Zähler misst.
+   * Die Aufteilung für den Messzeitpunkt `zyklusMs`.
    *
-   * @param hausW   Hausverbrauch samt Auto, aus dem Zähler.
-   * @param autoW   Ladeleistung laut Wallbox; `null`, wenn unbekannt.
-   * @param jetztMs Jetzt-Zeitpunkt.
+   * Derselbe Zeitpunkt liefert immer dasselbe Ergebnis, egal wie oft gefragt
+   * wird. Ein älterer Zeitpunkt wird nur gerechnet, nicht gemerkt — er darf
+   * das Gedächtnis nicht zurückdrehen.
    */
-  teile(hausW: number | null, autoW: number | null, jetztMs: number): HausAnteil {
-    if (hausW === null || !Number.isFinite(hausW)) {
-      return { wattW: null, autoW: 0, frisch: false };
+  fuerZyklus(zyklusMs: number, hausW: number | null, autoW: number | null): HausAnteil {
+    if (zyklusMs === this.letzterZyklusMs && this.letzte !== null) return this.letzte;
+    const anteil = teileRein(hausW, autoW, zyklusMs, this.grundlast);
+    if (zyklusMs < this.letzterZyklusMs) return anteil;
+
+    // Nur eine stimmige Messung beider Grössen ergibt eine neue Grundlast.
+    if (anteil.hausOhneAuto.art === 'gemessen' && anteil.auto.art === 'gemessen') {
+      this.grundlast = { w: anteil.hausOhneAuto.w ?? 0, amMs: zyklusMs };
     }
-    const haus = Math.max(0, hausW);
-    const auto = autoW !== null && Number.isFinite(autoW) ? Math.max(0, autoW) : 0;
-
-    // Stimmig: Das Auto passt in den Zählerwert hinein. Das ist der Normalfall,
-    // und er liefert die Grundlast frei Haus.
-    if (auto <= haus) {
-      this.grundlastW = haus - auto;
-      this.grundlastAtMs = jetztMs;
-      return { wattW: haus - auto, autoW: auto, frisch: true };
-    }
-
-    // Widerspruch. Die gemerkte Grundlast einsetzen — aber nie mehr, als der
-    // Zähler überhaupt hergibt.
-    const haltbar =
-      this.grundlastW !== null && jetztMs - this.grundlastAtMs <= HALTBARKEIT_MS;
-    if (!haltbar) return { wattW: null, autoW: 0, frisch: false };
-
-    const basis = Math.min(this.grundlastW ?? 0, haus);
-    return { wattW: basis, autoW: haus - basis, frisch: false };
+    this.letzterZyklusMs = zyklusMs;
+    this.letzte = anteil;
+    return anteil;
   }
 }

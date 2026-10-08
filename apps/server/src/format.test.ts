@@ -50,8 +50,8 @@ describe('Wallbox: Einstellung und Messung auseinanderhalten', () => {
     // Frueher stand hier "16 A ~ 11,1 kW" - eine aus 400 V gerechnete Zahl, die
     // der gemessenen Ladeleistung in der Nachbarkachel widersprach. Was ein
     // Ampere an dieser Anlage wirklich bedeutet, steht jetzt gemessen daneben.
-    assert.equal(formatLadestrom({ maxCurrentA: 15, regelung: { maxA: 16 } }), '15 A von 16 A');
-    assert.equal(formatLadestrom({ maxCurrentA: 6, regelung: { maxA: 16 } }), '6 A von 16 A');
+    assert.equal(formatLadestrom({ maxCurrentA: 15, regelung: { maxA: 16 } }), '15 A · Grenze 16 A');
+    assert.equal(formatLadestrom({ maxCurrentA: 6, regelung: { maxA: 16 } }), '6 A · Grenze 16 A');
     // An der Haushaltsdose zaehlt die niedrigere Dauergrenze, nicht die des
     // Geraets: "10 A von 16 A" waere ein Versprechen auf sechs Ampere, die es
     // dort nie geben wird.
@@ -60,7 +60,7 @@ describe('Wallbox: Einstellung und Messung auseinanderhalten', () => {
         maxCurrentA: 10,
         regelung: { maxA: 16, haushaltMaxA: 10, anschluss: { phasen: 1 } },
       }),
-      '10 A von 10 A',
+      '10 A · Grenze 10 A',
     );
   });
 

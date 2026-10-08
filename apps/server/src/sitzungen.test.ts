@@ -8,7 +8,7 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -195,6 +195,43 @@ describe('Sitzungen', () => {
     assert.equal(s.pruefe(keks), null, 'abgemeldete Sitzung galt weiter');
     const nachNeustart = new Sitzungsspeicher(pfad, GEHEIM);
     assert.equal(nachNeustart.pruefe(keks), null, 'die Abmeldung überlebte den Neustart nicht');
+  });
+});
+
+describe('Sitzungswiderruf bei Doppelfehler', () => {
+  it('Speichern UND Löschen scheitern: Notfall-Marker sperrt auch nach dem Neustart', () => {
+    // Die Sitzungsdatei wird durch ein (nicht leeres) Verzeichnis ersetzt:
+    // Weder das Überschreiben noch das Löschen kann dann gelingen.
+    const basis = mkdtempSync(join(tmpdir(), 'sitzung-doppel-'));
+    ordner.push(basis);
+    const daten = join(basis, 'data');
+    mkdirSync(daten);
+    const pfad = join(daten, 'sitzungen.json');
+    const marker = join(basis, 'sitzungen-gesperrt.flag');
+    const s = new Sitzungsspeicher(pfad, GEHEIM, marker);
+    const keks = s.neu('u1', 'iPhone', '10.0.0.5');
+    assert.ok(s.pruefe(keks));
+
+    rmSync(pfad, { force: true });
+    mkdirSync(join(pfad, 'blockiert'), { recursive: true });
+    s.beende(keks.split('.')[0] ?? '');
+
+    assert.equal(s.pruefe(keks), null, 'im laufenden Betrieb muss gesperrt sein');
+    assert.deepEqual(s.betriebszustand(), { gesperrt: true, notfallMarker: true });
+
+    // "Neustart" nach Reparatur des Datenverzeichnisses mit der alten Datei:
+    // Die widerrufene Sitzung darf NICHT wieder gelten.
+    rmSync(pfad, { recursive: true, force: true });
+    writeFileSync(pfad, JSON.stringify({ version: 1, sitzungen: [{
+      id: keks.split('.')[0], benutzerId: 'u1', angelegtAm: Date.now(), letzterZugriff: Date.now(),
+      ablauf: Date.now() + 3_600_000, keksErneuert: Date.now(), geraet: 'iPhone', herkunft: '10.0.0.5',
+    }] }));
+    const nachher = new Sitzungsspeicher(pfad, GEHEIM, marker);
+    assert.equal(nachher.pruefe(keks), null, 'die widerrufene Sitzung lebte wieder auf');
+
+    // Der erste erfolgreiche Schreiblauf räumt den Marker weg.
+    nachher.neu('u2', 'Android', '10.0.0.6');
+    assert.equal(existsSync(marker), false);
   });
 });
 

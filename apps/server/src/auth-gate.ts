@@ -20,6 +20,7 @@ import {
   clearCookie,
   herkunftVon,
   istHttps,
+  vertrauterProxy,
   parseCookies,
   sicheresZiel,
   sessionCookie,
@@ -27,14 +28,13 @@ import {
   type LoginThrottle,
 } from './auth.ts';
 import type { Benutzer, Kontenspeicher } from './benutzer.ts';
-import { readBody } from './http-util.ts';
+import { KEIN_CACHE, leiteWeiter, readBody, sendeSeite } from './http-util.ts';
 import { loginPage } from './login-page.ts';
 import { geraetName, type Sitzungsspeicher } from './sitzungen.ts';
 
 /** Ohne Sitzung erreichbar — mehr braucht die Anmeldeseite nicht. */
 const OFFEN = new Set(['/favicon-64.png', '/apple-touch-icon.png']);
 
-const KEIN_CACHE = 'no-store, no-cache, must-revalidate';
 
 /** Nach einer Woche wird der Keks im Browser erneuert, siehe `Sitzung.keksErneuert`. */
 const KEKS_AUFFRISCHEN_MS = 7 * 24 * 60 * 60 * 1000;
@@ -43,6 +43,8 @@ export interface AuthKontext {
   readonly konten: Kontenspeicher;
   readonly sitzungen: Sitzungsspeicher;
   readonly throttle: LoginThrottle;
+  /** Adressen, deren Weiterleitungsköpfe geglaubt werden. */
+  readonly vertrauteProxies?: readonly string[];
 }
 
 export interface GateErgebnis {
@@ -56,26 +58,6 @@ export interface GateErgebnis {
 
 const DURCH: GateErgebnis = { weiter: false };
 
-function sendeSeite(response: ServerResponse, status: number, html: string): void {
-  response.writeHead(status, {
-    'content-type': 'text/html; charset=utf-8',
-    'cache-control': KEIN_CACHE,
-    // Die Anmeldeseite gehört in keinen fremden Rahmen: Ein unsichtbares
-    // iframe auf einer fremden Seite wäre sonst ein Weg, Klicks abzugreifen.
-    'x-frame-options': 'DENY',
-    'referrer-policy': 'same-origin',
-  });
-  response.end(html);
-}
-
-function leiteWeiter(response: ServerResponse, ziel: string, cookie?: string): void {
-  response.writeHead(302, {
-    location: ziel,
-    'cache-control': KEIN_CACHE,
-    ...(cookie === undefined ? {} : { 'set-cookie': cookie }),
-  });
-  response.end();
-}
 
 export function authGate(
   request: IncomingMessage,
@@ -84,7 +66,8 @@ export function authGate(
   kontext: AuthKontext,
 ): GateErgebnis {
   const { konten, sitzungen, throttle } = kontext;
-  const sicher = istHttps(request.headers);
+  const vomProxy = vertrauterProxy(request.socket.remoteAddress, kontext.vertrauteProxies ?? []);
+  const sicher = istHttps(request.headers, vomProxy);
   const kekse = parseCookies(request.headers.cookie);
   const token = kekse[SESSION_COOKIE];
 
@@ -121,7 +104,7 @@ export function authGate(
     }
 
     if (request.method === 'POST') {
-      const herkunft = herkunftVon(request.headers, request.socket.remoteAddress);
+      const herkunft = herkunftVon(request.headers, request.socket.remoteAddress, vomProxy);
       const sperre = throttle.gesperrtFuer(herkunft);
       if (sperre > 0) {
         const minuten = Math.ceil(sperre / 60_000);

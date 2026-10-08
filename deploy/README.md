@@ -84,6 +84,12 @@ erreichbar unter seiner Tailscale-Adresse. Kein Router-Eingriff nötig.
 
 - Es wird **nichts** offen ins Internet gestellt. Zugriff nur über den privaten
   VPN-Tunnel (nur deine eigenen Geräte).
-- Die App hat noch **kein Passwort-Login** — deshalb bewusst der VPN-Weg statt
-  einer öffentlichen Adresse. Ein Login kann später ergänzt werden, falls du die
-  App doch öffentlich erreichbar machen willst.
+- Die App verlangt eine **Anmeldung** (Konten mit Passwort, eingerichtet mit
+  `npm run passwort`, siehe INSTALLATION.md). Ohne Konto startet der Server nur,
+  wenn `allowUnauthenticatedAccess: true` ausdrücklich gesetzt ist. Der VPN-Weg
+  bleibt trotzdem die empfohlene Variante: zwei Schranken statt einer.
+- Für Überwachung und Deploy gibt es `/health`. Es ist ohne Anmeldung
+  erreichbar, liefert aber keine Messwerte, Gerätenamen oder Adressen — nur, ob
+  der Prozess läuft, ob die Messung ihre Runden dreht und ob die Datenspeicher
+  schreiben können. Einzelne ausgefallene Geräte machen den Dienst nicht
+  „krank“; ihr Zustand steht (angemeldet) in der App.

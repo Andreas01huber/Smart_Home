@@ -18,7 +18,8 @@
     "discover": "tsx packages/discovery/src/cli.ts",
     "typecheck": "tsc --build",
     "test": "tsx --test \"packages/*/src/**/*.test.ts\" \"apps/*/src/**/*.test.ts\"",
-    "ueberschuss": "tsx tools/pruefe-ueberschuss.ts"
+    "ueberschuss": "tsx tools/pruefe-ueberschuss.ts",
+    "sicherung": "tsx tools/sicherung.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

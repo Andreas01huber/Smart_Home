@@ -12,8 +12,10 @@
  * Schuko-Dose sind kein Drama, aber es ist vermeidbar — also wird es vermieden.
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { writeJsonAtomic } from './persist.ts';
 
 export interface Dosengedaechtnis {
   readonly phasen: 1 | 3;
@@ -48,7 +50,8 @@ export function ladeDose(datenverzeichnis: string): Dosengedaechtnis | null {
 
 export function merkeDose(datenverzeichnis: string, dose: Dosengedaechtnis): void {
   try {
-    writeFileSync(join(datenverzeichnis, DATEI), JSON.stringify(dose, null, 2), 'utf8');
+    // Atomar wie alle anderen Bestände — und damit im Schreibstatus sichtbar.
+    writeJsonAtomic(join(datenverzeichnis, DATEI), dose, 2);
   } catch {
     // Nicht schreiben zu können darf die Regelung nicht anhalten.
   }

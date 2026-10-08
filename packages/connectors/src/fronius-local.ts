@@ -14,12 +14,18 @@ import {
   splitBatteryPower,
   splitGridPower,
   storedEnergyWh,
+  STALENESS_BY_TYPE,
   type BatterySnapshot,
   type ConnectorReading,
+  type EnergyCounters,
+  type EnergyMetric,
   type PowerMetric,
 } from '@energy/core';
 
 import type { ConnectorDiagnostics, EnergyConnector } from './types.ts';
+
+/** Frischegrenzen der Solar API — je Art, nicht je Gerät. */
+const POLICY = STALENESS_BY_TYPE['fronius-solar-api'];
 
 export interface FroniusLocalOptions {
   readonly host: string;
@@ -73,9 +79,14 @@ export class FroniusLocalConnector implements EnergyConnector {
   async read(): Promise<ConnectorReading> {
     const startedAt = Date.now();
     try {
-      const [powerFlow, storage] = await Promise.all([
+      const [powerFlow, storage, meter] = await Promise.all([
         this.getJson('/solar_api/v1/GetPowerFlowRealtimeData.fcgi'),
         this.getJson('/solar_api/v1/GetStorageRealtimeData.cgi?Scope=System').catch(
+          () => null,
+        ),
+        // Zählerstände des Smart Meters. Fehlt er (Symo ohne Meter), bleibt
+        // das Ergebnis leer — kein Fehler.
+        this.getJson('/solar_api/v1/GetMeterRealtimeData.cgi?Scope=System').catch(
           () => null,
         ),
       ]);
@@ -84,7 +95,7 @@ export class FroniusLocalConnector implements EnergyConnector {
       this.lastSuccessAt = new Date();
       this.lastError = null;
 
-      const reading = this.toReading(powerFlow, storage);
+      const reading = this.toReading(powerFlow, storage, meter);
       this.missingMetrics = ALL_METRICS.filter(
         (key) => reading[key] === null || reading[key]?.valueW === null,
       );
@@ -120,7 +131,7 @@ export class FroniusLocalConnector implements EnergyConnector {
 
   // --- intern ------------------------------------------------------------
 
-  private toReading(powerFlow: unknown, storage: unknown): ConnectorReading {
+  private toReading(powerFlow: unknown, storage: unknown, meterData: unknown): ConnectorReading {
     const site = pick(dataOf(powerFlow), 'Site');
     const measuredAt = headTimestamp(powerFlow) ?? new Date();
 
@@ -138,7 +149,7 @@ export class FroniusLocalConnector implements EnergyConnector {
 
     const meter = (deviceId: string, valueW: number | null): PowerMetric => ({
       valueW,
-      provenance: provenance(this.id, deviceId, measuredAt),
+      provenance: provenance(this.id, deviceId, measuredAt, new Date(), POLICY),
     });
 
     return {
@@ -149,6 +160,54 @@ export class FroniusLocalConnector implements EnergyConnector {
       gridImportW: meter('site', grid.importW),
       gridExportW: meter('site', grid.exportW),
       batteries,
+      counters: this.toCounters(site, batteries.length > 0, meterData, measuredAt),
+    };
+  }
+
+  /**
+   * Zählerstände des Geräts.
+   *
+   *  - Netz: `EnergyReal_WAC_Sum_Consumed/Produced` des Smart Meters, sofern er
+   *    am Netzpunkt sitzt (`Meter_Location_Current === 0`). Am Netzpunkt ist
+   *    "consumed" Bezug und "produced" Einspeisung (Doku, "Meter Location
+   *    Dependend Directions").
+   *  - PV: `Site.E_Total` — aber nur bei Wechselrichtern OHNE Speicher. Bei
+   *    einem Hybrid ist E_Total die AC-Energie und enthält die Entladung des
+   *    Speichers; das wäre keine PV-Erzeugung. Dann bleibt der PV-Zähler leer,
+   *    und die Tagessumme kommt weiter aus der Leistungsintegration.
+   */
+  private toCounters(
+    site: Record<string, unknown> | null,
+    hybrid: boolean,
+    meterData: unknown,
+    measuredAt: Date,
+  ): EnergyCounters {
+    const metric = (deviceId: string, valueWh: number | null): EnergyMetric | null =>
+      valueWh === null || valueWh < 0
+        ? null
+        : { valueWh, provenance: provenance(this.id, deviceId, measuredAt, new Date(), POLICY) };
+
+    const eTotal = hybrid ? null : numberOrNull(site?.['E_Total']);
+
+    let importWh: number | null = null;
+    let exportWh: number | null = null;
+    let meterId = 'meter';
+    const data = dataOf(meterData);
+    if (data !== null) {
+      for (const [id, entry] of Object.entries(data)) {
+        if (!isRecord(entry)) continue;
+        if (numberOrNull(entry['Meter_Location_Current']) !== 0) continue;
+        importWh = numberOrNull(entry['EnergyReal_WAC_Sum_Consumed']);
+        exportWh = numberOrNull(entry['EnergyReal_WAC_Sum_Produced']);
+        meterId = `meter:${id}`;
+        break;
+      }
+    }
+
+    return {
+      solarWh: metric('site', eTotal),
+      gridImportWh: metric(meterId, importWh),
+      gridExportWh: metric(meterId, exportWh),
     };
   }
 
@@ -189,7 +248,7 @@ export class FroniusLocalConnector implements EnergyConnector {
         usableCapacityWh: usableWh,
         ratedCapacityWh: ratedWh,
         state: power.state,
-        provenance: provenance(this.id, `${this.id}:${deviceId}`, measuredAt),
+        provenance: provenance(this.id, `${this.id}:${deviceId}`, measuredAt, new Date(), POLICY),
       });
     }
     return batteries;

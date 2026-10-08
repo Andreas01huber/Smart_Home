@@ -6,7 +6,7 @@
 import { resolveSnapshot, type ConnectorReading, type ResolutionResult } from '@energy/core';
 import type { EnergyConnector, ConnectorDiagnostics } from '@energy/connectors';
 
-import type { AppConfig } from './config.ts';
+import { speicherquellen, type AppConfig } from './config.ts';
 
 export interface EngineState {
   readonly resolution: ResolutionResult;
@@ -26,7 +26,12 @@ export class EnergyEngine {
   constructor(
     private readonly connectors: readonly EnergyConnector[],
     private readonly config: AppConfig,
-  ) {}
+    private readonly quellenFristMs = QUELLEN_FRIST_MS,
+  ) {
+    // Was laut Konfiguration einen Speicher liefern soll, wird von Anfang an
+    // erwartet — nicht erst, nachdem es einmal geliefert hat.
+    for (const id of speicherquellen(config)) this.bekannteSpeicherquellen.add(id);
+  }
 
   start(): void {
     if (this.timer !== null) return;
@@ -59,8 +64,11 @@ export class EnergyEngine {
       // verworfen — auch die Werte der Geräte, die einwandfrei geantwortet
       // haben. Deshalb allSettled: Was da ist, wird verwendet, der Rest fehlt
       // und wird als fehlend ausgewiesen.
+      // Jede Quelle hat eine absolute Frist. Eine Zusage, die nie endet, darf
+      // den Zyklus nicht festhalten — sonst stauen sich keine neuen Polls auf,
+      // es gibt schlicht keine mehr (pollLaeuft bliebe für immer gesetzt).
       const settled = await Promise.allSettled(
-        this.connectors.map((connector) => connector.read()),
+        this.connectors.map((connector) => mitFrist(connector.read(), this.quellenFristMs, connector.id)),
       );
       const readings: ConnectorReading[] = [];
       settled.forEach((result, index) => {
@@ -76,16 +84,6 @@ export class EnergyEngine {
 
       for (const reading of readings) {
         for (const battery of reading.batteries) this.bekannteSpeicherquellen.add(battery.provenance.connectorId);
-      }
-      const quellen = [
-        ['fronius-local', this.config.sources.fronius],
-        ['fronius-gen24', this.config.sources.froniusGen24],
-        ['victron-modbus', this.config.sources.victron],
-      ] as const;
-      for (const [id, quelle] of quellen) {
-        if (quelle?.enabled && (quelle.batteryDisplayName || (quelle.usableCapacityWh ?? 0) > 0)) {
-          this.bekannteSpeicherquellen.add(id);
-        }
       }
       const resolution = resolveSnapshot(readings, this.config.sourceMapping, {
         expectedBatterySources: [...this.bekannteSpeicherquellen],
@@ -126,4 +124,17 @@ export class EnergyEngine {
       this.pollLaeuft = false;
     }
   }
+}
+
+/** Längste Wartezeit auf eine einzelne Quelle in einem Messzyklus. */
+const QUELLEN_FRIST_MS = 30_000;
+
+function mitFrist<T>(zusage: Promise<T>, ms: number, name: string): Promise<T> {
+  let frist: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    zusage,
+    new Promise<never>((_, nein) => {
+      frist = setTimeout(() => nein(new Error(`${name}: keine Antwort binnen ${ms} ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(frist));
 }

@@ -23,7 +23,7 @@ import {
 } from '@energy/core';
 import { FroniusLocalConnector, VictronModbusConnector, TuyaEvseConnector } from '@energy/connectors';
 
-import { ladeanschlussAus, loadConfig } from '../apps/server/src/config.ts';
+import { geraetMitId, ladeanschlussAus, loadConfig, wallboxQuelle } from '../apps/server/src/config.ts';
 import { ladeDose } from '../apps/server/src/wallbox-speicher.ts';
 
 const config = loadConfig();
@@ -50,24 +50,24 @@ const gedaechtnis = gedaechtnisAusMesswerten(
 
 // ── Geräte einmal lesen ────────────────────────────────────────────────────
 const gen24 = new FroniusLocalConnector({
-  host: config.sources.froniusGen24!.host,
+  host: geraetMitId(config, 'fronius-gen24')!.host,
   connectorId: 'fronius-gen24',
   batteryDisplayName: 'Kleiner Speicher',
 });
 const symo = new FroniusLocalConnector({
-  host: config.sources.fronius!.host,
+  host: geraetMitId(config, 'fronius-local')!.host,
   connectorId: 'fronius-local',
 });
 const victron = new VictronModbusConnector({
-  host: config.sources.victron!.host,
+  host: geraetMitId(config, 'victron-modbus')!.host,
   connectorId: 'victron-modbus',
   batteryDisplayName: 'Grosser Speicher',
 });
 const wallbox = new TuyaEvseConnector({
-  deviceId: config.sources.evCharger!.deviceId,
-  accessId: config.sources.evCharger!.accessId ?? '',
-  accessSecret: config.sources.evCharger!.accessSecret ?? '',
-  region: config.sources.evCharger!.region ?? 'eu',
+  deviceId: wallboxQuelle(config)!.deviceId,
+  accessId: wallboxQuelle(config)!.accessId ?? '',
+  accessSecret: wallboxQuelle(config)!.accessSecret ?? '',
+  region: wallboxQuelle(config)!.region,
 });
 
 // Die Wallbox zweimal lesen. Der erste Aufruf eines frisch gebauten Adapters

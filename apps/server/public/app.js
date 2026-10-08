@@ -14,7 +14,9 @@ import {
   formatLadestrom, formatLadeleistung, dosenText, umsteckText,
 } from './format.js';
 import { buildScene, fitScene, createSkyGate, sceneViewBox, pickSceneLayout } from './scene.js';
-import { bindeLadestromUebernahme, sendeLadebefehl } from './ev-bedienung.js';
+import { befehlsfolge, bindeLadestromBestaetigung, ladezustand, sendeLadebefehl } from './ev-bedienung.js';
+import { ApiFehler, holeJson, istUeberholt, letzteAnfrage } from './api.js';
+import { pruefeTarif, TARIF_GRENZEN } from './tarif-regeln.js';
 
 // ── Abgelaufene Sitzung ───────────────────────────────────────────────
 /**
@@ -137,17 +139,28 @@ const THEME_MODES = [
 ];
 
 function currentThemeMode() {
-  const saved = localStorage.getItem('energie-theme');
+  let saved = null;
+  try { saved = localStorage.getItem('energie-theme'); } catch { /* privater Modus */ }
   return saved === 'light' || saved === 'dark' ? saved : 'auto';
+}
+
+/**
+ * „Automatisch“ muss das Attribut selbst setzen: Das Stylesheet kennt nur
+ * `data-theme='dark'`, keine Media-Query. Vorher blieb die App im
+ * Automatikmodus auch bei dunklem System immer hell.
+ */
+function setzeSystemThema() {
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.setAttribute('data-theme', 'dark');
+  else document.documentElement.removeAttribute('data-theme');
 }
 
 function applyTheme(mode) {
   if (mode === 'auto') {
-    document.documentElement.removeAttribute('data-theme');
-    localStorage.removeItem('energie-theme');
+    setzeSystemThema();
+    try { localStorage.removeItem('energie-theme'); } catch { /* ohne Speicher bleibt es bei Automatisch */ }
   } else {
     document.documentElement.setAttribute('data-theme', mode);
-    localStorage.setItem('energie-theme', mode);
+    try { localStorage.setItem('energie-theme', mode); } catch { /* gilt dann nur bis zum Neuladen */ }
   }
   // Farben kommen aus CSS-Variablen — die von JS gezeichneten Teile (Fluss,
   // Diagramm, Legende) müssen deshalb neu gezeichnet werden.
@@ -166,11 +179,11 @@ function initTheme() {
 
 /** Nur anwenden, ohne neu zu zeichnen — für den Start vor dem ersten Render. */
 function applyThemeFromStorage() {
-  const saved = localStorage.getItem('energie-theme');
+  const saved = currentThemeMode();
   if (saved === 'light' || saved === 'dark') {
     document.documentElement.setAttribute('data-theme', saved);
   } else {
-    document.documentElement.removeAttribute('data-theme');
+    setzeSystemThema();
   }
 }
 
@@ -395,10 +408,11 @@ const FLOW_MIN_W = 40;
  * "Verbrauch", und die Zeile bleibt ruhig.
  */
 function hausNotiz(d) {
-  const ohne = d?.hausOhneAuto?.valueW;
-  const auto = d?.hausOhneAuto?.autoAbgezogenW ?? 0;
-  if (ohne == null || auto <= FLOW_MIN_W) return 'Verbrauch';
-  return formatPower(ohne) + ' ohne Auto';
+  const h = d?.hausOhneAuto;
+  const auto = h?.autoAbgezogenW;
+  if (h?.valueW == null || auto == null || auto <= FLOW_MIN_W) return 'gesamt inkl. Auto';
+  // Eine Schätzung aus der Grundlast trägt ihr Zeichen.
+  return (h.art === 'geschaetzt' ? '≈ ' : '') + formatPower(h.valueW) + ' ohne Auto';
 }
 
 // ── Ansicht des Energieflusses: Diagramm oder Haus ────────────────────
@@ -548,7 +562,7 @@ function renderScene(d) {
   // Werte rund um das Haus, jeweils am zugehörigen Gerät angebunden
   setF(svg, 'sc-pv', d.solar.quality === 'offline' ? 'keine Daten' : formatPower(pv));
   setF(svg, 'sc-house', formatPower(house));
-  setF(svg, 'sc-grid', formatPower(Math.max(imp, exp)));
+  setF(svg, 'sc-grid', formatPower(netzfluss(d).w));
   setF(svg, 'sc-bat1', b1 ? formatSoc(displaySoc(b1)) : '—');
   setF(svg, 'sc-bat2', b2 ? formatSoc(displaySoc(b2)) : '—');
   // Kurz halten: In der Szene ist wenig Platz, die Langform steht in der Karte.
@@ -624,9 +638,9 @@ function renderDiagram(d) {
   const L = currentLayout;
   const pvActive = (pv ?? 0) > FLOW_MIN_W;
   renderNode('node-pv', 'inverter', d.solar.quality === 'offline' ? 'keine Daten' : formatPower(pv), 'PV', 'Erzeugung', L.nodes.pv.pos, cssVar('--solar'), L.nodes.pv.r);
-  renderNode('node-house', 'home', formatPower(house), 'Haus', 'Verbrauch', 'below', cssVar('--house'), L.house.r);
-  const gridSub = Math.max(imp, exp) <= FLOW_MIN_W ? 'Ausgeglichen' : imp > exp ? 'Netzbezug' : 'Einspeisung';
-  renderNode('node-grid', 'grid', formatPower(Math.max(imp, exp)), 'Stromnetz', gridSub, L.nodes.grid.pos, cssVar('--grid'), L.nodes.grid.r);
+  renderNode('node-house', 'home', formatPower(house), 'Haus', 'gesamt inkl. Auto', 'below', cssVar('--house'), L.house.r);
+  const gridSub = netzfluss(d).wort;
+  renderNode('node-grid', 'grid', formatPower(netzfluss(d).w), 'Stromnetz', gridSub, L.nodes.grid.pos, cssVar('--grid'), L.nodes.grid.r);
   if (b1) renderNode('node-bat1', batteryIcon(b1.source), formatSoc(displaySoc(b1)), b1.displayName, batState(b1), L.nodes.bat1.pos, cssVar('--battery'), L.nodes.bat1.r);
   else renderNode('node-bat1', 'batteryFronius', '—', 'Kleiner Speicher', 'nicht verbunden', L.nodes.bat1.pos, cssVar('--battery'), L.nodes.bat1.r);
   if (b2) renderNode('node-bat2', batteryIcon(b2.source), formatSoc(displaySoc(b2)), b2.displayName, batState(b2), L.nodes.bat2.pos, cssVar('--battery'), L.nodes.bat2.r);
@@ -786,22 +800,40 @@ function kpiTile(label, value, unit, accent, sub, tip) {
       ${sub ? `<span class="kpi-sub">${esc(sub)}</span>` : ''}
     </div>`;
 }
+/**
+ * Netzfluss als Wort und Zahl.
+ *
+ * Bei 0 W heisst es "Ausgeglichen" — "0 W Bezug" behauptete eine Richtung, die
+ * es nicht gibt. Unbekannt bleibt unbekannt.
+ */
+function netzfluss(d) {
+  const gi = d.gridImport?.valueW, ge = d.gridExport?.valueW;
+  if (gi == null || ge == null) return { w: null, wort: 'unbekannt' };
+  if (ge > gi && ge >= 1) return { w: ge, wort: 'Einspeisung' };
+  if (gi >= 1) return { w: gi, wort: 'Bezug' };
+  return { w: 0, wort: 'Ausgeglichen' };
+}
+
 function renderKpis(d, today) {
-  const net = d.storageAggregate?.netPowerW ?? 0;
-  const gi = d.gridImport.valueW ?? 0, ge = d.gridExport.valueW ?? 0;
+  const agg = d.storageAggregate;
+  const net = agg?.netPowerW ?? null;
+  const netz = netzfluss(d);
   const pvP = formatPowerParts(d.solar.valueW);
   const houseP = formatPowerParts(d.house.valueW);
-  const batP = formatPowerParts(Math.abs(net));
-  const gridP = formatPowerParts(Math.max(gi, ge));
-  const aut = today?.derived?.autarkyPercent;
-  const sc = today?.derived?.selfConsumptionPercent;
+  const batP = formatPowerParts(net === null ? null : Math.abs(net));
+  const gridP = formatPowerParts(netz.w);
+  const aut = quoteTeile(today?.derived?.autarkyPercent, today?.derived?.autarkyStatus);
+  const sc = quoteTeile(today?.derived?.selfConsumptionPercent, today?.derived?.selfConsumptionStatus);
+  const batSub = net === null
+    ? (agg && agg.verfuegbar < agg.erwartet ? `${agg.verfuegbar} von ${agg.erwartet} erreichbar` : 'unbekannt')
+    : net > 40 ? 'lädt' : net < -40 ? 'entlädt' : 'bereit';
   el('kpi-strip').innerHTML =
     kpiTile('PV jetzt', pvP.value, pvP.unit, 'solar') +
-    kpiTile('Haus', houseP.value, houseP.unit, 'house') +
-    kpiTile('Batterie', batP.value, batP.unit, 'battery', net > 40 ? 'lädt' : net < -40 ? 'entlädt' : 'bereit') +
-    kpiTile('Netz', gridP.value, gridP.unit, 'grid', ge > gi ? 'Einspeisung' : 'Bezug') +
-    kpiTile('Autarkie heute', aut === null || aut === undefined ? '—' : Math.round(aut), aut === null || aut === undefined ? '' : '%', 'battery', '', 'Anteil Ihres Stromverbrauchs, der durch die eigene Anlage gedeckt wurde.') +
-    kpiTile('Eigenverbrauch', sc === null || sc === undefined ? '—' : Math.round(sc), sc === null || sc === undefined ? '' : '%', 'solar', '', 'Anteil des erzeugten Solarstroms, den Sie selbst genutzt haben.');
+    kpiTile('Haus gesamt', houseP.value, houseP.unit, 'house', 'inkl. Auto') +
+    kpiTile('Speicher', batP.value, batP.unit, 'battery', batSub) +
+    kpiTile('Netz', gridP.value, gridP.unit, 'grid', netz.wort) +
+    kpiTile('Autarkie heute', aut.value, aut.unit, 'battery', aut.hinweis, 'Anteil des Verbrauchs, der nicht aus dem Netz kam.') +
+    kpiTile('Eigenverbrauch', sc.value, sc.unit, 'solar', sc.hinweis, 'Anteil des Solarstroms, der nicht eingespeist wurde.');
 }
 
 // ── JETZT grid ────────────────────────────────────────────────────────
@@ -890,7 +922,9 @@ function buildNow(d) {
     `<div class="breakdown-row"><span><img class="inv-mini" src="${ICON.inverter}" alt="" />${esc(inv.name)}</span><b data-f="inv-${idx}"></b></div>`).join('');
   const house = formatPowerParts(d.house.valueW);
   const agg = d.storageAggregate;
-  const hasAgg = !!(agg && agg.socPercent !== null);
+  // Die Summenkarte gibt es, sobald mehr als ein Speicher erwartet wird — auch
+  // wenn einer fehlt. Dann sagt sie genau das, statt still zu verschwinden.
+  const hasAgg = !!(agg && agg.erwartet > 1);
   const g = formatPowerParts(0);
 
   const cards = [];
@@ -903,7 +937,7 @@ function buildNow(d) {
     </div>`);
   cards.push(`
     <div class="card house">
-      <div class="card-head">${cardIconImg('home')}<h3>Hausverbrauch</h3></div>
+      <div class="card-head">${cardIconImg('home')}<h3>Haus gesamt inkl. Auto</h3></div>
       <p class="value"><span data-f="house-value">${house.value}</span><span class="unit" data-f="house-unit">${house.unit}</span></p>
       <p class="sub" data-f="house-sub"></p>
       <p data-f="house-meta" class="${metaClass(d.house.quality)}"></p>
@@ -916,8 +950,8 @@ function buildNow(d) {
         <p class="value" data-f="agg-value"></p>
         <div class="bat-visual"><div class="bat-body"><div class="bat-fill" data-f="agg-fill" style="width:0%"></div></div></div>
         <div class="breakdown">
-          <div class="breakdown-row"><span>Gespeichert</span><b data-f="agg-stored"></b></div>
-          <div class="breakdown-row"><span>Kapazität</span><b data-f="agg-cap"></b></div>
+          <div class="breakdown-row"><span data-f="agg-stored-label">Gespeichert</span><b data-f="agg-stored"></b></div>
+          <div class="breakdown-row"><span data-f="agg-cap-label">Kapazität</span><b data-f="agg-cap"></b></div>
         </div>
         <p class="meta" data-f="agg-meta"></p>
       </div>`);
@@ -941,15 +975,12 @@ function buildNow(d) {
       <div class="breakdown">
         <div class="breakdown-row"><span>Fahrzeug</span><b data-f="ev-plug">—</b></div>
         <div class="breakdown-row"><span>Akkustand</span><b data-f="ev-soc">—</b></div>
-        <div class="breakdown-row"><span>Lädt gerade mit</span><b data-f="ev-power">—</b></div>
         <div class="breakdown-row"><span>Ladevorgang</span><b data-f="ev-session">—</b></div>
-        <div class="breakdown-row"><span>Gesamt geladen</span><b data-f="ev-total">—</b></div>
-        <div class="breakdown-row"><span>Max. Ladestrom</span><b data-f="ev-cur">—</b></div>
-        <div class="breakdown-row"><span>Temperatur</span><b data-f="ev-temp">—</b></div>
+        <div class="breakdown-row"><span>Eingestellt</span><b data-f="ev-cur">—</b></div>
       </div>
       <div class="card-actions">
         <span class="card-more">Details ansehen ›</span>
-        <button class="connect-btn" id="ev-connect" type="button" title="Nur die Datenverbindung zum Ladegerät herstellen — startet keinen Ladevorgang">Verbinden</button>
+        <button class="connect-btn" id="ev-connect" type="button" title="Fragt das Ladegerät erneut ab — startet keinen Ladevorgang">Erneut abfragen</button>
       </div>
       <p data-f="ev-meta" class="meta"></p>
     </div>`);
@@ -1003,23 +1034,28 @@ function updateNow(d) {
   });
 
   const agg = d.storageAggregate;
-  if (agg && agg.socPercent !== null) {
-    const aggSoc = displayAggSoc(agg, d.batteries);
-    setF(root, 'agg-value', formatSoc(aggSoc));
-    setW(root, 'agg-fill', aggSoc);
-    setF(root, 'agg-stored', formatEnergy(agg.storedWh));
-    setF(root, 'agg-cap', formatEnergy(agg.totalCapacityWh));
+  if (agg && agg.erwartet > 1) {
+    // Unvollständig: kein Gesamt-SOC, sondern wie viele Speicher erreichbar
+    // sind. Die bekannten Werte stehen als Teilmenge da, nicht als Gesamt.
+    const aggSoc = agg.vollstaendig ? displayAggSoc(agg, d.batteries) : null;
+    setF(root, 'agg-value', agg.vollstaendig ? formatSoc(aggSoc) : `${agg.verfuegbar} von ${agg.erwartet} erreichbar`);
+    setW(root, 'agg-fill', aggSoc ?? 0);
+    setF(root, 'agg-stored-label', agg.vollstaendig ? 'Gespeichert' : 'Gespeichert (nur erreichbare)');
+    setF(root, 'agg-cap-label', agg.vollstaendig ? 'Kapazität' : 'Kapazität (nur erreichbare)');
+    setF(root, 'agg-stored', formatEnergy(agg.energieBekanntWh));
+    setF(root, 'agg-cap', formatEnergy(agg.kapazitaetBekanntWh));
     // Fusszeile wie bei den übrigen Karten — sonst endet diese Karte höher als
     // ihre Nachbarn und die Reihe bekommt keine gemeinsame Unterkante.
     const names = d.batteries.filter((b) => !b.unavailableReason).map((b) => b.displayName);
-    setF(root, 'agg-meta', names.length ? `Beide Speicher zusammen: ${names.join(' + ')}` : 'Beide Speicher zusammen');
+    setF(root, 'agg-meta', agg.vollstaendig
+      ? `Alle Speicher: ${names.join(' + ')}`
+      : `${agg.verfuegbar} von ${agg.erwartet} Speichern verfügbar; kein vollständiger Gesamtwert.`);
   }
 
-  const gi = d.gridImport.valueW ?? 0, ge = d.gridExport.valueW ?? 0;
-  const isExport = ge > gi;
-  const g = formatPowerParts(isExport ? ge : gi);
+  const netz = netzfluss(d);
+  const g = formatPowerParts(netz.w);
   setF(root, 'grid-value', g.value); setF(root, 'grid-unit', g.unit);
-  setF(root, 'grid-sub', d.gridImport.valueW === null ? 'Keine Daten' : isExport ? 'Netzeinspeisung' : gi > 0 ? 'Netzbezug' : 'Ausgeglichen');
+  setF(root, 'grid-sub', netz.w === null ? 'Keine Daten' : netz.wort === 'Einspeisung' ? 'Netzeinspeisung' : netz.wort === 'Bezug' ? 'Netzbezug' : 'Ausgeglichen');
   const gt = lastToday?.totals;
   setF(root, 'grid-imp', gt ? formatEnergy(gt.gridImportWh) : '—');
   setF(root, 'grid-exp', gt ? formatEnergy(gt.gridExportWh) : '—');
@@ -1092,12 +1128,9 @@ function updateEv(root, ev) {
       : ev.vehicleConnected === false ? 'Nicht angeschlossen'
       : '—');
   // Der Ladestand kann vom Ladegerät nicht kommen (IEC 61851, kein Datenkanal).
-  setF(root, 'ev-soc', ev.socPercent == null ? 'nicht verfügbar' : formatSoc(ev.socPercent));
+  setF(root, 'ev-soc', ev.socPercent == null ? 'vom Ladegerät nicht übermittelt' : formatSoc(ev.socPercent));
   setF(root, 'ev-session', ev.sessionEnergyWh == null ? '—' : formatEnergy(ev.sessionEnergyWh));
-  setF(root, 'ev-total', ev.totalEnergyWh == null ? '—' : formatEnergy(ev.totalEnergyWh));
-  setF(root, 'ev-power', formatLadeleistung(ev));
   setF(root, 'ev-cur', formatLadestrom(ev));
-  setF(root, 'ev-temp', ev.temperatureC == null ? '—' : `${ev.temperatureC} °C`);
   setF(root, 'ev-brand', ev.configured ? 'Aimiler Ladegerät' : 'Wallbox nicht eingerichtet');
   setClassText(root, 'ev-meta', metaClass(ev.quality ?? 'unknown'),
     ev.configured ? `Quelle: ${SOURCE_LABEL[ev.source] ?? ev.source ?? 'Wallbox'} · ${ev.ageLabel ?? ''}` : '');
@@ -1115,12 +1148,11 @@ function updateEv(root, ev) {
   const dotEl = root.querySelector('[data-f="ev-dot"]');
   if (dotEl && dotEl.getAttribute('class') !== dotCls) dotEl.setAttribute('class', dotCls);
 
-  // Verbinden-Knopf: zeigt den Zustand der DATENVERBINDUNG, nicht des Ladens.
+  // Abfrage-Knopf: zeigt den Zustand der DATENVERBINDUNG, nicht des Ladens.
   const connect = el('ev-connect');
   if (connect && !connect.disabled) {
     const online = ev.configured && ev.state !== 'offline' && ev.state !== 'not-connected';
-    const label = online ? 'Verbunden' : 'Verbinden';
-    if (connect.textContent !== label) connect.textContent = label;
+    if (connect.textContent !== 'Erneut abfragen') connect.textContent = 'Erneut abfragen';
     connect.classList.toggle('ok', online);
   }
 }
@@ -1129,7 +1161,7 @@ function updateEv(root, ev) {
 function nowSignature(d) {
   const bats = d.batteries.map((b) => b.deviceId + (b.unavailableReason ? ':off' : '')).join(',');
   const invCount = (d.inverters ?? []).length;
-  const hasAgg = !!(d.storageAggregate && d.storageAggregate.socPercent !== null);
+  const hasAgg = !!(d.storageAggregate && d.storageAggregate.erwartet > 1);
   // Wallbox: nur "eingerichtet ja/nein" gehört in die Struktur-Signatur. Alle
   // laufenden Werte werden in-place aktualisiert (kein Neuaufbau, kein Flackern).
   const evCfg = d.ev?.configured ? 1 : 0;
@@ -1154,9 +1186,38 @@ const hiddenByView = { power: new Set(), soc: new Set() };
 const seenSeriesKeys = new Set();   // damit Default-Sichtbarkeit nur einmal greift
 let hoverIndex = null;
 
+/**
+ * Kalendertag und Zeitzone der Anlage, aus dem Live-Zustand.
+ *
+ * "Heute" ist der Tag der Anlage, nicht der des Browsers. Wer im Urlaub in
+ * einer anderen Zeitzone nachsieht, soll dieselben Tageswerte sehen wie zu
+ * Hause. Bis die erste Messung da ist, gilt der Browsertag.
+ */
+let anlagenDatum = null;
+let anlagenZeitzone = null;
 function todayStr() {
+  if (anlagenDatum) return anlagenDatum;
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/** Uhrzeit in der Zeitzone der Anlage. */
+function anlagenUhrzeit(ms) {
+  try {
+    return new Intl.DateTimeFormat('de-DE', {
+      hour: '2-digit', minute: '2-digit', ...(anlagenZeitzone ? { timeZone: anlagenZeitzone } : {}),
+    }).format(new Date(ms));
+  } catch {
+    return new Date(ms).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  }
+}
+/** Dauer in Stunden und Minuten, für Lücken. */
+function formatLuecke(sekunden) {
+  const min = Math.round(sekunden / 60);
+  if (min < 1) return 'unter 1 min';
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  const rest = min % 60;
+  return rest === 0 ? `${h} h` : `${h} h ${rest} min`;
 }
 function shiftDateStr(date, days) {
   const d = new Date(`${date}T12:00:00`);
@@ -1213,10 +1274,50 @@ function statIcon(key) {
     ? `<img class="stat-icon" src="${ICON[key]}" alt="" loading="lazy" />`
     : `<span class="stat-emoji">${key}</span>`;
 }
+/**
+ * "Erfasst: 85 % · Datenlücke: 1 h" — wie belastbar die Tageszahlen sind.
+ *
+ * Ohne diese Zeile liest sich eine Summe aus zwei Messstunden genauso wie eine
+ * aus vierundzwanzig. Tage von vor der Abdeckungsrechnung heissen ehrlich
+ * "Abdeckung unbekannt".
+ */
+function abdeckungText(tag) {
+  const c = tag?.coverage;
+  if (!c) return '';
+  if (!c.bekannt) return 'Abdeckung unbekannt (ältere Aufzeichnung)';
+  const teile = [`Erfasst: ${Math.round(c.percent ?? 0)} %`];
+  if (c.gapSeconds >= 60) teile.push(`Datenlücke: ${formatLuecke(c.gapSeconds)}`);
+  if (c.erfasstAbMs && tag.tagBeginnMs && c.erfasstAbMs - tag.tagBeginnMs > 5 * 60_000) {
+    teile.push(`Aufzeichnung seit ${anlagenUhrzeit(c.erfasstAbMs)}`);
+  }
+  return teile.join(' · ');
+}
+
+/** Fehlerhinweis mit Wiederholen — die bestätigten Daten bleiben daneben stehen. */
+function fehlerHinweis(text) {
+  return `<div class="lade-fehler" role="alert"><span>${esc(text)}</span>`
+    + `<button type="button" class="btn-schlicht" data-wiederholen>Erneut laden</button></div>`;
+}
+
+/** Eine Quote — oder der Grund, warum es keine gibt. */
+function quoteTeile(prozent, status) {
+  if (status === 'unvollstaendig') return { value: '—', unit: '', hinweis: 'ungleich lang gemessen' };
+  if (prozent == null) return { value: '—', unit: '', hinweis: '' };
+  return {
+    value: Math.round(prozent),
+    unit: '%',
+    hinweis: status === 'abdeckung-unbekannt' ? 'Abdeckung unbekannt' : '',
+  };
+}
+
 function renderDaySummary() {
   const grid = el('today-grid');
+  const hinweis = el('day-coverage');
+  if (hinweis) hinweis.textContent = dayData?.hasData ? abdeckungText(dayData) : '';
+  const fehler = dayFehler ? fehlerHinweis(dayFehler) : '';
   if (!dayData || !dayData.hasData) {
-    grid.innerHTML = `<div class="day-summary-empty">Für diesen Tag liegen keine vollständigen Daten vor.</div>`;
+    grid.innerHTML = fehler || `<div class="day-summary-empty">Für diesen Tag liegen keine Daten vor.</div>`;
+    grid.querySelector('[data-wiederholen]')?.addEventListener('click', () => loadDay(selectedDate));
     return;
   }
   const t = dayData.totals, der = dayData.derived ?? {};
@@ -1236,14 +1337,28 @@ function renderDaySummary() {
     const p = ((t.productionWh - prevProd) / prevProd) * 100;
     delta = `<span class="s-delta ${p >= 0 ? 'up' : 'down'}">${p >= 0 ? '+' : ''}${Math.round(p)} % ggü. Vortag</span>`;
   }
-  let html =
-    stat('inverter', 'Produktion', formatEnergyParts(t.productionWh), delta) +
-    stat('home', 'Verbrauch', formatEnergyParts(t.houseConsumptionWh)) +
-    stat('grid', 'Netzbezug', formatEnergyParts(t.gridImportWh)) +
-    stat('grid', 'Einspeisung', formatEnergyParts(t.gridExportWh)) +
-    stat('🛡️', 'Autarkie', der.autarkyPercent == null ? '—' : { value: Math.round(der.autarkyPercent), unit: '%' }, '', 'Anteil Ihres Stromverbrauchs, der durch die eigene Anlage gedeckt wurde.') +
-    stat('♻️', 'Eigenverbrauch', der.selfConsumptionPercent == null ? '—' : { value: Math.round(der.selfConsumptionPercent), unit: '%' }, '', 'Anteil des erzeugten Solarstroms, den Sie selbst genutzt haben.') +
-    stat('💶', 'Ersparnis', der.costs ? { value: formatCurrency(der.costs.totalBenefitEUR).replace(' €', ''), unit: '€' } : '—');
+  const aut = quoteTeile(der.autarkyPercent, der.autarkyStatus);
+  const eig = quoteTeile(der.selfConsumptionPercent, der.selfConsumptionStatus);
+  const nebenbei = (text) => (text ? `<span class="s-delta">${esc(text)}</span>` : '');
+  // Zählerstände der Geräte: die zweite, unabhängige Zahl. Sie zählt auch,
+  // während der Server nicht lief — weicht sie vom integrierten Wert ab, ist
+  // die Differenz die Lücke. Gezeigt, sobald sie da ist und sich unterscheidet.
+  const z = t.zaehler ?? {};
+  const zaehlerHinweis = (integriertWh, zaehlerWh) => {
+    if (zaehlerWh == null) return '';
+    const abweichung = Math.abs(zaehlerWh - integriertWh);
+    if (abweichung < 50 && abweichung < integriertWh * 0.02) return '';
+    return nebenbei(`Zähler: ${formatEnergy(zaehlerWh)}`);
+  };
+  let html = fehler +
+    stat('inverter', 'Produktion', formatEnergyParts(t.productionWh), delta + zaehlerHinweis(t.productionWh, z.pvWh)) +
+    stat('home', 'Haus gesamt inkl. Auto', formatEnergyParts(t.houseConsumptionWh)) +
+    stat('grid', 'Netzbezug', formatEnergyParts(t.gridImportWh), zaehlerHinweis(t.gridImportWh, z.bezugWh)) +
+    stat('grid', 'Einspeisung', formatEnergyParts(t.gridExportWh), zaehlerHinweis(t.gridExportWh, z.einspeisungWh)) +
+    stat('🛡️', 'Autarkie', aut, nebenbei(aut.hinweis), 'Anteil des Verbrauchs, der nicht aus dem Netz kam.') +
+    stat('♻️', 'Eigenverbrauch', eig, nebenbei(eig.hinweis), 'Anteil des Solarstroms, der nicht eingespeist wurde.') +
+    stat('💶', 'Gesamter Vorteil', der.costs ? { value: formatCurrency(der.costs.totalBenefitEUR).replace(' €', ''), unit: '€' } : '—',
+      der.costs && !der.costs.vollstaendig ? nebenbei('unvollständig gemessen') : '');
   // Je Speicher: geladen / entladen (Anforderung 66).
   for (const b of dayData.batteries ?? []) {
     const bicon = b.deviceId && b.deviceId.includes('victron') ? 'batteryLarge' : 'batteryFronius';
@@ -1253,11 +1368,25 @@ function renderDaySummary() {
       `<span class="s-delta">▼ ${esc(formatEnergy(b.dischargeWh))}</span></div>`;
   }
   grid.innerHTML = html;
+  grid.querySelector('[data-wiederholen]')?.addEventListener('click', () => loadDay(selectedDate));
 }
 
 // ── KOSTEN ────────────────────────────────────────────────────────────
+/**
+ * Kostenkarten — immer mit Tag, Tarifgrundlage und Vollständigkeit.
+ *
+ * Begriffe, einheitlich: "Ersparnis" ist nicht gekaufter Netzstrom,
+ * "Einspeiseerlös" die Vergütung, "Gesamter Vorteil" die Summe aus beidem. Die
+ * Grundgebühr steckt in keiner dieser Zahlen und wird das auch gesagt.
+ */
 function renderCosts(t) {
-  if (!t?.derived?.costs) { el('cost-grid').innerHTML = ''; return; }
+  const ziel = el('cost-grid');
+  const kopf = el('cost-basis');
+  if (!t?.derived?.costs) {
+    ziel.innerHTML = '';
+    if (kopf) kopf.textContent = '';
+    return;
+  }
   const c = t.derived.costs;
   const card = (cls, icon, label, big, rows) => `
     <div class="card ${cls}">
@@ -1265,20 +1394,35 @@ function renderCosts(t) {
       <p class="value">${esc(big)}</p>
       <div class="breakdown">${rows.map((r) => `<div class="breakdown-row"><span>${esc(r[0])}</span><b>${esc(r[1])}</b></div>`).join('')}</div>
     </div>`;
-  el('cost-grid').innerHTML =
+  ziel.innerHTML =
     card('battery', '💶', 'Gesamter Vorteil', formatCurrency(c.totalBenefitEUR),
-      [['Eigenverbrauch', formatCurrency(c.savedGridCostEUR)], ['Einspeiseerlös', formatCurrency(c.feedInRevenueEUR)]]) +
+      [['Ersparnis (nicht gekaufter Strom)', formatCurrency(c.savedGridCostEUR)], ['Einspeiseerlös', formatCurrency(c.feedInRevenueEUR)]]) +
     card('grid', '⚡', 'Netzkosten', formatCurrency(c.gridCostActualEUR),
       [['Ohne PV & Speicher', formatCurrency(c.gridCostWithoutSystemEUR)], ['Differenz', formatCurrency(c.gridCostWithoutSystemEUR - c.gridCostActualEUR)]]);
+
+  if (kopf) {
+    const tag = dayTitle(t.date);
+    const tarif = c.tarif
+      ? `${String(c.tarif.importPricePerKWh).replace('.', ',')} €/kWh Bezug, ${String(c.tarif.exportPricePerKWh).replace('.', ',')} €/kWh Einspeisung`
+      : '';
+    const teile = [
+      `${tag} · Tarif: ${tarif}`,
+      c.tarif?.grundlage === 'angenommen' ? 'Tarif für diesen Tag nicht bekannt, angenommen' : '',
+      c.basis === 'naeherung' ? 'Näherung aus Tagessummen (ältere Aufzeichnung)' : '',
+      c.vollstaendig ? '' : 'unvollständig gemessen — nur erfasste Intervalle',
+      'Grundgebühr nicht enthalten',
+    ].filter(Boolean);
+    kopf.textContent = teile.join(' · ');
+  }
 }
 
 // ── Legende ───────────────────────────────────────────────────────────
 function buildLegend() {
   const hidden = hiddenByView[chartView];
   el('chart-legend').innerHTML = buildSeries().map((s) => `
-    <span class="legend-item ${hidden.has(s.key) ? 'off' : ''}" data-key="${esc(s.key)}">
+    <button type="button" class="legend-item ${hidden.has(s.key) ? 'off' : ''}" aria-pressed="${!hidden.has(s.key)}" data-key="${esc(s.key)}">
       <span class="legend-swatch" style="background:${resolveColor(s.color)}"></span>${esc(s.label)}
-    </span>`).join('');
+    </button>`).join('');
   el('chart-legend').querySelectorAll('.legend-item').forEach((item) => {
     item.addEventListener('click', () => {
       const key = item.getAttribute('data-key');
@@ -1297,13 +1441,47 @@ function niceCeil(v) {
   const nf = NICE_STEPS.find((s) => f <= s + 1e-9) ?? 10;
   return nf * e;
 }
+/**
+ * Tagesgrenzen — vom Server, in der Zeitzone der Anlage.
+ *
+ * Vorher rechnete der Browser "Mitternacht + 24 Stunden": falsch an den Tagen
+ * der Zeitumstellung (23 bzw. 25 Stunden) und falsch in jeder anderen Zeitzone.
+ */
 function dayBounds(date) {
+  if (dayData?.date === date && Number.isFinite(dayData.tagBeginnMs) && Number.isFinite(dayData.tagEndeMs)) {
+    return { start: dayData.tagBeginnMs, end: dayData.tagEndeMs };
+  }
   const start = new Date(`${date}T00:00:00`).getTime();
   return { start, end: start + 24 * 3600 * 1000 };
 }
 const GAP_MS = 4 * 60 * 1000; // Lücke, wenn Punkte weiter auseinander liegen
 
+/**
+ * Das Diagramm in Worten: Höchstwert und Zeitpunkt je sichtbarer Reihe. Für
+ * Screenreader und für alle, die eine Zahl statt einer Kurve lesen wollen.
+ * Lücken zählen nicht mit — ein fehlender Punkt ist kein Nullwert.
+ */
+function chartZusammenfassung() {
+  const pts = (dayData && dayData.series) || [];
+  if (!dayData?.hasData || pts.length < 2) return '';
+  const teile = [];
+  for (const s of activeSeries()) {
+    let best = null;
+    for (const p of pts) {
+      const v = s.get(p);
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+      if (best === null || Math.abs(v) > Math.abs(best.v)) best = { v, t: p.t };
+    }
+    if (best === null) continue;
+    const wert = chartView === 'soc' ? `${Math.round(best.v)} %` : formatPower(best.v);
+    teile.push(`${s.label} höchstens ${wert} um ${anlagenUhrzeit(best.t)}`);
+  }
+  return teile.length ? `Im Diagramm: ${teile.join(' · ')}.` : '';
+}
+
 function renderChart() {
+  const zusammenfassung = el('chart-summary');
+  if (zusammenfassung) zusammenfassung.textContent = chartZusammenfassung();
   const svg = el('today-chart');
   const rect = svg.getBoundingClientRect();
   const W = Math.max(320, Math.round(rect.width));
@@ -1366,12 +1544,19 @@ function renderChart() {
   if (!soc) out += `<text class="chart-axis-label" x="6" y="${(padT + 4).toFixed(1)}">kW</text>`;
 
   // X-Achse (Stunden)
+  // Beschriftet in der Uhrzeit der Anlage. An Umstellungstagen stehen dort
+  // deshalb ehrlich 00, 03, 07 … statt einer gleichmässigen, aber falschen Folge.
   const stepH = W < 560 ? 6 : 3;
-  for (let h = 0; h <= 24; h += stepH) {
-    const t = start + h * 3600 * 1000;
-    const xx = xOf(t);
+  const zeitmarken = [];
+  for (let t = start; t < end; t += stepH * 3600 * 1000) zeitmarken.push(t);
+  // Auch 23- und 25-Stunden-Tage bekommen einen sichtbaren Endpunkt.
+  if (end - zeitmarken.at(-1) < stepH * 1800_000) zeitmarken.pop();
+  zeitmarken.push(end);
+  for (const t of zeitmarken) {
+    const xx = xOf(Math.min(t, end));
+    const label = t >= end ? '24:00' : anlagenUhrzeit(t);
     out += `<line class="chart-grid-line" x1="${xx.toFixed(1)}" y1="${padT}" x2="${xx.toFixed(1)}" y2="${H - padB}" opacity="0.5" />`;
-    out += `<text class="chart-axis-label" x="${xx.toFixed(1)}" y="${H - 8}" text-anchor="middle">${String(h).padStart(2, '0')}:00</text>`;
+    out += `<text class="chart-axis-label" x="${xx.toFixed(1)}" y="${H - 8}" text-anchor="middle">${label}</text>`;
   }
 
   // Linien mit Lücken
@@ -1445,7 +1630,7 @@ function updateHover() {
   }
   layer.innerHTML = g;
   const tip = el('chart-tooltip');
-  tip.innerHTML = `<div class="tt-time">${formatClock(p.t)}</div>${rows.join('')}`;
+  tip.innerHTML = `<div class="tt-time">${anlagenUhrzeit(p.t)}</div>${rows.join('')}`;
   tip.hidden = false;
   // Position (in Container-Pixeln)
   const wrap = el('chart-wrap');
@@ -1517,6 +1702,16 @@ function renderStatus(d) {
     if (text.dataset.short !== short) text.dataset.short = short;
   };
   if (real.length === 0) setStatus('warn', 'Keine Quelle', 'Keine Quelle');
+  // Ein Gateway kann antworten, während ein Speicher dahinter fehlt. Dann
+  // wäre „Alle Systeme online“ gelogen.
+  // Ebenso die Wallbox: Die Cloud antwortet, das Gerät dahinter nicht.
+  else if (problems === 0 && d.ev?.configured && d.ev.state === 'offline') {
+    setStatus('warn', 'Wallbox nicht erreichbar', 'Wallbox offline');
+  }
+  else if (problems === 0 && d.storageAggregate && d.storageAggregate.verfuegbar < d.storageAggregate.erwartet) {
+    const fehlt = d.storageAggregate.erwartet - d.storageAggregate.verfuegbar;
+    setStatus('warn', `${fehlt} Speicher ohne Daten`, `${fehlt} Speicher fehlt`);
+  }
   else if (problems === 0) setStatus('ok', 'Alle Systeme online', 'Online');
   else if (problems < real.length) setStatus('warn', `${problems} Gerät${problems > 1 ? 'e' : ''} offline`, `${problems} offline`);
   else setStatus('bad', 'Verbindungsprobleme', 'Probleme');
@@ -1534,8 +1729,8 @@ function renderStatus(d) {
     const contact = x.lastSuccessAt ? `Letzter Kontakt: ${formatClock(x.lastSuccessAt)}` : (x.status === 'not_configured' ? 'Noch nicht eingerichtet' : 'Noch kein Kontakt');
     const canReconnect = x.reconnectable && (x.status === 'offline' || x.status === 'error' || x.status === 'stale');
     const btn = busy
-      ? `<button class="reconnect-btn" disabled><span class="mini-spinner"></span>Verbindung …</button>`
-      : canReconnect ? `<button class="reconnect-btn" data-id="${esc(x.connectorId)}">Neu verbinden</button>` : '';
+      ? `<button class="reconnect-btn" disabled><span class="mini-spinner"></span>Frage ab …</button>`
+      : canReconnect ? `<button class="reconnect-btn" data-id="${esc(x.connectorId)}">Erneut abfragen</button>` : '';
     return `
       <div class="source-row">
         <div class="s-main">
@@ -1610,7 +1805,17 @@ function renderSkeletons() {
 // ── Render orchestration ──────────────────────────────────────────────
 function renderLive(d) {
   lastLive = d;
-  el('flow-updated').textContent = `aktualisiert ${new Date(d.polledAt).toLocaleTimeString('de-DE')}`;
+
+  // Tageswechsel der Anlage: Wer "heute" ansah, sieht jetzt bewusst den neuen
+  // Tag. Wer einen Archivtag ausgewählt hat, bleibt dort.
+  if (d.anlage?.datum && d.anlage.datum !== anlagenDatum) {
+    const vorher = todayStr();
+    anlagenDatum = d.anlage.datum;
+    anlagenZeitzone = d.anlage.zeitzone ?? null;
+    if (selectedDate === vorher && selectedDate !== anlagenDatum) void loadDay(anlagenDatum);
+    else syncDateUI();
+  }
+  aktualisiereFrische();
   renderFlow(d);
   renderKpis(d, lastToday);
   renderNow(d);
@@ -1620,34 +1825,140 @@ function renderLive(d) {
 }
 
 // ── Data fetching ─────────────────────────────────────────────────────
+/**
+ * Verbindung und Frische der Live-Werte.
+ *
+ * Zwei getrennte Fragen: Steht die Verbindung zur App (SSE), und kommen neue
+ * Messungen? Der Server schickt alle 10 s einen Puls ohne Messwerte. Bleibt
+ * auch der aus, ist der Strom tot — selbst wenn der Browser ihn für offen hält —
+ * und wird neu aufgebaut. Bleiben nur Messungen aus, ist die App verbunden,
+ * aber die Werte sind nicht mehr aktuell.
+ *
+ * In beiden Fällen stehen die Werte als „zuletzt bekannt“ da, ihr Alter läuft
+ * weiter, und die Flussanimationen stehen still: Eine laufende Animation
+ * behauptet einen Fluss, den gerade niemand misst. Ob einzelne Geräte
+ * antworten, zeigt davon unabhängig die Gerätezeile.
+ */
+const GETRENNT_NACH_MS = 25_000;
+const VERALTET_NACH_MS = 30_000;
+let sse = null;
+let letzteNachrichtMs = 0;
+let letzteMessungMs = 0;
+let letzterMesszeitpunkt = null;
+let appGetrennt = false;
+
 function connectSSE() {
+  sse?.close();
   const ev = new EventSource('/api/events');
-  ev.addEventListener('message', (e) => { try { renderLive(JSON.parse(e.data)); } catch (err) { console.error(err); } });
+  sse = ev;
+  letzteNachrichtMs = Date.now();
+  ev.addEventListener('message', (e) => {
+    letzteNachrichtMs = Date.now();
+    const warGetrennt = appGetrennt;
+    appGetrennt = false;
+    try {
+      const d = JSON.parse(e.data);
+      // Eine Änderung der Regelung schickt den letzten Messstand erneut — das
+      // ist keine neue Messung und darf das Alter nicht zurücksetzen.
+      if (d.polledAt !== letzterMesszeitpunkt) {
+        letzterMesszeitpunkt = d.polledAt;
+        letzteMessungMs = Date.now();
+      }
+      renderLive(d);
+    } catch (err) { console.error(err); }
+    // Nach einer Unterbrechung auch die Tagessummen neu holen.
+    if (warGetrennt) void refreshTodayKpis();
+  });
+  ev.addEventListener('puls', () => { letzteNachrichtMs = Date.now(); });
   ev.addEventListener('error', () => {
-    el('status-dot').className = 'dot bad';
-    const t = el('status-text');
-    t.textContent = 'Keine Verbindung';
-    t.dataset.short = 'Getrennt';
+    appGetrennt = true;
+    aktualisiereFrische();
     // Ein EventSource verrät den Statuscode nicht — eine abgelaufene Sitzung
     // sieht darin genauso aus wie ein Netzausfall. Eine gewöhnliche Anfrage
     // hinterher klärt das: Ist es die Sitzung, schickt zurAnmeldung() weiter,
-    // sonst bleibt es bei „Keine Verbindung" und der EventSource versucht es
+    // sonst bleibt es bei der Unterbrechung und der EventSource versucht es
     // von selbst wieder.
     fetch('/api/snapshot').catch(() => {});
   });
 }
+
+function formatAlter(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  return formatLuecke(s);
+}
+
+/** Sekündlich und bei jeder Nachricht: Alter, Kennzeichnung, Wächter. */
+function aktualisiereFrische() {
+  const jetzt = Date.now();
+  if (sse && jetzt - letzteNachrichtMs > GETRENNT_NACH_MS) {
+    // Offen, aber stumm: neu verbinden. Der erste Zustand danach ist vollständig.
+    appGetrennt = true;
+    connectSSE();
+  }
+  const alterMs = letzteMessungMs ? jetzt - letzteMessungMs : null;
+  // Die Abfrage kann frisch sein, obwohl die Geräte nur alte Werte liefern.
+  // Dann ist „aktualisiert vor 1 s“ eine Behauptung, die nicht stimmt.
+  const kern = lastLive ? [lastLive.solar, lastLive.gridImport, lastLive.house].map((m) => m?.quality) : [];
+  const messwerteAlt = kern.length > 0 && kern.every((q) => q !== 'live');
+  const veraltet = appGetrennt || messwerteAlt || (alterMs !== null && alterMs > VERALTET_NACH_MS);
+  document.body.classList.toggle('live-veraltet', veraltet);
+
+  const label = el('flow-updated');
+  if (label) {
+    const uhrzeit = lastLive ? new Date(lastLive.polledAt).toLocaleTimeString('de-DE') : null;
+    const text = uhrzeit === null ? (appGetrennt ? 'keine Verbindung' : '')
+      : messwerteAlt && !appGetrennt ? `Messwerte veraltet · abgefragt ${uhrzeit}`
+      : veraltet ? `zuletzt bekannt ${uhrzeit} · vor ${formatAlter(alterMs ?? 0)}`
+      : `aktualisiert ${uhrzeit} · vor ${formatAlter(alterMs ?? 0)}`;
+    if (label.textContent !== text) label.textContent = text;
+    label.classList.toggle('veraltet', veraltet);
+  }
+  if (appGetrennt) {
+    el('status-dot').className = 'dot bad';
+    const t = el('status-text');
+    if (t.textContent !== 'App-Verbindung unterbrochen') t.textContent = 'App-Verbindung unterbrochen';
+    t.dataset.short = 'Getrennt';
+  }
+}
+setInterval(aktualisiereFrische, 1000);
+/** Nur die jeweils letzte Tagesabfrage zählt — siehe api.js. */
+const tagesAbfrage = letzteAnfrage();
+const heuteAbfrage = letzteAnfrage();
+/** Fehler der letzten Tagesabfrage; die bestätigten Daten bleiben daneben stehen. */
+let dayFehler = null;
+
 /** Lädt die vollständige Tagesansicht (Kurve + Zusammenfassung) für ein Datum. */
 async function loadDay(date) {
+  const anderesDatum = date !== selectedDate;
   selectedDate = date;
   hoverIndex = null;
   syncDateUI();
-  try {
-    dayData = await (await fetch(`/api/history/day?date=${encodeURIComponent(date)}`)).json();
-  } catch (err) {
-    console.error(err);
-    dayData = { date, hasData: false };
+  // Eine neue Überschrift darf niemals noch die Zahlen des vorherigen Tages
+  // tragen, auch nicht während einer langsamen Anfrage.
+  if (anderesDatum) {
+    dayData = null;
+    dayFehler = null;
+    renderDaySummary();
+    el('today-grid').textContent = 'Tagesdaten werden geladen …';
+    renderCosts(null);
+    buildLegend();
+    renderChart();
   }
-  if (date === todayStr()) lastToday = dayData; // für die KPIs oben
+  try {
+    const daten = await tagesAbfrage(`/api/history/day?date=${encodeURIComponent(date)}`);
+    if (daten.date !== date || typeof daten.hasData !== 'boolean') throw new ApiFehler('Unpassende Tagesdaten vom Server.', 200);
+    dayData = daten;
+    dayFehler = null;
+    if (!anlagenZeitzone && dayData.zeitzone) anlagenZeitzone = dayData.zeitzone;
+  } catch (err) {
+    if (istUeberholt(err)) return;
+    // Keine leere Historie behaupten: Beim selben Tag bleiben die zuletzt
+    // bestätigten Daten stehen, bei einem anderen Tag gibt es eben keine.
+    dayFehler = err instanceof ApiFehler ? err.message : 'Tagesdaten konnten nicht geladen werden.';
+    if (anderesDatum || dayData?.date !== date) dayData = null;
+  }
+  if (dayData && date === todayStr()) lastToday = dayData; // für die KPIs oben
   renderDaySummary();
   renderCosts(dayData);
   buildLegend();
@@ -1657,19 +1968,17 @@ async function loadDay(date) {
 
 /** Heutige Summen für die KPI-Leiste, auch wenn ein anderer Tag betrachtet wird. */
 async function refreshTodayKpis() {
+  if (selectedDate === todayStr()) {
+    // Heute im Blick: loadDay lädt bereits den vollständigen Tag.
+    await loadDay(todayStr());
+    return;
+  }
   try {
-    if (selectedDate === todayStr()) {
-      // Heute im Blick: loadDay lädt bereits den vollständigen Tag (Kurve +
-      // Summen), setzt lastToday und zeichnet KPIs/JETZT neu. Ein zusätzlicher
-      // summary-Aufruf wäre nur ein doppelter Request auf dieselben Daten.
-      await loadDay(todayStr());
-    } else {
-      // Ein anderer Tag ist geöffnet: nur die heutigen Summen (ohne die große
-      // Kurve) für die KPI-Leiste nachladen.
-      lastToday = await (await fetch(`/api/history/day?date=${todayStr()}&summary=1`)).json();
-      if (lastLive) { renderKpis(lastLive, lastToday); renderNow(lastLive); }
-    }
-  } catch (err) { console.error(err); }
+    lastToday = await heuteAbfrage(`/api/history/day?date=${todayStr()}&summary=1`);
+    if (lastLive) { renderKpis(lastLive, lastToday); renderNow(lastLive); }
+  } catch (err) {
+    if (!istUeberholt(err)) console.warn(err);
+  }
 }
 
 // ── LEAPMOTOR-Detailansicht ───────────────────────────────────────────
@@ -1694,16 +2003,10 @@ let evProtokollOffen = false;
  * `null` heisst "noch nichts angefasst, nimm den Wert vom Server".
  */
 let evSchieberA = null;
-/**
- * Ob die Rückfrage vor dem Handbetrieb gerade offen steht.
- *
- * Wie `evSchieberA` ausserhalb der Ansicht: Die Seite wird alle zwei Sekunden
- * neu gebaut, und eine Rückfrage, die dabei verschwindet, kann niemand
- * beantworten.
- */
-let evNachfrage = false;
-let evBefehlLaeuft = false;
+/** Reihenfolge der Bedienbefehle — nur die neueste Antwort ersetzt die Anzeige. */
+const evBefehle = befehlsfolge();
 let evBefehlFehler = '';
+let evBefehlHinweis = '';
 let evStats = null;         // Antwort von /api/ev/stats
 let evStatsRange = 'month'; // day | week | month | year | total
 let evOpenSessionId = null; // aufgeklappter Ladevorgang in der Liste
@@ -1796,58 +2099,18 @@ function ampereErklaerung(ev) {
  * kommt aus dem Regler selbst, nicht aus einer Übersetzungstabelle hier: Nur
  * dort ist bekannt, welche Zahl den Ausschlag gegeben hat.
  */
-const REGEL_KOPF = {
-  aus: 'Überschussregelung ist ausgeschaltet',
-  wartet: 'Wartet auf Freigabe',
-  'nicht-verbunden': 'Kein Fahrzeug angesteckt',
-  laedt: 'Lädt aus Sonne und Speicher',
-  gestoppt: 'Laden beendet',
-  'pausiert-leistung': 'Laden pausiert – zu wenig Überschuss',
-  'pausiert-speicher': 'Laden pausiert – Speicherreserve',
-  'pausiert-messwerte': 'Laden pausiert – Messwerte unsicher',
-  gestoert: 'Wallbox nicht erreichbar',
-  beendet: 'Ladevorgang beendet',
-  'fordert-nicht': 'Fahrzeug ist voll',
-};
-
 function regelKopfMarkup(ev) {
   const r = ev.regelung;
   if (!r) return '';
-  const laedt = r.zustand === 'laedt';
-  const pausiert = String(r.zustand).startsWith('pausiert');
-  const art = r.betriebsart ?? (r.volladung ? 'manuell' : 'intelligent');
-  // Im Handbetrieb ist "Lädt mit Überschuss" schlicht falsch — da wird
-  // notfalls Netzstrom gekauft. Und die Farbe darf dann nicht Grün sein:
-  // Grün heisst in dieser App "alles aus eigener Erzeugung".
-  // Die Regelung sagt "lädt", wenn sie freigegeben HAT. Ob das Fahrzeug die
-  // Freigabe auch annimmt, ist eine andere Frage — und die beantwortet nur die
-  // Wallbox. Steht dort Control-Pilot 9 V (angesteckt, fordert nicht) und
-  // fliesst nichts, dann lädt eben nichts, egal was die Rechnung freigibt.
-  // Das kommt vor: gegen Ende eines Ladevorgangs, bei Abfahrtszeit im Auto,
-  // oder wenn das Fahrzeug selbst eine Pause macht.
-  const fordertNicht = laedt && ev.state === 'connected' && (ev.powerW ?? 0) < 100;
-  const titel = r.gestoppt
-    ? (r.gesetztA === 0 && !r.letzterFehler ? 'Ladestopp gesendet' : 'Stopp angefordert')
-    : fordertNicht
-    ? 'Freigegeben — Fahrzeug lädt gerade nicht'
-    : laedt && art === 'manuell'
-      ? 'Lädt mit festem Ladestrom'
-      : (REGEL_KOPF[r.zustand] ?? 'Zustand unbekannt');
-  const klasse = fordertNicht || r.zustand === 'fordert-nicht' ? ''
-    : laedt && art === 'manuell' ? 'warn'
-    : laedt ? 'ok'
-    : pausiert || r.zustand === 'gestoert' ? 'warn' : '';
+  // Die Benennung steht in ev-bedienung.js und ist dort geprüft: Wunsch,
+  // Befehl, Gerätemeldung und gemessener Stromfluss werden getrennt gewertet.
+  const z = ladezustand(r, ev);
   const nurBeobachtet = r.modus === 'beobachten';
   return `
-    <div class="ev-kopf ${esc(klasse)}">
-      <span class="ev-kopf-titel">${esc(titel)}</span>
-      <span class="ev-kopf-grund">${esc(
-        fordertNicht
-          ? `Die Wallbox ist auf ${r.gesetztA > 0 ? `${r.gesetztA} A` : 'Laden'} freigegeben, das Fahrzeug fordert gerade keinen Strom. Sobald es wieder will, läuft es von selbst an.`
-          : (r.grund ?? ''),
-      )}</span>
+    <div class="ev-kopf ton-${esc(z.ton)}" role="status">
+      <span class="ev-kopf-titel">${esc(z.titel)}</span>
+      ${z.text ? `<span class="ev-kopf-grund">${esc(z.text)}</span>` : ''}
       ${nurBeobachtet ? `<span class="ev-kopf-hinweis">Beobachtungsmodus — die Wallbox wird noch nicht gestellt. Umschalten in config.json unter <code>ueberschussladen.modus</code>.</span>` : ''}
-      ${r.modus === 'aus' ? `<span class="ev-kopf-hinweis">Die Regelung ist abgeschaltet. Die Wallbox lädt mit ihrer eigenen Einstellung.</span>` : ''}
     </div>`;
 }
 
@@ -1874,39 +2137,28 @@ function herkunftMarkup(ev) {
 }
 
 /**
- * Die zwei Betriebsarten.
+ * Die zwei Betriebsarten — eine eindeutige Wahl, ohne Warndialog.
  *
- * Als Segmentschalter, weil sie einander ausschliessen: ein Rahmen, zwei
- * Felder, eines sichtbar aktiv. Zwei lose Knöpfe liessen offen, ob auch beide
- * gelten könnten.
- *
- * "Volladung" gab es einmal als dritte Art und ist entfallen — sie war nichts
- * anderes als Handbetrieb ganz rechts am Regler. Ein Knopf weniger für dieselbe
- * Fähigkeit.
- *
- * Der Handbetrieb kauft im Zweifel Netzstrom. Deshalb kommt man nicht mit einem
- * Fingertipp hinein: Erst erscheint die Frage, was das bedeutet, und erst die
- * Bestätigung schaltet um. Zurück in den intelligenten Betrieb geht es dagegen
- * sofort — die sichere Richtung braucht keine Rückfrage.
+ * Früher kam vor dem Handbetrieb jedes Mal eine Rückfrage. Jetzt ist die Wahl
+ * ein Segmentschalter, und der Handbetrieb trägt dauerhaft den Hinweis "bei
+ * Bedarf Netzstrom". Die Wahl gilt, bis sie geändert wird — auch nach dem
+ * Abstecken und nach einem Neustart — und lässt sich ohne Auto treffen.
  */
 const EV_ARTEN = [
-  { id: 'intelligent', name: 'Intelligentes Laden', kurz: 'Sonne + Speicher' },
-  { id: 'manuell', name: 'Manuelles Laden', kurz: 'Fester Ladestrom' },
+  { id: 'intelligent', name: 'Intelligent', kurz: 'Überschuss aus Sonne und Speicher' },
+  { id: 'manuell', name: 'Manuell', kurz: 'Fester Ladestrom · bei Bedarf Netzstrom' },
 ];
 
 function betriebsartMarkup(ev) {
   const r = ev.regelung;
   if (!r || r.modus === 'aus') return '';
-  const art = r.betriebsart ?? (r.volladung ? 'manuell' : 'intelligent');
+  const art = r.betriebsart ?? null;
   const minA = r.minA || 6;
   const maxA = r.maxA || 16;
   const schieber = evSchieberA ?? (r.manuellA >= minA ? r.manuellA : Math.round((minA + maxA) / 2));
   const dose = r.anschluss;
   const gestoppt = r.gestoppt === true;
 
-  // Der aktive Knopf traegt einen Haken und den vollen Akzentton. Vorher war
-  // er nur eine Spur heller als der andere — auf einem Telefon im Sonnenlicht
-  // sah man nicht, was gerade gilt.
   const haken = `<svg class="ev-art-haken" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const knoepfe = EV_ARTEN.map((a) => `
     <button type="button" class="ev-art${a.id === art ? ' aktiv' : ''}" data-art="${a.id}"
@@ -1914,73 +2166,36 @@ function betriebsartMarkup(ev) {
       <b>${a.id === art ? haken : ''}${a.name}</b><span>${a.kurz}</span>
     </button>`).join('');
 
-  // Die Rückfrage steht an der Stelle, an der sonst der Regler stünde — dort
-  // schaut man beim Umschalten ohnehin hin.
-  const nachfrage = evNachfrage ? `
-    <div class="ev-nachfrage">
-      <p><b>Von Hand laden?</b> Der eingestellte Ladestrom gilt dann fest — reicht
-      die eigene Erzeugung nicht, wird der Rest aus dem Netz gekauft. Endet beim
-      Abstecken und beim Neustart.</p>
-      <div class="ev-nachfrage-knoepfe">
-        <button type="button" class="btn-primary" id="ev-bestaetigen">Verstanden, umschalten</button>
-        <button type="button" class="btn-schlicht" id="ev-abbrechen">Abbrechen</button>
-      </div>
-    </div>` : '';
-
-  // An der Haushaltsdose ist bei der dort zulaessigen Dauerstrom-Grenze Schluss.
-  // Einen Regler bis 16 A anzubieten und dann still auf 10 zu kappen waere ein
-  // Versprechen, das die App nicht haelt.
-  const reglerMaxA = Math.min(maxA, r.haushaltMaxA ?? maxA);
-  // Der Regler steht auch waehrend der Rueckfrage da. Wer wissen will, worauf
-  // er sich einlaesst, soll den Wert vorher sehen und einstellen koennen —
-  // nicht erst zusagen, dann nachsehen und wieder abbrechen muessen.
-  const reglerSichtbar = (art === 'manuell' || evNachfrage) && !gestoppt;
-  const regler = reglerSichtbar
-    ? reglerMarkup(Math.min(schieber, reglerMaxA), minA, reglerMaxA, dose, evNachfrage)
+  // Die Haushaltsgrenze gilt nur an einer einphasigen Dose — nicht pauschal.
+  const reglerMaxA = dose?.phasen === 1 ? Math.min(maxA, r.haushaltMaxA ?? maxA) : maxA;
+  const regler = art === 'manuell'
+    ? reglerMarkup(Math.min(schieber, reglerMaxA), minA, reglerMaxA, dose, schieber !== r.manuellA)
     : '';
+  const geaendert = art === 'manuell' && evSchieberA !== null && evSchieberA !== r.manuellA;
 
-  const erklaerung = art === 'intelligent'
-    ? 'Es wird nur geladen, was Sonne und Speicher hergeben. Das Auto verursacht keinen Netzbezug.'
-    : `Fest auf ${schieber} A. Reicht die eigene Erzeugung nicht, kommt der Rest aus dem Netz.`;
+  const erklaerung = art === null
+    ? 'Noch kein Lademodus gewählt — bis dahin wird nicht geladen.'
+    : art === 'intelligent'
+      ? 'Regelziel: Netzbezug durch das Auto vermeiden. Geladen wird mit dem Überschuss aus Sonne und freigegebenen Speichern; wegen der Cloud-Verzögerung der Wallbox ist das ein Ziel, keine Garantie.'
+      : `Fester Sollwert ${r.manuellA} A${dose?.phasen === 1 && r.manuellA > reglerMaxA ? ` (an dieser Dose wirksam ${reglerMaxA} A)` : ''}. Bei Bedarf wird Netzstrom verwendet.`;
 
   return `
-    <div class="ev-betrieb ${art === 'manuell' && !gestoppt ? 'netzstrom' : ''}${gestoppt ? ' gestoppt' : ''}">
-      <div class="ev-arten" role="group" aria-label="Betriebsart">${knoepfe}</div>
-      ${nachfrage}
+    <div class="ev-betrieb${gestoppt ? ' gestoppt' : ''}">
+      <div class="ev-arten" role="group" aria-label="Lademodus">${knoepfe}</div>
       ${regler}
-      <p class="ev-betrieb-text">${esc(gestoppt ? 'Ein Ladestopp ist angefordert. Die eingestellte Betriebsart gilt wieder, sobald du fortsetzt.' : erklaerung)}</p>
+      ${geaendert ? `<button type="button" class="btn-primary ev-bestaetigen" id="ev-ampere-bestaetigen">${esc(`${Math.min(schieber, reglerMaxA)} A übernehmen`)}</button>` : ''}
+      <p class="ev-betrieb-text">${esc(erklaerung)}</p>
       ${dosenHinweis(ev)}
       ${umsteckHinweis(ev)}
-      ${beendenMarkup(gestoppt)}
+      ${art === null ? '' : beendenMarkup(gestoppt)}
     </div>`;
 }
 
-/**
- * Laden beenden — am Telefon ein Wisch, am Schreibtisch ein Knopf.
- *
- * Beides steht im Markup, sichtbar ist immer nur eines. Die Anzeige entscheidet
- * über `pointer: coarse` (siehe styles.css), also über die Art des Zeigegeräts
- * und nicht über die Fensterbreite: Ein schmales Browserfenster am Schreibtisch
- * bleibt ein Schreibtisch, und dort ist Ziehen mit der Maus umständlich.
- *
- * Der Wisch ist am Telefon richtig, weil man dort mit dem Daumen scrollt und
- * einen Knopf leicht streift. Mit der Maus trifft man, was man anklickt.
- */
+/** Auf allen Eingabegeräten eine direkt erreichbare Pause-/Fortsetzen-Taste. */
 function beendenMarkup(gestoppt) {
-  const wort = gestoppt ? 'Laden fortsetzen' : 'Laden beenden';
-  return `
-    <div class="ev-wisch nur-tippen${gestoppt ? ' an' : ''}" id="ev-wisch"
-         role="button" tabindex="0" aria-label="${wort}">
-      <span class="ev-wisch-text">${gestoppt ? 'Zum Fortsetzen wischen' : 'Zum Beenden wischen'}</span>
-      <span class="ev-wisch-griff" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-             stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M5 12h13M13 6l6 6-6 6" />
-        </svg>
-      </span>
-    </div>
-    <button type="button" class="ev-stopp nur-zeigen${gestoppt ? ' an' : ''}"
-            id="ev-stopp" data-an="${gestoppt}">${wort}</button>`;
+  const wort = gestoppt ? 'Laden fortsetzen' : 'Laden pausieren';
+  return `<button type="button" class="ev-stopp${gestoppt ? ' an' : ''}"
+    id="ev-stopp" data-an="${gestoppt}">${wort}</button>`;
 }
 
 /**
@@ -2012,7 +2227,7 @@ function reglerMarkup(wert, minA, maxA, dose, vorschau = false) {
     <div class="ev-regler${vorschau ? ' vorschau' : ''}">
       <div class="ev-regler-kopf">
         <span class="ev-regler-wert"><b id="ev-a-wert">${wert}</b> A</span>
-        <span class="ev-regler-kw" id="ev-kw-wert">${formatPower(wert * proA)}</span>
+        <span class="ev-regler-kw" id="ev-kw-wert">ca. ${formatPower(wert * proA)}</span>
       </div>
       <input type="range" id="ev-schieber" min="${minA}" max="${maxA}" step="1" value="${wert}"
              data-pro-a="${proA}" aria-label="Ladestrom in Ampere" />
@@ -2048,11 +2263,14 @@ function evLiveMarkup(ev) {
     <div class="detail-section">
       ${regelKopfMarkup(ev)}
       <div class="detail-grid">
-        ${tile('Ladeleistung', formatLadeleistung(ev), !charging, charging ? 'ok' : '')}
-        ${tile('Ladestrom', formatLadestrom(ev), !charging)}
+        ${tile('Wallbox · gemessene Leistung', formatPower(ev.wallboxPowerW), !charging, charging ? 'ok' : '')}
+        ${tile('Wallbox · gemessener Strom (Phase A)', Number.isFinite(ev.stromA) ? `${ev.stromA.toLocaleString('de-DE', { maximumFractionDigits: 1 })} A` : '—', !charging)}
+        ${tile('An der Wallbox eingestellt', formatLadestrom(ev), true)}
+        ${tile('Geprüfte Ladeleistung', formatLadeleistung(ev), true)}
         ${tile('Möglich wären', r ? formatPower(Math.max(0, r.verfuegbarW)) : '—', !r)}
         ${tile('Netz', netzW >= 0 ? `${formatPower(netzW)} Bezug` : `${formatPower(-netzW)} Einspeisung`, true, netzW > 100 ? 'bad' : 'ok')}
       </div>
+      <p class="ev-hinweis">Tuya-Geräterückmeldung: ${esc(ev.ageLabel ?? 'keine Daten')}${ev.measuredAt ? ` · ${esc(formatClock(ev.measuredAt))}` : ''} · Qualität: ${esc(ev.quality ?? 'unbekannt')}. Neue Messwerte erscheinen automatisch; das Fahrzeug kann weniger als den Sollwert aufnehmen.</p>
       ${herkunftMarkup(ev)}
       ${betriebsartMarkup(ev)}
       ${ev.faultText ? `<p class="card-more" style="color:var(--danger)">${esc(ev.faultText)}</p>` : ''}
@@ -2246,17 +2464,23 @@ const EV_RANGES = [
 
 function evStatsMarkup() {
   const chips = EV_RANGES
-    .map(([key, label]) => `<button class="vt-btn ${evStatsRange === key ? 'active' : ''}" type="button" data-range="${key}">${label}</button>`)
+    .map(([key, label]) => `<button class="vt-btn ${evStatsRange === key ? 'active' : ''}" type="button" role="tab" aria-selected="${evStatsRange === key}" data-range="${key}">${label}</button>`)
     .join('');
   const s = evStats;
+  // Bei einem Fehler bleiben die zuletzt bestätigten Zahlen stehen, mit Hinweis.
+  const fehler = evStatsFehler
+    ? `<p class="notice" role="alert">${esc(evStatsFehler)} <button type="button" class="btn-schlicht" id="ev-stats-wiederholen">Erneut laden</button></p>`
+    : '';
   const body = s === null
-    ? `<p class="session-empty">Wird geladen …</p>`
-    : `<div class="detail-grid">
+    ? (fehler || `<p class="session-empty">Wird geladen …</p>`)
+    : `${fehler}${s.range !== evStatsRange ? '<p class="session-empty">Zeitraum wird geladen …</p>' : ''}
+       <div class="detail-grid">
          ${tile('Geladen', formatEnergy(s.energyWh))}
          ${tile('Ladevorgänge', String(s.sessionCount), true)}
          ${tile('Ladedauer', formatDuration(s.chargingSeconds), true)}
        </div>
        <div style="margin-top:0.9rem">${splitMarkup(s.split)}</div>
+       ${s.naeherungWh > 0 ? `<p class="card-more">${esc(formatEnergy(s.naeherungWh))} stammen aus älteren Ladevorgängen ohne Tagesaufteilung und sind ihrem Starttag zugerechnet (Näherung).</p>` : ''}
        ${statsChartMarkup(s.buckets)}`;
   return `
     <div class="detail-section">
@@ -2309,6 +2533,32 @@ function evHistoryMarkup() {
  * Bewusst ganz unten und eingeklappt: Im Alltag will man es nicht sehen. Wenn
  * das Auto aber nicht lädt, obwohl die Sonne scheint, steht hier die Antwort.
  */
+let evTechnikOffen = false;
+/**
+ * Was die Karte nicht mehr zeigt: Datenquelle, Gerätegrenze, Temperatur und
+ * Zählerstand. Nützlich zur Fehlersuche, für die tägliche Bedienung nicht.
+ */
+function evTechnikMarkup(ev) {
+  if (!ev?.configured) return '';
+  const r = ev.regelung;
+  const grenze = r?.maxA ? `${r.maxA} A${r.anschluss?.phasen === 1 && r.haushaltMaxA && r.haushaltMaxA < r.maxA ? ` (an der Haushaltsdose ${r.haushaltMaxA} A)` : ''}` : '—';
+  const zeile = (name, wert) => `<div class="breakdown-row"><span>${esc(name)}</span><b>${esc(wert)}</b></div>`;
+  return `
+    <div class="detail-section">
+      <details id="ev-technik" class="ev-technik"${evTechnikOffen ? ' open' : ''}>
+        <summary>Ladegerät</summary>
+        <div class="breakdown">
+          ${zeile('Datenquelle', `${SOURCE_LABEL[ev.source] ?? ev.source ?? 'Wallbox'} · ${ev.ageLabel ?? ''}`)}
+          ${zeile('Eingestellter Ladestrom', ev.maxCurrentA == null ? '—' : `${ev.maxCurrentA} A`)}
+          ${zeile('Gerätegrenze', grenze)}
+          ${zeile('Gemessene Leistung', formatLadeleistung(ev))}
+          ${zeile('Temperatur', ev.temperatureC == null ? '—' : `${ev.temperatureC} °C`)}
+          ${zeile('Zählerstand gesamt', ev.totalEnergyWh == null ? '—' : formatEnergy(ev.totalEnergyWh))}
+        </div>
+      </details>
+    </div>`;
+}
+
 function regelProtokollMarkup() {
   const r = evRegelung;
   if (!r || r.modus === 'aus') return '';
@@ -2347,24 +2597,77 @@ function regelProtokollMarkup() {
     </div>`;
 }
 
+// Erhalte DOM-Knoten beim Messwertwechsel: Fokus, Pointer-Capture und native
+// Eingaben dürfen nicht durch innerHTML verloren gehen.
+function aktualisiereDialogDom(ziel, vorlage) {
+  const schluessel = (knoten) => knoten.nodeType !== 1 ? knoten.nodeName
+    : `${knoten.tagName}:${knoten.id || knoten.getAttribute('data-art')
+      || knoten.getAttribute('data-session') || knoten.getAttribute('data-range')
+      || knoten.classList[0] || ''}`;
+  let alt = ziel.firstChild;
+  for (const neu of [...vorlage.childNodes]) {
+    if (alt && schluessel(alt) !== schluessel(neu)) {
+      let passend = alt.nextSibling;
+      while (passend && schluessel(passend) !== schluessel(neu)) passend = passend.nextSibling;
+      if (passend) {
+        while (alt !== passend) {
+          const weiter = alt.nextSibling;
+          alt.remove();
+          alt = weiter;
+        }
+      }
+    }
+    if (!alt || schluessel(alt) !== schluessel(neu)) {
+      const ersatz = neu.cloneNode(true);
+      ziel.insertBefore(ersatz, alt);
+      continue;
+    }
+    if (alt.nodeType === 1) {
+      for (const attribut of [...alt.attributes]) {
+        if (!neu.hasAttribute(attribut.name)) alt.removeAttribute(attribut.name);
+      }
+      for (const attribut of [...neu.attributes]) {
+        if (alt.getAttribute(attribut.name) !== attribut.value) alt.setAttribute(attribut.name, attribut.value);
+      }
+      // Der aktuelle Reglerwert gehört während der Bedienung dem Benutzer.
+      if (alt.tagName === 'INPUT' && document.activeElement !== alt) alt.value = neu.value;
+      aktualisiereDialogDom(alt, neu);
+    } else if (alt.nodeValue !== neu.nodeValue) alt.nodeValue = neu.nodeValue;
+    alt = alt.nextSibling;
+  }
+  while (alt) {
+    const weiter = alt.nextSibling;
+    alt.remove();
+    alt = weiter;
+  }
+}
+
+let evBedienungListener = null;
 function renderEvDetail() {
   const body = el('ev-detail-body');
   if (!body || el('ev-detail').hidden) return;
-  // Die Ansicht wird bei jedem Messwert neu aufgebaut. Ohne das hier springt
-  // sie beim Lesen alle zwei Sekunden nach oben.
+  // Auch bei neu eingefügten Meldungen bleibt die Leseposition erhalten.
   const scrollVorher = body.scrollTop;
   const ev = lastLive?.ev ?? { state: 'not-connected', configured: false };
   const currentOrLast = evSessions?.current ?? (evSessions?.sessions ?? [])[0] ?? null;
-  body.innerHTML =
+  const vorlage = document.createElement('template');
+  vorlage.innerHTML =
     evLiveMarkup(ev) +
     (evBefehlFehler ? `<p class="notice" role="alert">${esc(evBefehlFehler)}</p>` : '') +
-    (evBefehlLaeuft ? '<p role="status">Befehl wird übermittelt …</p>' : '') +
+    (evBefehlHinweis ? `<p class="notice" role="status">${esc(evBefehlHinweis)}</p>` : '') +
+    (evBefehle.laeuft ? '<p class="notice" role="status">Wird übernommen …</p>' : '') +
     (currentOrLast
       ? sessionMarkup(currentOrLast, evSessions?.current ? 'Laufender Ladevorgang' : 'Letzter Ladevorgang')
       : '') +
     evStatsMarkup() +
     evHistoryMarkup() +
-    regelProtokollMarkup();
+    regelProtokollMarkup() +
+    evTechnikMarkup(ev);
+  aktualisiereDialogDom(body, vorlage.content);
+  evBedienungListener?.abort();
+  evBedienungListener = new AbortController();
+  const signal = evBedienungListener.signal;
+  const binde = (knoten, typ, handler) => knoten.addEventListener(typ, handler, { signal });
 
   // Das Protokoll alle 15 s nachladen. Der Live-Strom aktualisiert die Ansicht
   // im Sekundentakt — das Protokoll so oft zu holen wäre sinnlose Last.
@@ -2374,59 +2677,37 @@ function renderEvDetail() {
 
   if (scrollVorher > 0) body.scrollTop = scrollVorher;
 
+  const technik = body.querySelector('#ev-technik');
+  if (technik) binde(technik, 'toggle', () => { evTechnikOffen = technik.open; });
+
   // Aufgeklappt bleibt aufgeklappt, auch über den nächsten Messwert hinaus.
   const regelDetails = body.querySelector('#regel-details');
   if (regelDetails) {
-    regelDetails.addEventListener('toggle', () => {
+    binde(regelDetails, 'toggle', () => {
       evProtokollOffen = regelDetails.open;
     });
   }
 
-  // Betriebsart umschalten
+  // Lademodus wählen — direkt, ohne Rückfrage. Der Handbetrieb übernimmt den
+  // zuletzt gewählten Strom; ändern lässt er sich danach am Regler.
   body.querySelectorAll('.ev-art').forEach((knopf) => {
-    knopf.addEventListener('click', () => {
+    binde(knopf, 'click', () => {
       const art = knopf.getAttribute('data-art');
-      const jetzt = evRegelung?.betriebsart ?? 'intelligent';
+      const jetzt = lastLive?.ev?.regelung?.betriebsart ?? null;
       if (art === jetzt) return;
-      if (art === 'manuell') {
-        // In den Handbetrieb nur über die Rückfrage — dort wird Netzstrom
-        // gekauft, und das soll niemand mit einem Fingertipp auslösen.
-        evNachfrage = true;
-        renderEvDetail();
-        return;
-      }
-      evNachfrage = false;
-      void sendeBetriebsart('intelligent', null);
+      void sendeBetriebsart(art, art === 'manuell' ? evSchieberA : null);
     });
   });
 
-  const wisch = body.querySelector('#ev-wisch');
-  if (wisch) verdrahteWisch(wisch);
+
 
   const stopp = body.querySelector('#ev-stopp');
   if (stopp) {
-    stopp.addEventListener('click', () => {
+    binde(stopp, 'click', () => {
       void sendeStopp(stopp.getAttribute('data-an') !== 'true');
     });
   }
 
-
-  const bestaetigen = body.querySelector('#ev-bestaetigen');
-  if (bestaetigen) {
-    bestaetigen.addEventListener('click', () => {
-      evNachfrage = false;
-      // Der Wert vom Regler gilt sofort mit — sonst müsste man erst
-      // umschalten und dann noch einmal schieben.
-      void sendeBetriebsart('manuell', evSchieberA);
-    });
-  }
-  const abbrechen = body.querySelector('#ev-abbrechen');
-  if (abbrechen) {
-    abbrechen.addEventListener('click', () => {
-      evNachfrage = false;
-      renderEvDetail();
-    });
-  }
 
   // Schieberegler für den Ladestrom
   const schieber = body.querySelector('#ev-schieber');
@@ -2434,48 +2715,61 @@ function renderEvDetail() {
     // Beim Ziehen nur die Anzeige mitführen. Jeden Zwischenwert an die Wallbox
     // zu schicken hiesse: ein Dutzend Tuya-Befehle für eine Bewegung, und das
     // Fahrzeug käme dem Sollwert ohnehin nicht hinterher.
-    schieber.addEventListener('input', () => {
+    binde(schieber, 'input', () => {
       const a = Number(schieber.value);
       evSchieberA = a;
+      evBefehlHinweis = '';
       const proA = Number(schieber.getAttribute('data-pro-a')) || 693;
       const wert = body.querySelector('#ev-a-wert');
       const kw = body.querySelector('#ev-kw-wert');
       if (wert) wert.textContent = String(a);
-      if (kw) kw.textContent = formatPower(a * proA);
+      if (kw) kw.textContent = `ca. ${formatPower(a * proA)}`;
       body.querySelectorAll('.ev-stufe').forEach((st, i) => {
         st.classList.toggle('aktiv', i === a - Number(schieber.min));
       });
     });
-    // Erst beim Loslassen wird gestellt.
-    bindeLadestromUebernahme(schieber, () => evNachfrage,
-      (ampere) => sendeBetriebsart('manuell', ampere));
+    // Auch Loslassen und Pfeiltasten sind nur Vorschau. Nur der Button sendet.
+    const bestaetigung = body.querySelector('#ev-ampere-bestaetigen');
+    if (bestaetigung) bindeLadestromBestaetigung(bestaetigung, schieber,
+      (ampere) => sendeBetriebsart('manuell', ampere), { signal });
   }
 
   // Zeitraum-Umschalter
   body.querySelectorAll('#ev-range .vt-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    binde(btn, 'click', () => {
       evStatsRange = btn.getAttribute('data-range');
       loadEvStats().then(renderEvDetail);
     });
   });
+  const statsNochmal = body.querySelector('#ev-stats-wiederholen');
+  if (statsNochmal) binde(statsNochmal, 'click', () => { loadEvStats().then(renderEvDetail); });
   // Ladevorgang auf-/zuklappen
   body.querySelectorAll('.session-row[data-session]').forEach((row) => {
-    row.addEventListener('click', () => {
+    binde(row, 'click', () => {
       const id = row.getAttribute('data-session');
       evOpenSessionId = evOpenSessionId === id ? null : id;
       renderEvDetail();
     });
   });
-  body.querySelectorAll('.ev-art, #ev-schieber, #ev-stopp, #ev-bestaetigen').forEach((x) => {
-    x.disabled = evBefehlLaeuft;
+  // Während ein Befehl unterwegs ist, ruhen Moduswahl und Regler. Die
+  // Pause-Taste ausdrücklich NICHT: Ein Stopp muss jederzeit durchgehen.
+  body.querySelectorAll('.ev-art, #ev-schieber, #ev-ampere-bestaetigen').forEach((x) => {
+    x.disabled = evBefehle.laeuft;
   });
-  if (wisch) wisch.setAttribute('aria-disabled', String(evBefehlLaeuft));
 }
 
+const evSitzungenAbfrage = letzteAnfrage();
+const evStatsAbfrage = letzteAnfrage();
+const evRegelungAbfrage = letzteAnfrage();
+let evStatsFehler = '';
+
+/** Ladevorgänge. Bei einem Fehler bleibt die zuletzt bestätigte Liste stehen. */
 async function loadEvSessions() {
   try {
-    evSessions = await (await fetch('/api/ev/sessions?limit=50')).json();
-  } catch (err) { console.error(err); evSessions = { current: null, sessions: [] }; }
+    evSessions = await evSitzungenAbfrage('/api/ev/sessions?limit=50');
+  } catch (err) {
+    if (!istUeberholt(err)) console.warn(err);
+  }
 }
 /**
  * Betriebsart an den Server schicken und die Ansicht sofort nachziehen.
@@ -2499,101 +2793,36 @@ async function loadEvSessions() {
  * Zähler und braucht, bis das Fahrzeug wirklich folgt. Das ist richtig so: An
  * dieser Stelle soll die App nichts behaupten, was noch nicht fliesst.
  */
-/**
- * Den Wischschalter zum Leben erwecken.
- *
- * Zeigergesteuert über Pointer-Events, damit Maus, Finger und Stift denselben
- * Weg nehmen — mit Touch-Events allein wäre der Schalter am Schreibtisch tot,
- * mit Maus-Events allein am Telefon.
- *
- * `setPointerCapture` ist kein Beiwerk: Ohne es verliert das Element den
- * Zeiger, sobald der Finger die Schiene nach oben verlässt, und der Griff
- * bliebe auf halbem Weg stehen. Mit Capture folgt er bis zum Loslassen.
- *
- * Die Tastatur kommt auch hin — Leertaste oder Eingabe lösen aus. Ein Wisch,
- * den nur Zeigegeräte bedienen können, wäre eine Sperre und keine Sicherung.
- */
-function verdrahteWisch(el) {
-  const griff = el.querySelector('.ev-wisch-griff');
-  if (!griff) return;
-  // Ab hier gilt es als gewollt. Neunzig Prozent, damit man nicht bis an den
-  // Anschlag muss, aber auch nicht mit einem Zucken auslöst.
-  const SCHWELLE = 0.9;
-  let zeiger = null;
-  let startX = 0;
-  let weg = 0;
-
-  const strecke = () => Math.max(1, el.clientWidth - griff.offsetWidth - 8);
-  const setze = (px) => {
-    weg = Math.min(strecke(), Math.max(0, px));
-    griff.style.transform = `translateX(${weg}px)`;
-    el.style.setProperty('--wisch', (weg / strecke()).toFixed(3));
-  };
-  const zurueck = () => {
-    el.classList.remove('zieht');
-    griff.style.transform = '';
-    el.style.removeProperty('--wisch');
-    weg = 0;
-  };
-
-  el.addEventListener('pointerdown', (e) => {
-    if (el.getAttribute('aria-disabled') === 'true') return;
-    zeiger = e.pointerId;
-    startX = e.clientX;
-    el.setPointerCapture(zeiger);
-    el.classList.add('zieht');
-  });
-
-  el.addEventListener('pointermove', (e) => {
-    if (zeiger !== e.pointerId) return;
-    setze(e.clientX - startX);
-  });
-
-  const loslassen = (e) => {
-    if (zeiger !== e.pointerId) return;
-    const geschafft = weg / strecke() >= SCHWELLE;
-    try { el.releasePointerCapture(zeiger); } catch { /* Zeiger schon weg */ }
-    zeiger = null;
-    if (geschafft) {
-      // Auf Anschlag rasten, dann senden: Die Bewegung soll fertig aussehen,
-      // bevor sich die Ansicht ändert.
-      setze(strecke());
-      el.setAttribute('aria-disabled', 'true');
-      void sendeStopp(!el.classList.contains('an'));
-    } else {
-      zurueck();
-    }
-  };
-  el.addEventListener('pointerup', loslassen);
-  el.addEventListener('pointercancel', loslassen);
-
-  el.addEventListener('keydown', (e) => {
-    if (e.key !== ' ' && e.key !== 'Enter') return;
-    e.preventDefault();
-    void sendeStopp(!el.classList.contains('an'));
-  });
-}
-
 async function sendeUndZeige(pfad, koerper) {
-  if (evBefehlLaeuft) return;
-  evBefehlLaeuft = true;
+  // Ein Stopp darf auch während eines laufenden Befehls hinaus; nur die Antwort
+  // auf den jeweils neuesten Befehl ersetzt danach die Anzeige.
+  const nummer = evBefehle.beginne();
   evBefehlFehler = '';
+  evBefehlHinweis = '';
   renderEvDetail();
+  let kurz = null;
+  let fehler = null;
   try {
-    const kurz = await sendeLadebefehl(pfad, koerper);
-    if (kurz && typeof kurz === 'object' && lastLive?.ev) {
+    kurz = await sendeLadebefehl(pfad, koerper);
+  } catch (err) {
+    fehler = err;
+  }
+  const neueste = evBefehle.beende(nummer);
+  if (neueste) {
+    if (fehler) {
+      // Die Anzeige behält den zuletzt bestätigten Zustand.
+      evBefehlFehler = fehler instanceof Error ? fehler.message : 'Befehl konnte nicht bestätigt werden.';
+    } else if (kurz && lastLive?.ev) {
       lastLive.ev.regelung = kurz;
       evRegelung = { ...(evRegelung ?? {}), ...kurz };
+      if (koerper.art === 'manuell') {
+        evSchieberA = null;
+        evBefehlHinweis = `Sollwert ${kurz.manuellA ?? koerper.ampere} A gespeichert. Ob Strom fliesst, zeigt die nächste Messung.`;
+      }
+      void loadEvRegelung();
     }
-    // Das Protokoll im Hintergrund nachziehen, ohne die Anzeige aufzuhalten.
-    void loadEvRegelung();
-  } catch (err) {
-    console.error(err);
-    evBefehlFehler = err instanceof Error ? err.message : 'Befehl konnte nicht bestätigt werden.';
-  } finally {
-    evBefehlLaeuft = false;
-    renderEvDetail();
   }
+  renderEvDetail();
 }
 
 function sendeBetriebsart(art, ampere) {
@@ -2606,31 +2835,64 @@ function sendeStopp(an) {
 }
 
 async function loadEvRegelung() {
+  evRegelungGeholtAt = Date.now();
   try {
-    evRegelung = await (await fetch('/api/ev/regelung')).json();
-    evRegelungGeholtAt = Date.now();
-  } catch (err) { console.error(err); }
+    evRegelung = await evRegelungAbfrage('/api/ev/regelung');
+  } catch (err) {
+    if (!istUeberholt(err)) console.warn(err);
+  }
 }
+/** Statistik des gewählten Zeitraums — nur die neueste Auswahl zählt. */
 async function loadEvStats() {
   try {
-    evStats = await (await fetch(`/api/ev/stats?range=${encodeURIComponent(evStatsRange)}&date=${todayStr()}`)).json();
-  } catch (err) { console.error(err); evStats = null; }
+    evStats = await evStatsAbfrage(`/api/ev/stats?range=${encodeURIComponent(evStatsRange)}&date=${todayStr()}`);
+    evStatsFehler = '';
+  } catch (err) {
+    if (istUeberholt(err)) return;
+    evStatsFehler = err instanceof ApiFehler ? err.message : 'Statistik konnte nicht geladen werden.';
+  }
+}
+
+/**
+ * Laufende Session und Statistik nachführen, solange die Ansicht offen ist.
+ *
+ * Nicht pro Messwert: höchstens alle 30 Sekunden, und nie zwei Läufe
+ * gleichzeitig. Die Live-Werte oben kommen ohnehin über den Ereignisstrom.
+ */
+let evNachfuehrenTimer = null;
+let evNachfuehrenLaeuft = false;
+function starteEvNachfuehren() {
+  if (evNachfuehrenTimer !== null) return;
+  evNachfuehrenTimer = setInterval(async () => {
+    if (el('ev-detail').hidden) {
+      clearInterval(evNachfuehrenTimer);
+      evNachfuehrenTimer = null;
+      return;
+    }
+    if (evNachfuehrenLaeuft) return;
+    evNachfuehrenLaeuft = true;
+    try {
+      await Promise.all([loadEvSessions(), loadEvStats()]);
+      renderEvDetail();
+    } finally {
+      evNachfuehrenLaeuft = false;
+    }
+  }, 30_000);
 }
 
 function openEvDetail() {
-  el('ev-detail').hidden = false;
-  document.body.style.overflow = 'hidden';
+  oeffneDialog('ev-detail');
   renderEvDetail();
   Promise.all([loadEvSessions(), loadEvStats(), loadEvRegelung()]).then(renderEvDetail);
+  starteEvNachfuehren();
 }
 function closeEvDetail() {
-  el('ev-detail').hidden = true;
-  document.body.style.overflow = '';
+  schliesseDialog('ev-detail');
 }
 
 /** Verbindet die Datenquelle neu — startet KEINEN Ladevorgang. */
 async function evConnect(btn) {
-  if (btn) { btn.disabled = true; btn.textContent = 'Verbinde …'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Frage ab …'; }
   try {
     await fetch('/api/devices/ev-charger/reconnect', { method: 'POST' });
   } catch (err) { console.error('Verbinden fehlgeschlagen', err); }
@@ -2697,6 +2959,13 @@ function setupTabbar() {
  * über die bestehende Schnittstelle gespeichert werden.
  */
 let tariffCache = null;
+/** Eingaben im Tarifformular — bleiben bei einem Fehler stehen. */
+let tarifEntwurf = {};
+let tarifMeldung = '';
+let tarifSpeichert = false;
+let tarifRevision = 0;
+const tarifAbfrage = letzteAnfrage();
+const kontoAbfrage = letzteAnfrage();
 
 /**
  * Wer gerade angemeldet ist — aus /api/ich.
@@ -2727,6 +2996,8 @@ function settingRow(title, hint, name, options, activeValue) {
 function renderSettings() {
   const body = el('settings-body');
   if (!body) return;
+  const fokusId = body.contains(document.activeElement) ? document.activeElement.id : null;
+  const scroll = body.scrollTop;
   const t = tariffCache;
   body.innerHTML = `
     <div class="detail-section">
@@ -2745,23 +3016,44 @@ function renderSettings() {
 
     <div class="detail-section">
       <h3>Stromtarife</h3>
-      <p class="setting-hint" style="margin:0 0 0.7rem">Grundlage für die Kosten- und Ersparnisanzeige.</p>
+      <p class="setting-hint" style="margin:0 0 0.7rem">
+        Gilt für alle Geräte. Jeder Tag wird mit dem Tarif gerechnet, der an ihm galt —
+        eine Änderung verändert vergangene Kosten nicht.
+        ${t?.grundlage === 'angenommen' ? ' Für heute ist noch kein Tarif gespeichert; die Vorgabe wird angenommen.' : ''}
+      </p>
+      ${!t ? '<p class="setting-hint">Tarifdaten werden benötigt, bevor Änderungen möglich sind.</p>' : t.darfAendern !== true ? `
+      <p class="setting-hint">Aktuell: ${esc(String(t.tarif?.importPricePerKWh ?? '—'))} €/kWh Bezug,
+        ${esc(String(t.tarif?.exportPricePerKWh ?? '—'))} €/kWh Einspeisung. Ändern kann nur ein Administrator.</p>` : `
       <div class="detail-grid">
         <label class="detail-tile">
           <span class="dt-label">Bezugspreis (€/kWh)</span>
-          <input class="setting-input" id="tariff-import" type="number" step="0.001" min="0"
-                 inputmode="decimal" value="${t ? t.importPricePerKWh : ''}" />
+          <input class="setting-input" id="tariff-import" type="number" step="0.001"
+                 min="${TARIF_GRENZEN.importPricePerKWh.min}" max="${TARIF_GRENZEN.importPricePerKWh.max}"
+                 inputmode="decimal" value="${esc(tarifEntwurf.import ?? (t?.tarif ? String(t.tarif.importPricePerKWh) : ''))}" />
         </label>
         <label class="detail-tile">
           <span class="dt-label">Einspeisung (€/kWh)</span>
-          <input class="setting-input" id="tariff-export" type="number" step="0.001" min="0"
-                 inputmode="decimal" value="${t ? t.exportPricePerKWh : ''}" />
+          <input class="setting-input" id="tariff-export" type="number" step="0.001"
+                 min="${TARIF_GRENZEN.exportPricePerKWh.min}" max="${TARIF_GRENZEN.exportPricePerKWh.max}"
+                 inputmode="decimal" value="${esc(tarifEntwurf.export ?? (t?.tarif ? String(t.tarif.exportPricePerKWh) : ''))}" />
+        </label>
+        <label class="detail-tile">
+          <span class="dt-label">Gültig ab</span>
+          <input class="setting-input" id="tariff-ab" type="date"
+                 value="${esc(tarifEntwurf.ab ?? todayStr())}" />
         </label>
       </div>
       <div class="setting-actions">
-        <button class="btn-primary" id="tariff-save" type="button">Tarife speichern</button>
-        <span class="setting-hint" id="tariff-status"></span>
-      </div>
+        <button class="btn-primary" id="tariff-save" type="button" ${tarifSpeichert ? 'disabled' : ''}>${tarifSpeichert ? 'Wird gespeichert …' : 'Tarif speichern'}</button>
+      </div>`}
+      <p class="setting-hint" id="tariff-status" role="status">${esc(tarifMeldung)}</p>
+      ${!t ? '<button type="button" class="btn-schlicht" id="tariff-retry">Erneut laden</button>' : ''}
+      ${t?.verlauf?.length ? `
+      <details class="tarif-verlauf">
+        <summary>Tarifverlauf (${t.verlauf.length})</summary>
+        <ul>${[...t.verlauf].sort((a, b) => String(b.gueltigAb ?? '').localeCompare(String(a.gueltigAb ?? ''))).map((e) =>
+          `<li>${e.gueltigAb ? `ab ${esc(e.gueltigAb)}` : `bekannt seit ${esc(e.bekanntSeit)}`}: ${esc(String(e.importPricePerKWh))} € Bezug, ${esc(String(e.exportPricePerKWh))} € Einspeisung</li>`).join('')}</ul>
+      </details>` : ''}
     </div>
 
     ${ichCache?.enabled ? `
@@ -2786,8 +3078,9 @@ function renderSettings() {
     <div class="detail-section">
       <h3>Über</h3>
       <p class="setting-hint" style="margin:0">
-        SmartHome · Daten lokal aus Fronius und Victron, Ladegerät über Tuya (nur lesend).
-        Die Einstellungen gelten nur auf diesem Gerät.
+        SmartHome · Daten lokal aus Fronius und Victron, Wallbox über die Tuya-Cloud
+        (bei aktiver Regelung wird dort auch der Ladestrom gestellt). Die Darstellung
+        oben gilt nur in diesem Browser; Tarife und Lademodus gelten für alle Geräte.
       </p>
     </div>`;
 
@@ -2814,58 +3107,112 @@ function renderSettings() {
     });
   });
 
-  // Tarife speichern
+  // Tarif speichern — dieselbe Prüfung wie auf dem Server, Erfolg erst nach
+  // bestätigtem Speichern, Eingaben bleiben bei einem Fehler stehen.
   const save = el('tariff-save');
+  el('tariff-retry')?.addEventListener('click', ladeEinstellungen);
   if (save) {
+    const merke = () => {
+      tarifEntwurf = {
+        import: el('tariff-import').value,
+        export: el('tariff-export').value,
+        ab: el('tariff-ab').value,
+      };
+    };
+    ['tariff-import', 'tariff-export', 'tariff-ab'].forEach((id) => {
+      el(id).disabled = tarifSpeichert;
+      el(id).addEventListener('input', merke);
+    });
     save.addEventListener('click', async () => {
-      const imp = Number(el('tariff-import').value);
-      const exp = Number(el('tariff-export').value);
+      if (tarifSpeichert) return;
+      merke();
       const status = el('tariff-status');
-      if (!Number.isFinite(imp) || !Number.isFinite(exp) || imp < 0 || exp < 0) {
-        status.textContent = 'Bitte gültige Preise eingeben.';
+      const zahl = (s) => (s === '' ? undefined : Number(String(s).replace(',', '.')));
+      const eingabe = {
+        importPricePerKWh: zahl(tarifEntwurf.import),
+        exportPricePerKWh: zahl(tarifEntwurf.export),
+        ...(tarifEntwurf.ab ? { gueltigAb: tarifEntwurf.ab } : {}),
+      };
+      const geprueft = pruefeTarif(eingabe);
+      if (!geprueft.ok) {
+        tarifMeldung = geprueft.fehler;
+        status.textContent = tarifMeldung;
         return;
       }
-      save.disabled = true;
-      status.textContent = 'Wird gespeichert …';
+      tarifSpeichert = true;
+      tarifRevision++;
+      tarifMeldung = 'Wird gespeichert …';
+      renderSettings();
       try {
-        const resp = await fetch('/api/tariff', {
+        tariffCache = await holeJson('/api/tariff', {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ importPricePerKWh: imp, exportPricePerKWh: exp }),
+          body: JSON.stringify(geprueft.tarif),
         });
-        tariffCache = await resp.json();
-        status.textContent = 'Gespeichert.';
-        // Kosten mit dem neuen Tarif neu berechnen lassen.
+        tarifEntwurf = {};
+        tarifMeldung = `Gespeichert, gültig ab ${geprueft.tarif.gueltigAb ?? todayStr()}.`;
+        // Kosten mit dem gültigen Tarif neu berechnen lassen.
         await loadDay(selectedDate);
       } catch (err) {
-        console.error(err);
-        status.textContent = 'Speichern fehlgeschlagen.';
+        // Bisheriger bestätigter Tarif gilt weiter; die Eingaben bleiben stehen.
+        tarifMeldung = err instanceof ApiFehler ? err.message : 'Speichern fehlgeschlagen.';
       } finally {
-        save.disabled = false;
+        tarifSpeichert = false;
+        if (!el('settings').hidden) renderSettings();
       }
     });
   }
+  body.scrollTop = scroll;
+  if (fokusId && el(fokusId) && !el(fokusId).disabled) el(fokusId).focus({ preventScroll: true });
 }
 
 function openSettings() {
-  el('settings').hidden = false;
-  document.body.style.overflow = 'hidden';
+  oeffneDialog('settings');
   renderSettings();
-  // Tarife nachladen und Anzeige auffrischen.
-  fetch('/api/tariff')
-    .then((r) => r.json())
-    .then((t) => { tariffCache = t; renderSettings(); })
-    .catch(() => undefined);
+  if (!tarifSpeichert) void ladeEinstellungen();
+}
+async function ladeEinstellungen() {
+  const revision = tarifRevision;
+  await Promise.all([
+    tarifAbfrage('/api/tariff')
+      .then((t) => {
+        if (!tarifSpeichert && revision === tarifRevision) {
+          tariffCache = t;
+          tarifMeldung = '';
+        }
+      })
+      .catch((err) => { if (!istUeberholt(err) && revision === tarifRevision) tarifMeldung = err.message ?? 'Tarif nicht abrufbar.'; }),
   // Und wer gerade angemeldet ist — davon hängt ab, ob der Abmelden-Knopf und
   // der Zugang zur Verwaltung erscheinen.
-  fetch('/api/ich')
-    .then((r) => r.json())
-    .then((i) => { ichCache = i; renderSettings(); })
-    .catch(() => undefined);
+    kontoAbfrage('/api/ich').then((i) => { ichCache = i; }).catch(() => undefined),
+  ]);
+  if (!el('settings').hidden && revision === tarifRevision) renderSettings();
 }
 function closeSettings() {
-  el('settings').hidden = true;
+  schliesseDialog('settings');
+}
+
+let dialogAusloeser = null;
+let offenerDialog = null;
+let hintergrundZustand = [];
+function oeffneDialog(id) {
+  if (offenerDialog) return;
+  dialogAusloeser = document.activeElement;
+  offenerDialog = el(id);
+  offenerDialog.hidden = false;
+  hintergrundZustand = [...document.body.children].filter((x) => x !== offenerDialog).map((x) => [x, x.inert]);
+  for (const [x] of hintergrundZustand) x.inert = true;
+  document.body.style.overflow = 'hidden';
+  offenerDialog.querySelector('.detail-head button')?.focus();
+}
+function schliesseDialog(id) {
+  if (offenerDialog !== el(id)) return;
+  offenerDialog.hidden = true;
+  offenerDialog = null;
+  for (const [x, inert] of hintergrundZustand) x.inert = inert;
+  hintergrundZustand = [];
   document.body.style.overflow = '';
+  if (dialogAusloeser?.isConnected) dialogAusloeser.focus({ preventScroll: true });
 }
 
 function setupSettings() {
@@ -2945,7 +3292,10 @@ function init() {
   el('view-toggle').querySelectorAll('.vt-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       chartView = btn.getAttribute('data-view');
-      el('view-toggle').querySelectorAll('.vt-btn').forEach((b) => b.classList.toggle('active', b === btn));
+      el('view-toggle').querySelectorAll('.vt-btn').forEach((b) => {
+        b.classList.toggle('active', b === btn);
+        b.setAttribute('aria-selected', String(b === btn));
+      });
       hoverIndex = null;
       buildLegend(); renderChart();
     });
@@ -2954,6 +3304,18 @@ function init() {
   setupTabbar();
   applyFlowZoom();
   setupSettings();
+  document.querySelectorAll('[data-ev-open]').forEach((knopf) => knopf.addEventListener('click', openEvDetail));
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab' || !offenerDialog) return;
+    const ziele = [...offenerDialog.querySelectorAll('button, input, select, textarea, a[href], summary, [tabindex]')]
+      .filter((x) => !x.disabled && x.tabIndex >= 0 && x.getClientRects().length > 0);
+    const erstes = ziele[0], letztes = ziele.at(-1);
+    if (!erstes) return;
+    if (!offenerDialog.contains(document.activeElement) || (e.shiftKey ? document.activeElement === erstes : document.activeElement === letztes)) {
+      e.preventDefault();
+      (e.shiftKey ? letztes : erstes).focus();
+    }
+  });
   applyFlowView();
 
   // Detailansicht schliessen: Knopf, Klick auf den Hintergrund, Escape.
@@ -2986,8 +3348,56 @@ function init() {
   // SW-Unterstützung) sind unkritisch — die App funktioniert auch ohne.
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker.register('/sw.js').then(beobachteUpdates).catch(() => {});
     });
   }
+}
+
+/**
+ * Neue Fassung nach einem Deploy: ein Hinweis mit „Neu laden“, nie ein
+ * Neuladen von selbst — mitten im Verschieben des Ladestrom-Reglers wäre das
+ * eine verlorene Eingabe. Der neue Service Worker wartet, bis hier getippt wird.
+ */
+function beobachteUpdates(reg) {
+  const wartet = () => {
+    if (reg.waiting && navigator.serviceWorker.controller) zeigeUpdateHinweis(reg);
+  };
+  wartet();
+  reg.addEventListener('updatefound', () => {
+    const neu = reg.installing;
+    neu?.addEventListener('statechange', () => { if (neu.state === 'installed') wartet(); });
+  });
+  // Eine offen gelassene App erfährt sonst erst beim nächsten Start davon.
+  setInterval(() => { reg.update().catch(() => {}); }, 30 * 60 * 1000);
+
+  let angefordert = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (angefordert) window.location.reload();
+  });
+  document.addEventListener('click', (e) => {
+    const knopf = e.target instanceof Element ? e.target.closest('[data-update]') : null;
+    if (!knopf) return;
+    if (knopf.dataset.update === 'spaeter') {
+      document.getElementById('update-hinweis')?.remove();
+      return;
+    }
+    angefordert = true;
+    knopf.disabled = true;
+    // Hat der Worker schon übernommen (anderes Fenster), direkt neu laden.
+    if (reg.waiting) reg.waiting.postMessage('neue-version-uebernehmen');
+    else window.location.reload();
+  });
+}
+
+function zeigeUpdateHinweis() {
+  if (document.getElementById('update-hinweis')) return;
+  const el = document.createElement('div');
+  el.id = 'update-hinweis';
+  el.className = 'update-hinweis';
+  el.setAttribute('role', 'status');
+  el.innerHTML = '<span>Eine neue Version der App ist bereit.</span>'
+    + '<button type="button" class="btn-primary" data-update="laden">Neu laden</button>'
+    + '<button type="button" class="update-spaeter" data-update="spaeter">Später</button>';
+  document.body.appendChild(el);
 }
 init();

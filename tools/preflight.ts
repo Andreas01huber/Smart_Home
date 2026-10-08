@@ -14,7 +14,7 @@ import { FroniusLocalConnector, VictronModbusConnector } from '@energy/connector
 import { resolveSnapshot, checkEnergyBalance, formatAgeDe } from '@energy/core';
 import type { ConnectorReading } from '@energy/core';
 
-import { loadConfig } from '../apps/server/src/config.ts';
+import { geraetMitId, loadConfig } from '../apps/server/src/config.ts';
 
 const OK = '✅';
 const FAIL = '❌';
@@ -45,15 +45,15 @@ async function main(): Promise<void> {
   console.log('═'.repeat(64));
 
   // ── Fronius Symo (.121) ────────────────────────────────────────────
-  const symoCfg = config.sources.fronius;
-  const gen24Cfg = config.sources.froniusGen24;
-  const victronCfg = config.sources.victron;
+  const symoCfg = geraetMitId(config, 'fronius-local');
+  const gen24Cfg = geraetMitId(config, 'fronius-gen24');
+  const victronCfg = geraetMitId(config, 'victron-modbus');
 
   console.log('\n── Fronius ' + '─'.repeat(52));
 
   let symoReading: ConnectorReading | null = null;
   let symoRaw: FroniusRaw | null = null;
-  if (symoCfg?.enabled) {
+  if (symoCfg !== null) {
     symoRaw = await froniusRaw(symoCfg.host);
     const c = new FroniusLocalConnector({ host: symoCfg.host, connectorId: 'fronius-local' });
     symoReading = await c.read();
@@ -70,7 +70,7 @@ async function main(): Promise<void> {
   // ── Fronius GEN24 (.39) ─────────────────────────────────────────────
   let gen24Reading: ConnectorReading | null = null;
   let gen24Raw: FroniusRaw | null = null;
-  if (gen24Cfg?.enabled) {
+  if (gen24Cfg !== null) {
     gen24Raw = await froniusRaw(gen24Cfg.host);
     const c = new FroniusLocalConnector({
       host: gen24Cfg.host,
@@ -113,13 +113,13 @@ async function main(): Promise<void> {
   console.log('\n── Victron ' + '─'.repeat(52));
   let victronReading: ConnectorReading | null = null;
   let victronMeta: VictronMeta | null = null;
-  if (victronCfg?.enabled) {
+  if (victronCfg !== null) {
     victronMeta = await victronRaw(victronCfg.host);
     const c = new VictronModbusConnector({
       host: victronCfg.host,
       connectorId: 'victron-modbus',
       batteryDisplayName: 'Grosser Speicher',
-      usableCapacityWh: victronCfg.usableCapacityWh ?? null,
+      usableCapacityWh: victronCfg.speicher?.usableCapacityWh ?? null,
     });
     victronReading = await c.read();
     const diag = c.diagnostics();
